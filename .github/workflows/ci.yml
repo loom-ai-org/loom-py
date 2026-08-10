@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      # `submodules: recursive` is load-bearing: the engine IS a submodule, and without it the build
+      # fails at `add_subdirectory(vendor/loom.cpp)` with a directory that exists and is empty.
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ccache
+        run: sudo apt-get update && sudo apt-get install -y ccache
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'vendor/loom.cpp/CMakeLists.txt') }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'vendor/loom.cpp/CMakeLists.txt') }}-
+            ccache-${{ runner.os }}-
+
+      - name: Build and install
+        run: pip install -v ".[test,hub]"
+
+      # `cd` out of the source tree first, so the import under test is the INSTALLED package rather
+      # than the source directory that happens to be named `loom` -- which would pass without the
+      # extension having been built at all.
+      - name: Import the installed package
+        run: cd /tmp && python -c "import loom; print(loom.__version__)"
+
+      # tests/ci only. tests/gate needs a real exported GGUF, which is produced by loom-exporter from
+      # a checkpoint this runner does not have; it skips cleanly, and is run where the models are.
+      - name: Test
+        run: pytest tests/ci -q
