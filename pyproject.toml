@@ -25,7 +25,7 @@ hub = ["huggingface_hub>=0.24"]
 test = ["pytest>=7"]
 
 [project.urls]
-Homepage = "https://github.com/femelo/py-loom"
+Homepage = "https://github.com/femelo/loom-py"
 Engine = "https://github.com/femelo/loom.cpp"
 Exporter = "https://github.com/femelo/loom-exporter"
 
