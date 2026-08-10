@@ -5,7 +5,7 @@
   </picture>
 </p>
 
-<h1 align="center">py-loom</h1>
+<h1 align="center">loom-py</h1>
 
 <p align="center"><em>Python bindings for loom.cpp</em></p>
 
@@ -42,7 +42,7 @@ print(model.driver_source)  # what infer() will run, and what it accepts
 |---|---|
 | [**loom.cpp**](https://github.com/femelo/loom.cpp) | the engine, vendored here as a submodule |
 | [**loom-exporter**](https://github.com/femelo/loom-exporter) | produces the GGUFs this runs |
-| [**py-loom**](https://github.com/femelo/py-loom) | this one |
+| [**loom-py**](https://github.com/femelo/loom-py) | this one |
 
 ## Installing
 
@@ -54,8 +54,8 @@ pip install loom-py[hub]      # + from_pretrained()
 From a checkout — note `--recursive`, since the engine is a submodule:
 
 ```sh
-git clone --recursive https://github.com/femelo/py-loom
-cd py-loom && pip install -e .
+git clone --recursive https://github.com/femelo/loom-py
+cd loom-py && pip install -e .
 ```
 
 No runtime dependencies. Arrays cross the boundary as plain sequences of floats, so numpy is something
