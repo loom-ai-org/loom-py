@@ -7,14 +7,17 @@ model this library has never heard of works the day the exporter can produce it.
 
     import loom
 
-    model = loom.Model.from_pretrained("loom-ai-org/qwen3-asr-0.6b-loom")
-    print(model.architecture, model.topologies)
-    tokens = model.infer(waveform=audio, audio_samples=len(audio))
+    model = loom.Model.from_pretrained("loom-ai-org/lfm2-350m-loom")
+    print(model.generate("The capital of France is", max_new_tokens=14))
 
-`infer` is the driver's own entry point and its arguments are the driver's own: a driver takes numbers
-and arrays of numbers, and which ones it takes is a property of the model rather than of this package.
-`model.driver_source` prints the Lua, whose header comment documents its inputs -- that is the
-authority, because it is what will actually run.
+`generate` is text in and text out: it tokenizes with the vocabulary the GGUF embeds, runs the driver,
+and detokenizes the result. `infer` is the layer under it -- the driver's own entry point, whose
+arguments are the driver's own, because which inputs a model takes is a property of the model rather
+than of this package. `model.driver_source` prints the Lua, whose header comment documents them; that
+is the authority, since it is what will actually run.
+
+A model that embeds no vocabulary -- the TTS families take phoneme ids a phonemiser produces outside
+the engine -- has `model.tokenizer is None` and is driven through `infer` with ids directly.
 """
 from __future__ import annotations
 
@@ -25,7 +28,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from . import _loom
 from ._hub import download
 
-__all__ = ["Model", "LoomError", "download", "__version__"]
+__all__ = ["Model", "Tokenizer", "LoomError", "download", "__version__"]
 __version__ = "0.1.0"
 
 LoomError = _loom.LoomError
@@ -108,6 +111,97 @@ class Model:
             raise ValueError(f"unknown hparam kind {kind!r}; expected one of {sorted(readers)}")
         return readers[kind](key)
 
+    # -- text in, text out ---------------------------------------------------------------------
+
+    @property
+    def tokenizer(self) -> "Tokenizer | None":
+        """The vocabulary this GGUF embeds, or None if it carries none.
+
+        None is the honest answer for the TTS families: they consume phoneme ids that a phonemiser
+        produces outside the engine, so there is no vocabulary in the file to encode text with. See
+        :meth:`generate` for what that means in practice.
+        """
+        return Tokenizer(self._handle) if self._handle.has_tokenizer() else None
+
+    def tokenize(self, text: str) -> list[int]:
+        """Text to token ids, using the model's own embedded vocabulary."""
+        return list(self._handle.encode(text))
+
+    def detokenize(self, ids: Sequence[float | int]) -> str:
+        """Token ids back to text. Floats are accepted because floats are what `infer` returns."""
+        return self._handle.decode([int(i) for i in ids])
+
+    def generate(
+        self,
+        prompt: str,
+        max_new_tokens: int = 64,
+        eos_token: int | None = None,
+        **inputs: float | int | Sequence[float],
+    ) -> str:
+        """Text in, text out: tokenize, run the driver, detokenize.
+
+        The end-to-end door for any model whose driver consumes token ids and produces them -- a
+        causal LM completing a prompt, most obviously.
+
+        **`tokens` is a convention, not a guess.** Every driver the exporter generates accepts
+        `tokens` as an alias for its primary input, whatever the traced graph happens to call it
+        (`input_ids`, `token_ids`, `audio_signal`); `driver_components.GENERIC_PRIMARY_INPUT` is where
+        that is written down. So this passes `tokens`, and any model carrying a vocabulary works --
+        including ones this package has never heard of.
+
+        **Two driver shapes, told apart by what the driver returns rather than by knowing the model.**
+        A driver whose cross-step state is entirely the KV cache generates internally and hands back
+        the whole sequence; one whose state is not -- LFM2's ten ShortConv blocks, say -- exports a
+        single forward pass and returns ONE next token, leaving the loop to the host. A list means the
+        first, a number means the second, and the host loop below is what `loom_cli` does for exactly
+        that case: append the token, feed the grown prompt back.
+
+        `eos_token` defaults to the model's own `tokenizer.ggml.eos_token_id`, so the loop stops where
+        the checkpoint says it should. It only applies to the host-loop shape; a driver that generates
+        internally carries its own stop condition.
+
+        For a model whose input is audio rather than text -- an ASR model -- there is nothing to
+        encode, so use `model.detokenize(model.infer(waveform=...))`: the same two steps with the
+        first one absent.
+        """
+        return self.detokenize(self.generate_ids(
+            self.tokenize(prompt), max_new_tokens=max_new_tokens, eos_token=eos_token, **inputs))
+
+    def generate_ids(
+        self,
+        tokens: Sequence[int],
+        max_new_tokens: int = 64,
+        eos_token: int | None = None,
+        **inputs: float | int | Sequence[float],
+    ) -> list[int]:
+        """The token ids `generate` produces, without the encode/decode either side.
+
+        Separate because the ids are sometimes the answer -- comparing against a reference decode,
+        or feeding a model whose vocabulary this package cannot read.
+        """
+        if eos_token is None:
+            eos_token = self._handle.kv_i32("tokenizer.ggml.eos_token_id", -1)
+
+        first = self.infer(tokens=list(tokens), max_new_tokens=max_new_tokens,
+                           eos_token=eos_token, **inputs)
+        if isinstance(first, list):
+            return [int(i) for i in first]
+
+        # One token per call. The prompt grows and is re-fed, which is what a driver without
+        # cross-step state requires and what `loom_cli` does for this model shape.
+        running = [int(i) for i in tokens]
+        generated = [int(first)]
+        running.append(generated[0])
+        while len(generated) < max_new_tokens and generated[-1] != eos_token:
+            step = self.infer(tokens=running, max_new_tokens=max_new_tokens,
+                              eos_token=eos_token, **inputs)
+            token = int(step[-1]) if isinstance(step, list) else int(step)
+            generated.append(token)
+            running.append(token)
+        if generated and generated[-1] == eos_token:
+            generated.pop()
+        return generated
+
     # -- running it ----------------------------------------------------------------------------
 
     def infer(self, **inputs: float | int | Sequence[float]) -> list[float] | float:
@@ -128,8 +222,42 @@ class Model:
         return self._handle.call(fn_name, {k: _as_value(k, v) for k, v in inputs.items()})
 
     def __repr__(self) -> str:
+        vocab = self._handle.tokenizer_kind() or "none"
         return (f"<loom.Model {self.architecture!r} topologies={self.topologies} "
-                f"driver={'yes' if self.has_driver else 'no'} path={self._path.name!r}>")
+                f"driver={'yes' if self.has_driver else 'no'} tokenizer={vocab} "
+                f"path={self._path.name!r}>")
+
+
+class Tokenizer:
+    """The vocabulary a GGUF embeds, in whichever of the four families it uses.
+
+    Reached as `model.tokenizer`; `model.tokenize` / `model.detokenize` are the same two calls without
+    the intermediate object, which is what most code wants. This exists for the cases where the
+    vocabulary itself is the question -- checking `kind` before assuming a model is a text model, or
+    `size` against a checkpoint's config.
+    """
+
+    def __init__(self, handle: "_loom.Model"):
+        self._handle = handle
+
+    @property
+    def kind(self) -> str:
+        """`gpt2` (byte-level BPE), `bert` (WordPiece), `byt5` (byte-level), or a SentencePiece
+        family name such as `llama` or `t5` -- the GGUF's own `tokenizer.ggml.model`."""
+        return self._handle.tokenizer_kind()
+
+    @property
+    def size(self) -> int:
+        return self._handle.tokenizer_size()
+
+    def encode(self, text: str) -> list[int]:
+        return list(self._handle.encode(text))
+
+    def decode(self, ids: Sequence[float | int]) -> str:
+        return self._handle.decode([int(i) for i in ids])
+
+    def __repr__(self) -> str:
+        return f"<loom.Tokenizer {self.kind!r} size={self.size}>"
 
 
 def _as_value(name: str, value: Any) -> float | list[float]:

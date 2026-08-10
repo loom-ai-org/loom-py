@@ -82,3 +82,31 @@ def test_inference_runs_and_is_deterministic(model):
     # two identical calls must agree. This also exercises the second call against a cache and graph
     # buffers the first one left behind, which is where a stateful engine gets caught.
     assert model.infer(**inputs) == first
+
+
+def test_a_text_model_goes_from_a_string_to_a_string(model):
+    """The end-to-end claim, on whatever real model is configured.
+
+    Skips for a model with no embedded vocabulary -- which is not a gap in the model but a fact about
+    it: the TTS families take phoneme ids a phonemiser produces outside the engine, so there is no
+    text door to test.
+    """
+    if model.tokenizer is None:
+        pytest.skip(f"{model.architecture} embeds no vocabulary; its driver takes ids directly")
+
+    ids = model.tokenize("The capital of France is")
+    assert ids and all(isinstance(i, int) for i in ids)
+    # Round-tripping is not required to be the identity -- a tokenizer may normalise, and some add a
+    # BOS -- but the text must survive it.
+    assert "capital of France" in model.detokenize(ids)
+
+    out = model.generate("The capital of France is", max_new_tokens=8)
+    assert isinstance(out, str) and out.strip(), "generate produced nothing"
+
+
+def test_the_tokenizer_describes_itself(model):
+    if model.tokenizer is None:
+        pytest.skip(f"{model.architecture} embeds no vocabulary")
+    tokenizer = model.tokenizer
+    assert tokenizer.kind in {"gpt2", "bert", "byt5", "llama", "t5"}, tokenizer.kind
+    assert tokenizer.size > 0

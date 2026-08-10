@@ -12,8 +12,40 @@
 ```python
 import loom
 
-model = loom.Model.from_pretrained("loom-ai-org/matcha-tts-loom")
-audio = model.infer(tokens=[16, 40, 22, 30, 12, 3, 25, 19, 44, 11, 2], n_steps=4, seed=1234)
+model = loom.Model.from_pretrained("loom-ai-org/lfm2-350m-loom")
+print(model.generate("The capital of France is", max_new_tokens=14))
+# ':\nA) Paris\nB) Lyon\nC) Marseille\nD'
+```
+
+## Text in, text out
+
+`generate` tokenizes with the vocabulary the GGUF embeds, runs the driver, and detokenizes what comes
+back. The same steps are available separately when you want them:
+
+```python
+model.tokenize("The capital of France is")   # [1, 1098, 5706, 803, 4481, 856]
+model.detokenize([1, 1098, 5706])            # '<|startoftext|>The capital'
+model.tokenizer                               # <loom.Tokenizer 'gpt2' size=64400>
+```
+
+The four vocabulary families a loom GGUF can carry — byte-level BPE, SentencePiece, WordPiece and
+byte-level — are dispatched on the file's own `tokenizer.ggml.model`, so this is one call whichever
+one a model uses.
+
+For a speech model there is nothing to encode; detokenizing the driver's output is the other half of
+the same thing:
+
+```python
+transcript = model.detokenize(model.infer(waveform=audio, audio_samples=len(audio)))
+```
+
+**A TTS model has no `generate`, and that is a real limitation rather than a missing feature.** Matcha,
+VITS, Kokoro and StyleTTS2 consume *phoneme* ids that a phonemiser produces outside the engine, so
+their GGUFs embed no vocabulary at all — `model.tokenizer` is `None` for them and they take ids
+directly:
+
+```python
+audio = model.infer(tokens=[16, 40, 22, 30, 12, 3], n_steps=4, seed=1234)
 ```
 
 ## Why there is so little API

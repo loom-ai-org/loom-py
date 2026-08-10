@@ -17,7 +17,7 @@ import loom
 
 class TestPackage:
     def test_it_imports_and_exports_what_it_says(self):
-        assert loom.__all__ == ["Model", "LoomError", "download", "__version__"]
+        assert loom.__all__ == ["Model", "Tokenizer", "LoomError", "download", "__version__"]
         assert isinstance(loom.__version__, str)
 
     def test_loom_error_is_a_runtime_error(self):
@@ -133,3 +133,75 @@ class TestHubFileSelection:
             loom.download("some/repo")
         assert "pip install" in str(raised.value)
         assert "from_file" in str(raised.value)
+
+
+class _FakeHandle:
+    """A stand-in for the pybind11 `Model`, so the Python layer's decisions can be tested without a
+    GGUF. Only the methods `loom.Model` actually calls are here."""
+
+    def __init__(self, returns, vocab="gpt2", eos=-1):
+        self._returns = list(returns)      # what successive infer() calls hand back
+        self._vocab = vocab
+        self._eos = eos
+        self.calls = []                    # every inputs dict infer() was given
+
+    def has_tokenizer(self): return self._vocab is not None
+    def tokenizer_kind(self): return self._vocab or ""
+    def tokenizer_size(self): return 100
+    def encode(self, text): return [10, 11, 12]
+    def decode(self, ids): return "|".join(str(i) for i in ids)
+    def kv_i32(self, key, fallback): return self._eos
+    def call(self, fn_name, inputs):
+        self.calls.append(inputs)
+        return self._returns.pop(0) if self._returns else 0.0
+
+
+def _model(handle):
+    from pathlib import Path
+    return loom.Model(handle, Path("fake.gguf"))
+
+
+class TestTokenizer:
+    def test_a_model_without_a_vocabulary_reports_none_rather_than_a_broken_object(self):
+        """The TTS families embed no vocabulary -- they take phoneme ids from outside the engine --
+        so None is the honest answer, not an object whose every method raises."""
+        assert _model(_FakeHandle([], vocab=None)).tokenizer is None
+
+    def test_a_model_with_one_exposes_its_kind_and_size(self):
+        tok = _model(_FakeHandle([])).tokenizer
+        assert tok.kind == "gpt2" and tok.size == 100
+        assert "gpt2" in repr(tok)
+
+    def test_tokenize_and_detokenize_round_trip_through_the_model(self):
+        model = _model(_FakeHandle([]))
+        assert model.tokenize("hello") == [10, 11, 12]
+        # floats, because floats are what infer() returns
+        assert model.detokenize([1.0, 2.0]) == "1|2"
+
+
+class TestGenerateHandlesBothDriverShapes:
+    """A driver whose cross-step state is entirely the KV cache generates internally and returns a
+    sequence; one whose state is not (LFM2's ShortConv blocks) returns a single next token and leaves
+    the loop to the host. `generate_ids` tells them apart by what came back, not by knowing the model."""
+
+    def test_a_sequence_returning_driver_is_taken_at_its_word(self):
+        handle = _FakeHandle([[7.0, 8.0, 9.0]])
+        assert _model(handle).generate_ids([1, 2], max_new_tokens=64) == [7, 8, 9]
+        assert len(handle.calls) == 1, "a driver that generated internally must not be looped over"
+
+    def test_a_single_token_driver_is_looped_with_the_prompt_growing(self):
+        handle = _FakeHandle([4.0, 5.0, 6.0])
+        assert _model(handle).generate_ids([1, 2], max_new_tokens=3) == [4, 5, 6]
+        assert [c["tokens"] for c in handle.calls] == [[1, 2], [1, 2, 4], [1, 2, 4, 5]]
+
+    def test_the_host_loop_stops_at_max_new_tokens(self):
+        handle = _FakeHandle([1.0] * 10)
+        assert len(_model(handle).generate_ids([0], max_new_tokens=4)) == 4
+
+    def test_the_host_loop_stops_at_eos_and_does_not_emit_it(self):
+        handle = _FakeHandle([4.0, 5.0, 99.0, 6.0], eos=99)
+        assert _model(handle).generate_ids([1], max_new_tokens=10) == [4, 5]
+
+    def test_generate_encodes_and_decodes_around_it(self):
+        handle = _FakeHandle([[7.0, 8.0]])
+        assert _model(handle).generate("anything") == "7|8"
