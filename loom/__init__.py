@@ -1,4 +1,4 @@
-"""Python bindings for `loom.cpp <https://github.com/femelo/loom.cpp>`_.
+"""Python bindings for `loom.cpp <https://github.com/loom-ai-org/loom.cpp>`_.
 
 A loom model is a single GGUF that carries its own graph topologies and its own driver script
 alongside its weights, so this package needs no per-architecture code: loading a model registers
@@ -7,7 +7,7 @@ model this library has never heard of works the day the exporter can produce it.
 
     import loom
 
-    model = loom.Model.from_pretrained("femelo/qwen3-asr-0.6b-loom")
+    model = loom.Model.from_pretrained("loom-ai-org/qwen3-asr-0.6b-loom")
     print(model.architecture, model.topologies)
     tokens = model.infer(waveform=audio, audio_samples=len(audio))
 

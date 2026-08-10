@@ -12,7 +12,7 @@
 ```python
 import loom
 
-model = loom.Model.from_pretrained("femelo/matcha-tts-loom")
+model = loom.Model.from_pretrained("loom-ai-org/matcha-tts-loom")
 audio = model.infer(tokens=[16, 40, 22, 30, 12, 3, 25, 19, 44, 11, 2], n_steps=4, seed=1234)
 ```
 
@@ -22,7 +22,7 @@ A loom GGUF carries its own graph topologies and its own driver script alongside
 package contains **no per-architecture code at all**. Loading a model registers whatever topologies
 the file declares and attaches a KV cache to the ones that say they need it; running one calls the
 driver the file shipped with. A model this library has never heard of works the day
-[loom-exporter](https://github.com/femelo/loom-exporter) can produce it.
+[loom-exporter](https://github.com/loom-ai-org/loom-exporter) can produce it.
 
 That is also why `infer` takes `**kwargs`: its arguments are the *driver's* arguments, and which ones
 a model takes is a property of the model. `model.driver_source` prints the Lua that will run, whose
@@ -40,9 +40,9 @@ print(model.driver_source)  # what infer() will run, and what it accepts
 
 | | |
 |---|---|
-| [**loom.cpp**](https://github.com/femelo/loom.cpp) | the engine, vendored here as a submodule |
-| [**loom-exporter**](https://github.com/femelo/loom-exporter) | produces the GGUFs this runs |
-| [**loom-py**](https://github.com/femelo/loom-py) | this one |
+| [**loom.cpp**](https://github.com/loom-ai-org/loom.cpp) | the engine, vendored here as a submodule |
+| [**loom-exporter**](https://github.com/loom-ai-org/loom-exporter) | produces the GGUFs this runs |
+| [**loom-py**](https://github.com/loom-ai-org/loom-py) | this one |
 
 ## Installing
 
@@ -54,7 +54,7 @@ pip install loom-py[hub]      # + from_pretrained()
 From a checkout — note `--recursive`, since the engine is a submodule:
 
 ```sh
-git clone --recursive https://github.com/femelo/loom-py
+git clone --recursive https://github.com/loom-ai-org/loom-py
 cd loom-py && pip install -e .
 ```
 

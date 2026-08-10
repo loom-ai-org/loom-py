@@ -25,9 +25,9 @@ hub = ["huggingface_hub>=0.24"]
 test = ["pytest>=7"]
 
 [project.urls]
-Homepage = "https://github.com/femelo/loom-py"
-Engine = "https://github.com/femelo/loom.cpp"
-Exporter = "https://github.com/femelo/loom-exporter"
+Homepage = "https://github.com/loom-ai-org/loom-py"
+Engine = "https://github.com/loom-ai-org/loom.cpp"
+Exporter = "https://github.com/loom-ai-org/loom-exporter"
 
 [tool.scikit-build]
 # The engine is a submodule; a source distribution has to carry it or the wheel cannot be built from
