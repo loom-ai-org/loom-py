@@ -1,0 +1,3 @@
+[submodule "vendor/loom.cpp"]
+	path = vendor/loom.cpp
+	url = ../loom.cpp

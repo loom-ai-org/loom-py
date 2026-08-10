@@ -1,0 +1,44 @@
+[build-system]
+requires = ["scikit-build-core>=0.9", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "loom-py"
+version = "0.1.0"
+description = "Python bindings for loom.cpp, a data-driven ggml inference engine"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# No runtime dependencies, deliberately. Loading a GGUF and running its driver is the engine's job,
+# and the arrays crossing the boundary are plain sequences of floats -- so numpy is something a caller
+# may use rather than something this package makes them install.
+dependencies = []
+
+[project.optional-dependencies]
+hub = ["huggingface_hub>=0.24"]
+test = ["pytest>=7"]
+
+[project.urls]
+Homepage = "https://github.com/femelo/py-loom"
+Engine = "https://github.com/femelo/loom.cpp"
+Exporter = "https://github.com/femelo/loom-exporter"
+
+[tool.scikit-build]
+# The engine is a submodule; a source distribution has to carry it or the wheel cannot be built from
+# one. `sdist.include` is what puts it there.
+sdist.include = ["vendor/loom.cpp/**"]
+wheel.packages = ["loom"]
+cmake.version = ">=3.19"
+cmake.build-type = "Release"
+
+[tool.pytest.ini_options]
+testpaths = ["tests/ci"]
+markers = [
+    "gate: needs a real exported GGUF on disk; not run by CI (see tests/gate/)",
+]
