@@ -1,13 +1,10 @@
-<p align="center">
+<h1 align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
-    <img src="assets/logo.svg" alt="loom.cpp" width="96">
+    <img src="assets/logo.svg" alt="" width="52" align="middle">
   </picture>
-</p>
-
-<h1 align="center">loom-py</h1>
-
-<p align="center"><em>Python bindings for loom.cpp</em></p>
+  &nbsp;loom-py
+</h1>
 
 ```python
 import loom
