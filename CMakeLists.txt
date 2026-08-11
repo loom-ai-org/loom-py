@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.19)
+cmake_minimum_required(VERSION 3.24)  # $<LINK_LIBRARY:WHOLE_ARCHIVE,...> below needs 3.24
 project(py_loom LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -39,7 +39,17 @@ if(NOT pybind11_FOUND)
 endif()
 
 pybind11_add_module(_loom src/binding.cpp)
-target_link_libraries(_loom PRIVATE loom::engine)
+# WHOLE_ARCHIVE, not a plain link: `loom_engine`'s ops (src/ops/primitives_*.cpp) self-register into
+# PrimitiveRegistry via a static-initializer global in each translation unit (LOOM_REGISTER_OP,
+# include/loom/ops/primitive_registry.h) -- nothing in binding.cpp calls into those files by symbol,
+# everything goes through the registry. A plain static-archive link only pulls .o members that satisfy
+# an unresolved symbol reference, so the ordinary link silently DROPPED every op-registration file
+# wholesale (confirmed by hand: `PrimitiveRegistry: unknown op 'GET_ROWS'` at runtime, from a wheel
+# that built and imported cleanly -- the missing ops have no build-time signal at all). WHOLE_ARCHIVE
+# forces every .o in libloom_engine.a into the link regardless of whether anything references it, which
+# is exactly what a registry of self-registering translation units needs. ggml doesn't need the same
+# treatment -- it has no self-registration, everything in it is reached through ordinary symbol calls.
+target_link_libraries(_loom PRIVATE $<LINK_LIBRARY:WHOLE_ARCHIVE,loom_engine>)
 
 # Installed beside the Python package, which is where `from . import _loom` looks. The same location
 # a development build writes to, so `cmake --build build && python -c "import loom"` works from the

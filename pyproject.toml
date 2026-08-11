@@ -38,7 +38,7 @@ Exporter = "https://github.com/loom-ai-org/loom-exporter"
 # one. `sdist.include` is what puts it there.
 sdist.include = ["vendor/loom.cpp/**"]
 wheel.packages = ["loom"]
-cmake.version = ">=3.19"
+cmake.version = ">=3.24"  # CMakeLists.txt's $<LINK_LIBRARY:WHOLE_ARCHIVE,...> needs it
 cmake.build-type = "Release"
 
 [tool.pytest.ini_options]
