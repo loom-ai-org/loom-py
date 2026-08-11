@@ -76,8 +76,8 @@ print(model.driver_source)  # what infer() will run, and what it accepts
 ## Installing
 
 ```sh
-pip install loom-py           # once published
-pip install loom-py[hub]      # + from_pretrained()
+pip install loom-engine           # once published -- `loom-py` on PyPI clashes with `loompy`
+pip install loom-engine[hub]      # + from_pretrained()
 ```
 
 From a checkout — note `--recursive`, since the engine is a submodule:
