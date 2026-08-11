@@ -14,6 +14,14 @@ endif()
 # be a strange way to spend a CI minute.
 set(LOOM_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(LOOM_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+# Static, not loom.cpp's own default of shared (loom.cpp/cmake/Dependencies.cmake builds
+# libloom_engine.so so its 129 test binaries share one .so instead of relinking it 129 times -- a
+# concern this build doesn't have). A wheel ships `_loom.cpython-*.so` alone; nothing here installs or
+# RPATHs libloom_engine.so/libggml*.so beside it, so a shared build produces an import that fails the
+# moment the wheel leaves this build tree ("libloom_engine.so: cannot open shared object file"). Static
+# linking folds the engine and ggml directly into `_loom`'s .so, leaving only libc/libstdc++/libgcc/
+# libm as external deps -- exactly what every manylinux wheel already assumes.
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 add_subdirectory(vendor/loom.cpp EXCLUDE_FROM_ALL)
 
 # pybind11 by FetchContent, deliberately, so `cmake -B build` works in a bare checkout the same way

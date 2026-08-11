@@ -1,4 +1,8 @@
 [build-system]
+# Deliberately NOT listing cmake/ninja here -- scikit-build-core manages both itself (downloading a
+# compliant version when the container's own is missing or too old) and warns against listing them
+# explicitly, which just risks fighting its own resolution. Tried the explicit-pin version of this
+# comment first; the build itself printed the warning that corrected it.
 requires = ["scikit-build-core>=0.9", "pybind11>=2.12"]
 build-backend = "scikit_build_core.build"
 
@@ -42,3 +46,28 @@ testpaths = ["tests/ci"]
 markers = [
     "gate: needs a real exported GGUF on disk; not run by CI (see tests/gate/)",
 ]
+
+[tool.cibuildwheel]
+# CPython only, matching requires-python -- no PyPy (an untested build target for a pybind11 extension
+# this small a user base doesn't need yet) and no 32-bit (irrelevant for the models this ships).
+build = "cp39-* cp310-* cp311-* cp312-* cp313-*"
+# musllinux skipped for now: LuaJIT's Makefile build (cmake/Dependencies.cmake in the vendored engine)
+# is untested against musl's libc, and nothing here has verified it works. Lift this once someone has.
+skip = "pp* *-musllinux_* *_i686"
+build-frontend = "build"
+# manylinux2014's CentOS 7 base is EOL (June 2024); manylinux_2_28's glibc 2.28 floor already covers
+# everything but already-EOL distros. cibuildwheel builds INSIDE this image (not on the runner's own
+# glibc, which is newer and would make auditwheel bump the tag past _28 -- confirmed by hand: a plain
+# build on this dev box's own glibc came out needing manylinux_2_34), then runs `auditwheel repair`
+# against what actually got linked, so the wheel it produces is genuinely manylinux_2_28-compatible.
+manylinux-x86_64-image = "manylinux_2_28"
+# macOS/Windows aren't wired up yet -- CI (.github/workflows/ci.yml) only ever exercises ubuntu-latest,
+# and LuaJIT's vendored build drives its own Makefile directly (cmake/Dependencies.cmake), which is
+# untested off Linux/macOS make semantics. Add `macos-*`/`windows-*` to the workflow's build matrix once
+# that path has actually been run somewhere, rather than declaring it here first.
+test-requires = ["pytest>=7"]
+# Run from cibuildwheel's own temp cwd (not {project}) so the test imports the INSTALLED wheel rather
+# than the source tree's `loom/` package shadowing it on sys.path -- the same trap ci.yml's "Import the
+# installed package" step guards against, just automatic here since cibuildwheel doesn't cwd into
+# {project} for the test step.
+test-command = "python -c \"import loom; print(loom.__version__)\" && pytest {project}/tests/ci -q"

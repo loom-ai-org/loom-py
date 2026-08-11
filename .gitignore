@@ -1,6 +1,7 @@
 build/
 _skbuild/
 dist/
+wheelhouse/
 *.egg-info/
 __pycache__/
 *.pyc

@@ -29,7 +29,15 @@ from . import _loom
 from ._hub import download
 
 __all__ = ["Model", "Tokenizer", "LoomError", "download", "__version__"]
-__version__ = "0.1.0"
+
+try:
+    # Read from the installed distribution's metadata rather than restating the number here, which
+    # drifted from pyproject.toml's `version` before (this hardcoded "0.1.0" while the package shipped
+    # 1.0.0rc0) with nothing to catch it.
+    from importlib.metadata import version as _pkg_version
+    __version__ = _pkg_version("loom-py-rt")
+except Exception:  # editable/source-tree checkout with no installed distribution to read
+    __version__ = "0+unknown"
 
 LoomError = _loom.LoomError
 
