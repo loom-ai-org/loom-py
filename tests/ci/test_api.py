@@ -144,11 +144,16 @@ class _FakeHandle:
         self._vocab = vocab
         self._eos = eos
         self.calls = []                    # every inputs dict infer() was given
+        self.langs = []                    # every `lang` encode() was given
 
     def has_tokenizer(self): return self._vocab is not None
     def tokenizer_kind(self): return self._vocab or ""
     def tokenizer_size(self): return 100
-    def encode(self, text): return [10, 11, 12]
+    def tokenizer_default_lang(self): return "en" if self._vocab == "supertonic" else ""
+
+    def encode(self, text, lang=""):
+        self.langs.append(lang)
+        return [10, 11, 12]
     def decode(self, ids): return "|".join(str(i) for i in ids)
     def kv_i32(self, key, fallback): return self._eos
     def call(self, fn_name, inputs):
@@ -163,8 +168,8 @@ def _model(handle):
 
 class TestTokenizer:
     def test_a_model_without_a_vocabulary_reports_none_rather_than_a_broken_object(self):
-        """The TTS families embed no vocabulary -- they take phoneme ids from outside the engine --
-        so None is the honest answer, not an object whose every method raises."""
+        """The phoneme-input TTS families embed no vocabulary -- they take ids from outside the
+        engine -- so None is the honest answer, not an object whose every method raises."""
         assert _model(_FakeHandle([], vocab=None)).tokenizer is None
 
     def test_a_model_with_one_exposes_its_kind_and_size(self):
@@ -177,6 +182,29 @@ class TestTokenizer:
         assert model.tokenize("hello") == [10, 11, 12]
         # floats, because floats are what infer() returns
         assert model.detokenize([1.0, 2.0]) == "1|2"
+
+    def test_an_omitted_lang_reaches_the_engine_as_empty_not_as_a_guess(self):
+        """The engine substitutes the file's own declared default for an empty lang. This layer must
+        not invent one on its way there -- a hardcoded "en" here would silently override an export
+        that declared something else."""
+        handle = _FakeHandle([])
+        _model(handle).tokenize("hello")
+        assert handle.langs == [""]
+
+    def test_a_named_lang_is_passed_through(self):
+        handle = _FakeHandle([], vocab="supertonic")
+        _model(handle).tokenize("hello", lang="ko")
+        assert handle.langs == ["ko"]
+
+    def test_a_language_tagged_vocabulary_says_which_language_it_defaults_to(self):
+        tok = _model(_FakeHandle([], vocab="supertonic")).tokenizer
+        assert tok.default_lang == "en"
+        assert "lang='en'" in repr(tok)
+
+    def test_a_vocabulary_with_no_language_concept_says_so_rather_than_inventing_one(self):
+        tok = _model(_FakeHandle([])).tokenizer
+        assert tok.default_lang == ""
+        assert "lang=" not in repr(tok), "an empty default must not print as lang=''"
 
 
 class TestGenerateHandlesBothDriverShapes:
