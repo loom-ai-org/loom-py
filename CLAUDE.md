@@ -46,6 +46,14 @@ whose cross-step state is entirely the KV cache generates internally and returns
 state is not (LFM2's ShortConv blocks) returns a single token and leaves the loop to the host.
 `generate_ids` branches on list-vs-number.
 
-**A TTS model has no text door.** Matcha, VITS, Kokoro and StyleTTS2 consume phoneme ids a phonemiser
-produces outside the engine, so their GGUFs embed no vocabulary and `model.tokenizer` is `None`. That
-is a real limitation, not a missing feature — do not paper over it.
+**Four TTS models have no text door, and one does.** Matcha, VITS, Kokoro and StyleTTS2 consume phoneme
+ids a phonemiser produces outside the engine, so their GGUFs embed no vocabulary and `model.tokenizer`
+is `None`. That is a real limitation, not a missing feature — do not paper over it. Supertonic is not
+in that group: it encodes graphemes itself, its GGUF carries the codepoint table, and it tokenizes here
+like any other vocabulary. The distinction is per-model, so read the file rather than the task.
+
+**An unrecognized `tokenizer.ggml.model` means no tokenizer, never a failed load.** `Tokenizer::load`
+dispatches every family by name and returns null for a tag it does not know. It used to end in an
+`else` handing the tag to `Vocab::load`, which throws on anything but `llama`/`t5` — from inside the
+`Model` constructor, so a GGUF from a newer exporter did not load at all. A tag it *does* know with the
+data missing still throws, on purpose: that file is malformed, not merely new.

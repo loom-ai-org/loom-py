@@ -16,8 +16,10 @@ arguments are the driver's own, because which inputs a model takes is a property
 than of this package. `model.driver_source` prints the Lua, whose header comment documents them; that
 is the authority, since it is what will actually run.
 
-A model that embeds no vocabulary -- the TTS families take phoneme ids a phonemiser produces outside
-the engine -- has `model.tokenizer is None` and is driven through `infer` with ids directly.
+A model that embeds no vocabulary -- the phoneme-input TTS families take ids a phonemiser produces
+outside the engine -- has `model.tokenizer is None` and is driven through `infer` with ids directly.
+That is a property of those models, not of TTS: a model that encodes graphemes itself carries its own
+table and tokenizes here like any other.
 """
 from __future__ import annotations
 
@@ -125,15 +127,23 @@ class Model:
     def tokenizer(self) -> "Tokenizer | None":
         """The vocabulary this GGUF embeds, or None if it carries none.
 
-        None is the honest answer for the TTS families: they consume phoneme ids that a phonemiser
-        produces outside the engine, so there is no vocabulary in the file to encode text with. See
-        :meth:`generate` for what that means in practice.
+        None is the honest answer for the phoneme-input TTS families (Matcha, VITS, Kokoro,
+        StyleTTS2): they consume phoneme ids that a phonemiser produces outside the engine, so there
+        is no vocabulary in the file to encode text with. It is NOT true of every TTS model -- one
+        that encodes graphemes directly, such as Supertonic, carries its own table and reads back
+        here like any other vocabulary. See :meth:`generate` for what that means in practice.
         """
         return Tokenizer(self._handle) if self._handle.has_tokenizer() else None
 
-    def tokenize(self, text: str) -> list[int]:
-        """Text to token ids, using the model's own embedded vocabulary."""
-        return list(self._handle.encode(text))
+    def tokenize(self, text: str, lang: str | None = None) -> list[int]:
+        """Text to token ids, using the model's own embedded vocabulary.
+
+        `lang` is accepted only by a vocabulary that tags its input by language (Supertonic wraps
+        text in `<lang>...</lang>` before looking codepoints up); passing one to any other family is
+        an error rather than a silently dropped argument. Omit it and the model's own declared
+        default is used -- `model.tokenizer.default_lang`, which the export writes into the file.
+        """
+        return list(self._handle.encode(text, "" if lang is None else lang))
 
     def detokenize(self, ids: Sequence[float | int]) -> str:
         """Token ids back to text. Floats are accepted because floats are what `infer` returns."""
@@ -237,7 +247,7 @@ class Model:
 
 
 class Tokenizer:
-    """The vocabulary a GGUF embeds, in whichever of the four families it uses.
+    """The vocabulary a GGUF embeds, in whichever of the five families it uses.
 
     Reached as `model.tokenizer`; `model.tokenize` / `model.detokenize` are the same two calls without
     the intermediate object, which is what most code wants. This exists for the cases where the
@@ -250,22 +260,31 @@ class Tokenizer:
 
     @property
     def kind(self) -> str:
-        """`gpt2` (byte-level BPE), `bert` (WordPiece), `byt5` (byte-level), or a SentencePiece
-        family name such as `llama` or `t5` -- the GGUF's own `tokenizer.ggml.model`."""
+        """`gpt2` (byte-level BPE), `bert` (WordPiece), `byt5` (byte-level), `supertonic` (grapheme
+        codepoints), or a SentencePiece family name such as `llama` or `t5` -- the GGUF's own
+        `tokenizer.ggml.model`."""
         return self._handle.tokenizer_kind()
 
     @property
     def size(self) -> int:
         return self._handle.tokenizer_size()
 
-    def encode(self, text: str) -> list[int]:
-        return list(self._handle.encode(text))
+    @property
+    def default_lang(self) -> str:
+        """The language tag :meth:`encode` uses when the caller names none, or `""` for a vocabulary
+        that has no such concept -- which is every family but `supertonic`."""
+        return self._handle.tokenizer_default_lang()
+
+    def encode(self, text: str, lang: str | None = None) -> list[int]:
+        """See :meth:`Model.tokenize`, which is this call without the intermediate object."""
+        return list(self._handle.encode(text, "" if lang is None else lang))
 
     def decode(self, ids: Sequence[float | int]) -> str:
         return self._handle.decode([int(i) for i in ids])
 
     def __repr__(self) -> str:
-        return f"<loom.Tokenizer {self.kind!r} size={self.size}>"
+        lang = f" lang={self.default_lang!r}" if self.default_lang else ""
+        return f"<loom.Tokenizer {self.kind!r} size={self.size}{lang}>"
 
 
 def _as_value(name: str, value: Any) -> float | list[float]:
