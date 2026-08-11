@@ -3,7 +3,7 @@ requires = ["scikit-build-core>=0.9", "pybind11>=2.12"]
 build-backend = "scikit_build_core.build"
 
 [project]
-name = "loom-engine"
+name = "loom-py-rt"
 version = "1.0.0-rc0"
 description = "Python bindings for loom.cpp, a data-driven ggml inference engine"
 readme = "README.md"
