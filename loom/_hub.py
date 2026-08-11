@@ -18,7 +18,7 @@ def _require_hub():
     except ImportError:
         raise ImportError(
             "loading from a HuggingFace repo needs `huggingface_hub`:\n"
-            "    pip install loom-py[hub]\n"
+            "    pip install loom-engine[hub]\n"
             "Loading a GGUF you already have with `loom.Model.from_file` needs nothing."
         ) from None
     return huggingface_hub
