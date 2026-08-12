@@ -70,7 +70,16 @@ manylinux-x86_64-image = "manylinux_2_28"
 # and LuaJIT's vendored build drives its own Makefile directly (cmake/Dependencies.cmake), which is
 # untested off Linux/macOS make semantics. Add `macos-*`/`windows-*` to the workflow's build matrix once
 # that path has actually been run somewhere, rather than declaring it here first.
-test-requires = ["pytest>=7"]
+
+# The `[test]` extra, rather than a second copy of its contents. This was `test-requires =
+# ["pytest>=7"]`, which was that copy -- and it drifted: `tests/ci/test_vocab_dispatch.py` writes a
+# real GGUF with `gguf.GGUFWriter` and a numpy tensor, so the wheel test step began failing at
+# COLLECTION, which aborts every remaining interpreter rather than failing one test. Naming the extra
+# means a test dependency added for `pytest tests/ci` is automatically there for the wheels too, and
+# the two cannot disagree again.
+#
+# None of this reaches the shipped package: `dependencies` is still empty and stays that way.
+test-extras = ["test"]
 # Run from cibuildwheel's own temp cwd (not {project}) so the test imports the INSTALLED wheel rather
 # than the source tree's `loom/` package shadowing it on sys.path -- the same trap ci.yml's "Import the
 # installed package" step guards against, just automatic here since cibuildwheel doesn't cwd into
