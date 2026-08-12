@@ -182,10 +182,19 @@ inputs would be this package learning about a model, which is the thing the desi
 Shared with [loom.cpp](https://github.com/loom-ai-org/loom.cpp), because three of the four are the
 engine's and this package inherits them by having no per-architecture code of its own.
 
-**1. GPUs and NPUs — the engine part is done; the packaging part is not.** The engine schedules a
-graph across a device backend and a CPU fallback, and this package exposes the choice as `device=`
-(above). What is missing from *here* is a wheel that has a device backend compiled into it: today a
-GPU means building from a checkout. NPUs remain untouched at both ends.
+**1. GPUs and NPUs — the engine part is done; the packaging part is the open question.** The engine
+schedules a graph across a device backend and a CPU fallback, and this package exposes the choice as
+`device=` (above). What is missing from *here* is a wheel that has a device backend in it: today a GPU
+means building from a checkout.
+
+The shape that is NOT wanted is a wheel per accelerator per architecture — PyPI's wheel tags have no
+accelerator dimension, so that is torch's `cu121` arrangement, and it multiplies every future backend by
+every existing platform. `GGML_BACKEND_DL` (verified on the engine side) makes the better shape
+possible: **one arch-tagged base wheel, plus small backend packages that drop a `.so` where ggml looks
+for it**, so `pip install loom-py-rt[cuda]` means "also fetch that backend", `device="auto"` finds it,
+and a Raspberry Pi installs nothing extra. Scoped as `BACKLOG.md` P4.8, along with which backends are
+reachable at all (CUDA, OpenVINO and Qualcomm's are already in the pinned ggml; CoreML and RKNPU2 are
+not).
 
 **2. Wheels for more platforms.** Linux x86-64 today; next macOS on Intel, macOS on Apple Silicon and
 Linux on ARM. This is the item most visible from here, since it is what `pip install loom-py-rt` can
