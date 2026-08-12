@@ -156,6 +156,8 @@ class _FakeHandle:
         return [10, 11, 12]
     def decode(self, ids): return "|".join(str(i) for i in ids)
     def kv_i32(self, key, fallback): return self._eos
+    def device_name(self): return "CPU"
+    def device_description(self): return "a fake device"
     def call(self, fn_name, inputs):
         self.calls.append(inputs)
         return self._returns.pop(0) if self._returns else 0.0
@@ -233,3 +235,39 @@ class TestGenerateHandlesBothDriverShapes:
     def test_generate_encodes_and_decodes_around_it(self):
         handle = _FakeHandle([[7.0, 8.0]])
         assert _model(handle).generate("anything") == "7|8"
+
+
+class TestDeviceIsPassedThroughAndReadBack:
+    """Where a model runs, at the Python layer. What device spec resolves to WHICH device is the
+    engine's decision and is pinned there (loom.cpp tests/ci/test_device_selection.cpp); what is
+    decided here is only that a caller's choice reaches it and that the answer comes back -- which is
+    the half that would break silently, since a dropped `device=` argument still loads the model.
+    """
+
+    def test_the_spec_reaches_the_extension_and_defaults_to_deciding_for_itself(self, monkeypatch, tmp_path):
+        gguf = tmp_path / "m.gguf"
+        gguf.write_bytes(b"")
+        seen = []
+        monkeypatch.setattr(loom._loom, "Model",
+                            lambda path, device: seen.append((path, device)) or _FakeHandle([]))
+        loom.Model.from_file(gguf)
+        loom.Model.from_file(gguf, device="cpu")
+        # An empty default rather than "cpu": a wheel built with a GPU backend should use it without
+        # every caller having to ask, and one built without has only a CPU for "" to resolve to.
+        assert [d for _, d in seen] == ["", "cpu"]
+
+    def test_from_pretrained_forwards_it_too(self, monkeypatch, tmp_path):
+        gguf = tmp_path / "m.gguf"
+        gguf.write_bytes(b"")
+        monkeypatch.setattr(loom, "download", lambda *a, **k: gguf)
+        seen = []
+        monkeypatch.setattr(loom._loom, "Model",
+                            lambda path, device: seen.append(device) or _FakeHandle([]))
+        loom.Model.from_pretrained("org/repo", device="Vulkan0")
+        assert seen == ["Vulkan0"]
+
+    def test_the_resolved_device_is_readable(self):
+        handle = _FakeHandle([])
+        model = _model(handle)
+        assert model.device == "CPU"
+        assert model.device_description == "a fake device"

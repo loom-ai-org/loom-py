@@ -58,12 +58,18 @@ class Model:
     # -- construction --------------------------------------------------------------------------
 
     @classmethod
-    def from_file(cls, path: str | os.PathLike) -> "Model":
-        """Load a GGUF from disk."""
+    def from_file(cls, path: str | os.PathLike, device: str = "") -> "Model":
+        """Load a GGUF from disk.
+
+        `device` says where it runs: `""` (the default) defers to `$LOOM_DEVICE` and then to
+        autodetection, `"cpu"` pins it to the CPU, `"gpu"` demands a GPU/accelerator and raises if
+        there is none, and a device name like `"Vulkan0"` names one exactly. A wheel built without a
+        GPU backend has only a CPU to find, so the default resolves there and nothing changes.
+        """
         resolved = Path(path).expanduser()
         if not resolved.is_file():
             raise FileNotFoundError(f"no such model file: {resolved}")
-        return cls(_loom.Model(str(resolved)), resolved)
+        return cls(_loom.Model(str(resolved), device), resolved)
 
     @classmethod
     def from_pretrained(
@@ -73,15 +79,18 @@ class Model:
         revision: str = "main",
         cache_dir: str | os.PathLike | None = None,
         token: str | None = None,
+        device: str = "",
     ) -> "Model":
         """Download a GGUF from a HuggingFace repo and load it.
 
         `filename` may be omitted when the repo holds exactly one `.gguf`, which is the shape a
         single-model repo has; when it holds several, the error lists them rather than guessing, since
         picking one for you is how somebody ends up benchmarking a quantisation they did not choose.
+
+        `device` is passed through to :meth:`from_file`.
         """
         return cls.from_file(download(repo_id, filename=filename, revision=revision,
-                                      cache_dir=cache_dir, token=token))
+                                      cache_dir=cache_dir, token=token), device=device)
 
     # -- what the file says about itself -------------------------------------------------------
 
@@ -104,6 +113,19 @@ class Model:
     def driver_source(self) -> str:
         """The embedded Lua, verbatim. Its header comment documents the inputs `infer` accepts."""
         return self._handle.driver_source()
+
+    @property
+    def device(self) -> str:
+        """The ggml device this session resolved to -- `"CPU"`, `"Vulkan0"`, ...
+
+        Worth reading even when you did not choose one: the default is "decide for me".
+        """
+        return self._handle.device_name()
+
+    @property
+    def device_description(self) -> str:
+        """That device in words, e.g. `"AMD Radeon Vega 3 Graphics (RADV RAVEN2)"`."""
+        return self._handle.device_description()
 
     @property
     def path(self) -> Path:
