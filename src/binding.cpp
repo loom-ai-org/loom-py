@@ -32,16 +32,25 @@ namespace {
 
 // The model's own tokenizer, if it carries one.
 //
-// **Four vocabulary families and one dispatch, taken from `tools/loom_cli/main.cpp`** -- the only
+// **Five vocabulary families and one dispatch, taken from `tools/loom_cli/main.cpp`** -- the only
 // other host that does this, and the one that learned the ordering the hard way. A GGUF says which it
 // has in `tokenizer.ggml.model`: "gpt2" is byte-level BPE, "bert" is WordPiece, "byt5" is byte-level,
-// and anything else ("llama", "t5") is SentencePiece. The four classes share no base, so this holds
-// one of each and asks whichever is non-null.
+// "llama"/"t5" are SentencePiece, and "supertonic" is SupertonicTTS's grapheme codepoint table. The
+// five classes share no base, so this holds one of each and asks whichever is non-null.
 //
-// **A model may carry none, and that is not a defect.** The TTS families consume phoneme ids that a
-// phonemiser produces outside the engine, so their GGUFs have no vocabulary to embed. `kind()` is
-// empty for those and `Model.tokenizer` is None on the Python side, which is a better answer than an
-// object whose every method raises.
+// **Every family is dispatched by NAME, and an unrecognized tag yields no tokenizer rather than an
+// error.** This used to be four `if`s and an `else` that fell through to `Vocab::load`, which throws on
+// any tag that is not "llama"/"t5" (loom.cpp `src/core/vocab.cpp`) -- and that throw happened inside
+// `Model`'s constructor, so a GGUF carrying a vocabulary this binding had not been taught yet did not
+// merely lack a tokenizer, it FAILED TO LOAD AT ALL. Adding "supertonic" to the exporter's output would
+// have broken loading every Supertonic model, which is how this was found. A name-per-family cascade
+// keeps `Vocab::load` seeing only the two tags it accepts, and makes the next new family a missing
+// feature instead of a broken file.
+//
+// **A model may carry none, and that is not a defect.** The phoneme-input TTS families (Matcha, VITS,
+// Kokoro, StyleTTS2) consume ids a phonemiser produces outside the engine, so their GGUFs have no
+// vocabulary to embed. `kind()` is empty for those and `Model.tokenizer` is None on the Python side,
+// which is a better answer than an object whose every method raises.
 class Tokenizer {
 public:
     static std::unique_ptr<Tokenizer> load(const loom::GgufModel& model) {
@@ -54,39 +63,54 @@ public:
             tokenizer->byte_ = loom::ByteVocab::load(model);
         } else if (tokenizer->kind_ == "gpt2") {
             tokenizer->bpe_ = loom::BpeVocab::load(model);
-        } else {
-            // SentencePiece. `Vocab::load` THROWS on a gpt2 file where `BpeVocab::load` merely returns
-            // null, which is why gpt2 is dispatched by name rather than probed for -- the ordering
-            // `loom_cli` records.
+        } else if (tokenizer->kind_ == "supertonic") {
+            tokenizer->supertonic_ = loom::SupertonicTextVectorizer::load(model);
+        } else if (tokenizer->kind_ == "llama" || tokenizer->kind_ == "t5") {
             tokenizer->spm_ = loom::Vocab::load(model);
         }
         if (!tokenizer->valid()) return nullptr;
         return tokenizer;
     }
 
-    bool valid() const { return spm_ || bpe_ || wordpiece_ || byte_; }
+    bool valid() const { return spm_ || bpe_ || wordpiece_ || byte_ || supertonic_; }
     const std::string& kind() const { return kind_; }
 
     size_t size() const {
         if (spm_) return spm_->size();
         if (bpe_) return bpe_->size();
         if (wordpiece_) return wordpiece_->size();
-        return byte_->size();
+        if (byte_) return byte_->size();
+        // n_tokens(), not vocab_size() -- the latter is the 65536-entry BMP lookup table, which is not
+        // what any caller reading `tokenizer.size()` means.
+        return supertonic_->n_tokens();
     }
 
-    std::vector<int32_t> encode(const std::string& text) const {
+    // `lang` is the "optional argument, else the model's own declared default" shape: only a vocabulary
+    // that is parameterized by language can honour it, and the rest say so rather than ignoring it. An
+    // argument silently dropped is the failure mode this rejection exists to prevent -- a caller asking
+    // for Korean and quietly getting English.
+    std::vector<int32_t> encode(const std::string& text, const std::string& lang) const {
+        if (!lang.empty() && !supertonic_) {
+            throw loom::SchemaError("tokenizer kind '" + kind_ + "' takes no language argument; only a "
+                                    "vocabulary that tags its input by language (supertonic) does");
+        }
         if (spm_) return spm_->encode(text);
         if (bpe_) return bpe_->encode(text);
         if (wordpiece_) return wordpiece_->encode(text);
-        return byte_->encode(text);
+        if (byte_) return byte_->encode(text);
+        return supertonic_->tokenize(text, lang);  // empty lang -> the file's own default_lang
     }
 
     std::string decode(const std::vector<int32_t>& ids) const {
         if (spm_) return spm_->decode(ids);
         if (bpe_) return bpe_->decode(ids);
         if (wordpiece_) return wordpiece_->decode(ids);
-        return byte_->decode(ids);
+        if (byte_) return byte_->decode(ids);
+        return supertonic_->detokenize(ids);
     }
+
+    // Empty for every family that has no such concept, which is every family but supertonic.
+    std::string default_lang() const { return supertonic_ ? supertonic_->default_lang() : std::string{}; }
 
 private:
     Tokenizer() = default;
@@ -95,6 +119,7 @@ private:
     std::unique_ptr<loom::BpeVocab> bpe_;
     std::unique_ptr<loom::WordPieceVocab> wordpiece_;
     std::unique_ptr<loom::ByteVocab> byte_;
+    std::unique_ptr<loom::SupertonicTextVectorizer> supertonic_;
 };
 
 // Owns everything the engine needs alive for the duration of a session, in an order that matters:
@@ -132,7 +157,12 @@ public:
             bridge_->register_module(name, *model_, std::move(topo), kv_for_module, conv_for_module);
         }
 
-        driver_ = model_->kv_str("model.driver_script");
+        // Guarded, not bare: `kv_str` THROWS on a missing key, so an unconditional read here made a
+        // GGUF without a driver fail to construct at all -- even though `has_driver()` below is written
+        // for exactly that state and `call()` already refuses with a real message when it is empty. Same
+        // shape of bug as the tokenizer dispatch above, in the same constructor: an optional property of
+        // the file read as if it were mandatory.
+        if (model_->has_kv("model.driver_script")) driver_ = model_->kv_str("model.driver_script");
         if (!driver_.empty()) bridge_->load_script(driver_);
 
         tokenizer_ = Tokenizer::load(*model_);
@@ -141,7 +171,12 @@ public:
     bool has_tokenizer() const { return tokenizer_ != nullptr; }
     std::string tokenizer_kind() const { return tokenizer_ ? tokenizer_->kind() : std::string{}; }
     size_t tokenizer_size() const { return require_tokenizer().size(); }
-    std::vector<int32_t> encode(const std::string& text) const { return require_tokenizer().encode(text); }
+    std::string tokenizer_default_lang() const {
+        return tokenizer_ ? tokenizer_->default_lang() : std::string{};
+    }
+    std::vector<int32_t> encode(const std::string& text, const std::string& lang) const {
+        return require_tokenizer().encode(text, lang);
+    }
     std::string decode(const std::vector<int32_t>& ids) const { return require_tokenizer().decode(ids); }
 
     std::vector<std::string> topologies() const { return names_; }
@@ -203,9 +238,9 @@ private:
     const Tokenizer& require_tokenizer() const {
         if (tokenizer_ == nullptr) {
             throw std::runtime_error(
-                "this GGUF carries no tokenizer vocabulary. Its driver takes ids directly -- the TTS "
-                "families consume phoneme ids a phonemiser produces outside the engine, so there is "
-                "nothing here to encode text with.");
+                "this GGUF carries no tokenizer vocabulary. Its driver takes ids directly -- the "
+                "phoneme-input TTS families (Matcha, VITS, Kokoro, StyleTTS2) consume ids a phonemiser "
+                "produces outside the engine, so there is nothing here to encode text with.");
         }
         return *tokenizer_;
     }
@@ -241,7 +276,8 @@ PYBIND11_MODULE(_loom, m) {
         .def("has_tokenizer", &Model::has_tokenizer)
         .def("tokenizer_kind", &Model::tokenizer_kind)
         .def("tokenizer_size", &Model::tokenizer_size)
-        .def("encode", &Model::encode, py::arg("text"))
+        .def("tokenizer_default_lang", &Model::tokenizer_default_lang)
+        .def("encode", &Model::encode, py::arg("text"), py::arg("lang") = std::string{})
         .def("decode", &Model::decode, py::arg("ids"))
         .def("call", &Model::call, py::arg("fn_name"), py::arg("inputs"));
 }
