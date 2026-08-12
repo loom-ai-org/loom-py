@@ -8,7 +8,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "loom-py-rt"
-version = "1.0.0-rc0"
+version = "1.0.0-rc1"
 description = "Python bindings for loom.cpp, a data-driven ggml inference engine"
 readme = "README.md"
 license = { file = "LICENSE" }
