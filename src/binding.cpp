@@ -127,13 +127,17 @@ private:
 // destroyed last.
 class Model {
 public:
-    explicit Model(const std::string& path)
-        : backend_(ggml_backend_cpu_init()) {
-        if (backend_ == nullptr) throw std::runtime_error("could not initialise the CPU backend");
-        model_ = loom::GgufModel::load(path, backend_.get());
+    // `device` is a loom device spec -- "" (which defers to $LOOM_DEVICE, then autodetection), "auto",
+    // "cpu", "gpu", or a device name like "Vulkan0". The default is empty rather than "cpu" so that a
+    // wheel built with a GPU backend uses it without every caller having to ask, while a wheel built
+    // without one resolves to exactly the CPU it always did.
+    explicit Model(const std::string& path, const std::string& device = std::string{})
+        : device_(std::make_unique<loom::Device>(loom::Device::open(device))) {
+        const loom::Backends backends = device_->backends();
+        model_ = loom::GgufModel::load(path, backends);
         if (model_ == nullptr) throw std::runtime_error("could not load a loom GGUF from " + path);
 
-        bridge_ = std::make_unique<loom::LoomLuaBridge>(backend_.get());
+        bridge_ = std::make_unique<loom::LoomLuaBridge>(backends);
         names_ = model_->topology_names();
 
         // A cache is made only if some topology says it wants one, and there are TWO kinds. Attention
@@ -147,10 +151,10 @@ public:
         for (const std::string& name : names_) {
             loom::GraphTopology topo = loom::GraphTopology::parse(model_->topology_json(name));
             if (topo.uses_kv_cache() && kv_cache_ == nullptr) {
-                kv_cache_ = loom::make_kv_cache(*model_, backend_.get());
+                kv_cache_ = loom::make_kv_cache(*model_, device_->backends());
             }
             if (topo.uses_conv_state() && conv_state_ == nullptr) {
-                conv_state_ = loom::make_conv_state_cache(*model_, backend_.get());
+                conv_state_ = loom::make_conv_state_cache(*model_, device_->backends());
             }
             loom::KvCache* kv_for_module = topo.uses_kv_cache() ? kv_cache_.get() : nullptr;
             loom::ConvStateCache* conv_for_module = topo.uses_conv_state() ? conv_state_.get() : nullptr;
@@ -167,6 +171,12 @@ public:
 
         tokenizer_ = Tokenizer::load(*model_);
     }
+
+    // What this session actually resolved to -- the ggml device name and its human-readable
+    // description. Worth exposing because "device=''" means "decide for me", and a caller who did not
+    // choose still needs to be able to find out what was chosen.
+    std::string device_name() const { return device_->name(); }
+    std::string device_description() const { return device_->description(); }
 
     bool has_tokenizer() const { return tokenizer_ != nullptr; }
     std::string tokenizer_kind() const { return tokenizer_ ? tokenizer_->kind() : std::string{}; }
@@ -226,7 +236,10 @@ public:
     }
 
 private:
-    ggml_backend_ptr backend_;
+    // Declared first so it outlives everything holding its backend handles -- the model's weight
+    // buffer, the caches and every graph the bridge builds. Held by pointer only because loom::Device
+    // has no default constructor and this member is initialized in the constructor's body order.
+    std::unique_ptr<loom::Device> device_;
     std::unique_ptr<loom::GgufModel> model_;
     std::unique_ptr<loom::KvCache> kv_cache_;
     std::unique_ptr<loom::ConvStateCache> conv_state_;
@@ -264,7 +277,10 @@ PYBIND11_MODULE(_loom, m) {
     });
 
     py::class_<Model>(m, "Model")
-        .def(py::init<const std::string&>(), py::arg("path"))
+        .def(py::init<const std::string&, const std::string&>(), py::arg("path"),
+              py::arg("device") = std::string{})
+        .def("device_name", &Model::device_name)
+        .def("device_description", &Model::device_description)
         .def("topologies", &Model::topologies)
         .def("architecture", &Model::architecture)
         .def("has_driver", &Model::has_driver)

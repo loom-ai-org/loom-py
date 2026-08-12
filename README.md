@@ -45,6 +45,27 @@ directly:
 audio = model.infer(tokens=[16, 40, 22, 30, 12, 3], n_steps=4, seed=1234)
 ```
 
+## Choosing a device
+
+A wheel built with a GPU backend uses it by default; one built without has only a CPU to find, so
+nothing changes.
+
+```python
+model = loom.Model.from_file("qwen3.gguf")                  # decide for me (or $LOOM_DEVICE)
+model = loom.Model.from_file("qwen3.gguf", device="cpu")    # pin it
+model = loom.Model.from_file("qwen3.gguf", device="gpu")    # demand one; raises if there is none
+model.device, model.device_description   # ('Vulkan0', 'AMD Radeon Vega 3 Graphics (RADV RAVEN2)')
+```
+
+`"gpu"` raises rather than falling back, because a caller who spelled it out is asking a question
+about the machine and a silent CPU run is how a large slowdown goes unnoticed. `"auto"` — the default
+— is the one that falls back.
+
+The wheels on PyPI are CPU-only, so a GPU today means building from a checkout with the engine
+configured for one (`CMAKE_ARGS="-DGGML_VULKAN=ON" pip install -e .`); see
+[loom.cpp's own build notes](https://github.com/loom-ai-org/loom.cpp#running-on-a-gpu). Which ops fall
+back to the CPU, and why some always will, is documented there too.
+
 ## Why there is so little API
 
 A loom GGUF carries its own graph topologies and its own driver script alongside its weights, so this
@@ -161,9 +182,10 @@ inputs would be this package learning about a model, which is the thing the desi
 Shared with [loom.cpp](https://github.com/loom-ai-org/loom.cpp), because three of the four are the
 engine's and this package inherits them by having no per-architecture code of its own.
 
-**1. GPUs and NPUs.** The engine talks to a single `ggml_backend_t` and uses no `ggml_backend_sched`,
-which is what has to change before a second device can hold part of a graph. Nothing in this package
-should need to change with it — device selection is a property of how the engine is built.
+**1. GPUs and NPUs — the engine part is done; the packaging part is not.** The engine schedules a
+graph across a device backend and a CPU fallback, and this package exposes the choice as `device=`
+(above). What is missing from *here* is a wheel that has a device backend compiled into it: today a
+GPU means building from a checkout. NPUs remain untouched at both ends.
 
 **2. Wheels for more platforms.** Linux x86-64 today; next macOS on Intel, macOS on Apple Silicon and
 Linux on ARM. This is the item most visible from here, since it is what `pip install loom-py-rt` can
