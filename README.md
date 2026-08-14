@@ -61,10 +61,29 @@ model.device, model.device_description   # ('Vulkan0', 'AMD Radeon Vega 3 Graphi
 about the machine and a silent CPU run is how a large slowdown goes unnoticed. `"auto"` — the default
 — is the one that falls back.
 
-The wheels on PyPI are CPU-only, so a GPU today means building from a checkout with the engine
-configured for one (`CMAKE_ARGS="-DGGML_VULKAN=ON" pip install -e .`); see
-[loom.cpp's own build notes](https://github.com/loom-ai-org/loom.cpp#running-on-a-gpu). Which ops fall
-back to the CPU, and why some always will, is documented there too.
+The base wheel is CPU-only, and an accelerator is a separate install rather than a different wheel:
+
+```sh
+pip install "loom-py-rt[vulkan]"
+```
+
+That adds one small package holding one `libggml-vulkan.so`, which this package finds at import;
+`device="auto"` then uses it and nothing about the base wheel changes. The reason it works this way —
+rather than a full wheel per accelerator, which is the more familiar shape — is that a Vulkan backend
+is 46.5 MB and CUDA is larger, so the per-accelerator matrix does not fit PyPI's 100 MB per-file
+ceiling. See [`packaging/README.md`](packaging/README.md).
+
+```python
+loom.devices()   # [{'name': 'Vulkan0', 'description': 'AMD Radeon Vega 3 Graphics (RADV RAVEN2)', ...}]
+```
+
+Worth calling after installing one, because a backend whose driver is too old — or which finds no
+supported device — loads without error and registers nothing, and the only other symptom is a model
+running at CPU speed. Note that with this build **every** backend is loaded at run time, the CPU
+included, so an empty device list means no backend library was found at all rather than no accelerator.
+
+Which ops fall back to the CPU, and why some always will, is documented in
+[loom.cpp's own build notes](https://github.com/loom-ai-org/loom.cpp#running-on-a-gpu).
 
 ## Why there is so little API
 
@@ -182,17 +201,18 @@ inputs would be this package learning about a model, which is the thing the desi
 Shared with [loom.cpp](https://github.com/loom-ai-org/loom.cpp), because three of the four are the
 engine's and this package inherits them by having no per-architecture code of its own.
 
-**1. GPUs and NPUs — the engine part is done; the packaging part is the open question.** The engine
-schedules a graph across a device backend and a CPU fallback, and this package exposes the choice as
-`device=` (above). What is missing from *here* is a wheel that has a device backend in it: today a GPU
-means building from a checkout.
+**1. GPUs and NPUs — the packaging is built; the backends beyond Vulkan are what remain.** The engine
+schedules a graph across a device backend and a CPU fallback, this package exposes the choice as
+`device=` (above), and the wheel shape that lets an accelerator ship at all now exists.
 
 The shape that is NOT wanted is a wheel per accelerator per architecture — PyPI's wheel tags have no
 accelerator dimension, so that is torch's `cu121` arrangement, and it multiplies every future backend by
-every existing platform. `GGML_BACKEND_DL` (verified on the engine side) makes the better shape
-possible: **one arch-tagged base wheel, plus small backend packages that drop a `.so` where ggml looks
-for it**, so `pip install loom-py-rt[cuda]` means "also fetch that backend", `device="auto"` finds it,
-and a Raspberry Pi installs nothing extra. Scoped as `BACKLOG.md` P4.8, along with which backends are
+every existing platform. `GGML_BACKEND_DL` makes the better shape possible and this package is now
+built that way: **one arch-tagged base wheel, plus small backend packages that drop a `.so` where ggml
+looks for it**, so `pip install "loom-py-rt[cuda]"` means "also fetch that backend", `device="auto"`
+finds it, and a Raspberry Pi installs nothing extra. `packaging/rt-vulkan/` is the worked example; a
+CUDA package is that directory with two strings changed, waiting only on a machine with an NVIDIA GPU
+to build and test against. Tracked as `BACKLOG.md` P4.8, along with which backends are
 reachable at all (CUDA, OpenVINO and Qualcomm's are already in the pinned ggml; CoreML and RKNPU2 are
 not).
 

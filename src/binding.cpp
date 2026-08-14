@@ -18,8 +18,9 @@
 
 #include "loom/loom.h"
 
-#include <ggml-cpu.h>
+#include <ggml.h>
 
+#include <cstdio>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -261,8 +262,39 @@ private:
 
 } // namespace
 
+namespace {
+
+// ggml logs the loading of every backend at INFO, so a GGML_BACKEND_DL build prints a line like
+//   load_backend: loaded CPU backend from .../loom/libggml-cpu-haswell.so
+// to stderr on `import loom`. A statically linked build never did -- there was nothing to load -- so
+// this is noise the packaging change introduced rather than something the engine always did, and a
+// library that writes to stderr when merely imported is a library that shows up in somebody else's
+// clean output.
+//
+// Dropped rather than silenced wholesale: WARN and ERROR still go to stderr, because those are the
+// messages that explain a backend which loaded and then found no usable device -- the exact failure
+// `loom.devices()` exists to make visible, and one that would be much worse to hide.
+//
+// GGML_LOG_LEVEL_CONT means "a continuation of the previous message", so it has no level of its own
+// and has to inherit the decision made for what it continues; otherwise a dropped INFO can be followed
+// by a printed fragment of itself.
+void forward_ggml_log(ggml_log_level level, const char* text, void* /*user_data*/) {
+    static bool last_was_printed = false;
+    if (level != GGML_LOG_LEVEL_CONT) {
+        last_was_printed = level == GGML_LOG_LEVEL_WARN || level == GGML_LOG_LEVEL_ERROR;
+    }
+    if (last_was_printed && text != nullptr) {
+        std::fputs(text, stderr);
+    }
+}
+
+} // namespace
+
 PYBIND11_MODULE(_loom, m) {
     m.doc() = "Low-level bindings to loom.cpp. The API you want is in `loom`, not here.";
+
+    // Before anything can load a backend -- which, in this build, is the first thing that happens.
+    ggml_log_set(forward_ggml_log, nullptr);
 
     // loom::Error is what the engine raises for every bad-model / bad-input condition; letting it
     // reach Python as a plain RuntimeError would lose the distinction between "your GGUF is wrong"
@@ -275,6 +307,31 @@ PYBIND11_MODULE(_loom, m) {
             py::set_error(loom_error, e.what());
         }
     });
+
+    // Where ggml looks for backend .so files. Its own default search is the executable's directory and
+    // the current directory, and inside an interpreter the executable is `python` -- so a wheel that
+    // did not call this would find no backends at all, the CPU included (BACKLOG.md P4.8). Called from
+    // loom/__init__.py with this package's directory and every installed `loom_rt_*` accelerator
+    // package, which is why that discovery lives in Python where it can use importlib.
+    m.def("add_backend_search_path", &loom::add_backend_search_path, py::arg("directory"),
+          "Add a directory to search for dynamically loaded ggml backends.");
+
+    // What actually got loaded. The point of exposing it is that a wheel's accelerator is now an
+    // install-time question: `loom.devices()` is how a caller checks whether `loom-py-rt-vulkan` did
+    // anything, without loading a model to find out.
+    m.def("devices", [] {
+        py::list out;
+        for (const loom::DeviceInfo& dev : loom::available_devices()) {
+            py::dict entry;
+            entry["name"] = dev.name;
+            entry["description"] = dev.description;
+            entry["is_cpu"] = dev.is_cpu;
+            entry["memory_free"] = dev.memory_free;
+            entry["memory_total"] = dev.memory_total;
+            out.append(std::move(entry));
+        }
+        return out;
+    }, "Every ggml device visible to this process, in registration order.");
 
     py::class_<Model>(m, "Model")
         .def(py::init<const std::string&, const std::string&>(), py::arg("path"),

@@ -1,0 +1,43 @@
+name: Probe arm64 runner
+
+# Does this repository actually get an aarch64 hosted runner? There is no API that lists which
+# GitHub-hosted images a repo may use, so the only reliable check is to ask for one and see.
+#
+# WHY IT IS WORTH KNOWING BEFORE A RELEASE. `wheels.yml` builds half its matrix on
+# `ubuntu-24.04-arm`, and a runner image that is unavailable does not fail fast -- the job queues,
+# and a release discovers it by hanging. Free arm64 runners are a public-repository benefit and these
+# repos are public, so this is expected to work; expected is not measured.
+#
+# Dispatch it and read the result:
+#   * prints `aarch64` in a few seconds  -> the ARM rows in wheels.yml are fine;
+#   * sits in "Queued"                   -> they are not, and wheels.yml needs its aarch64 entries
+#                                           removed until they are.
+#
+# Costs one runner-minute and needs nothing installed. Delete it once ARM has built for real -- at
+# that point wheels.yml itself is the better probe.
+
+on:
+  # BOTH triggers, and the push one is not redundant: `workflow_dispatch` only registers for workflows
+  # that exist on the DEFAULT branch, so until this is merged to main it cannot be dispatched at all
+  # (`gh workflow run` answers 404). A path-scoped push trigger is how a workflow on a feature branch
+  # gets to run at all -- the same reason build-image.yml has one.
+  push:
+    paths:
+      - ".github/workflows/probe-arm.yml"
+  workflow_dispatch:
+
+jobs:
+  arm:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 5   # so an unavailable image fails in five minutes rather than queueing for a day
+    steps:
+      - name: What did we get
+        run: |
+          echo "arch:    $(uname -m)"
+          echo "cpus:    $(nproc)"
+          echo "runner:  ${{ runner.os }} / ${{ runner.arch }}"
+          grep PRETTY_NAME /etc/os-release
+          df -h / | tail -1
+          # The two things wheels.yml's aarch64 rows actually depend on beyond the machine existing.
+          docker --version || echo "no docker (cibuildwheel linux builds need it)"
+          python3 --version

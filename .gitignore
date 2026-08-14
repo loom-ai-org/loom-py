@@ -6,6 +6,12 @@ wheelhouse/
 __pycache__/
 *.pyc
 *.so
+# Versioned sonames too. `*.so` alone stopped being enough when the build went shared: a development
+# build drops libggml-base.so.0 and libggml-base.so.0.16.0 beside the package, and neither matches the
+# pattern above. Untracked build output that a wheel's package copy would happily pick up.
+*.so.*
 *.gguf
+build-*/
+dist-*/
 .pytest_cache/
 .venv/

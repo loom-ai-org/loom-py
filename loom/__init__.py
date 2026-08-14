@@ -24,13 +24,81 @@ table and tokenizes here like any other.
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from . import _loom
 from ._hub import download
 
-__all__ = ["Model", "Tokenizer", "LoomError", "download", "__version__"]
+__all__ = ["Model", "Tokenizer", "LoomError", "devices", "download", "__version__"]
+
+
+def _register_backend_paths() -> None:
+    """Tell the engine where the ggml backend libraries are.
+
+    This wheel is built with `GGML_BACKEND_DL`: every backend is a shared library loaded at run time,
+    including the CPU. That is what lets one arch-tagged wheel serve every accelerator -- an
+    accelerator is a separate, small `loom-py-rt-<backend>` package rather than a second copy of
+    everything -- but it means nothing at all is available until somebody says where to look.
+
+    ggml's own default is the executable's directory and the current directory. Inside an interpreter
+    the executable is `python`, so that default finds nothing and the failure is total rather than
+    partial: with no backend loaded there is no CPU either, and every device spec fails. Hence this
+    runs at import, before any `Model` can call into device selection.
+
+    Three sources, in the order this project uses everywhere -- the explicit override, then what the
+    installation can work out for itself:
+
+    * `$LOOM_BACKEND_DIR`, os.pathsep-separated. For a build tree, a vendored layout, or a backend
+      built by hand that no package installed.
+    * this package's own directory, which is where the base wheel puts libggml-base.so and the
+      per-microarchitecture libggml-cpu-*.so.
+    * every `loom_rt_*` package on sys.path -- `loom-py-rt-vulkan` installs `loom_rt_vulkan/` holding
+      one libggml-vulkan.so, and `pip install loom-py-rt[vulkan]` is the whole of what a user does.
+
+    Directories are only offered, never required to exist: an accelerator package that is not
+    installed is the normal case, not an error.
+    """
+    for entry in os.environ.get("LOOM_BACKEND_DIR", "").split(os.pathsep):
+        if entry:
+            _loom.add_backend_search_path(entry)
+
+    _loom.add_backend_search_path(str(Path(__file__).resolve().parent))
+
+    # A directory scan rather than an import or an entry-point lookup, deliberately: it costs no
+    # module import, it works the same in an editable install, and a backend package that fails to
+    # import for an unrelated reason cannot take the base package down with it.
+    seen: set[str] = set()
+    for root in sys.path:
+        if not root:
+            root = os.getcwd()
+        try:
+            candidates = sorted(Path(root).glob("loom_rt_*"))
+        except OSError:  # a sys.path entry that is a zip, a missing directory, or unreadable
+            continue
+        for candidate in candidates:
+            resolved = str(candidate.resolve())
+            if candidate.is_dir() and resolved not in seen:
+                seen.add(resolved)
+                _loom.add_backend_search_path(resolved)
+
+
+_register_backend_paths()
+
+
+def devices() -> list[dict]:
+    """Every ggml device this process can see, in registration order.
+
+    One entry per device with `name` (what `Model(device=...)` accepts -- "CPU", "Vulkan0", "CUDA0"),
+    `description`, `is_cpu`, and `memory_free`/`memory_total` for devices that report them.
+
+    Worth calling after installing an accelerator package, because "did it work" is now an
+    install-time question rather than a build-time one: a `loom-py-rt-vulkan` that resolved to the
+    wrong architecture, or a driver too old for the .so, shows up here as a device that simply is not
+    listed -- which is otherwise indistinguishable from a slow CPU run.
+    """
+    return _loom.devices()
 
 try:
     # Read from the installed distribution's metadata rather than restating the number here, which
@@ -62,9 +130,16 @@ class Model:
         """Load a GGUF from disk.
 
         `device` says where it runs: `""` (the default) defers to `$LOOM_DEVICE` and then to
-        autodetection, `"cpu"` pins it to the CPU, `"gpu"` demands a GPU/accelerator and raises if
-        there is none, and a device name like `"Vulkan0"` names one exactly. A wheel built without a
-        GPU backend has only a CPU to find, so the default resolves there and nothing changes.
+        autodetection, `"cpu"` pins it to the CPU, `"gpu"` demands a GPU or iGPU, `"npu"` demands an
+        accelerator with its own memory, and a device name like `"Vulkan0"` names one exactly. Both
+        `"gpu"` and `"npu"` raise rather than fall back, and they do not overlap -- `"gpu"` will not
+        answer with an accelerator. With no accelerator package installed there is only a CPU to find,
+        so the default resolves there and nothing changes.
+
+        The default ranks by what a device IS -- GPU/iGPU, then an accelerator with its own memory,
+        then a host-memory accelerator such as BLAS, then the CPU -- rather than by the order ggml
+        registered things, which differs between a linked build and the dynamically loaded one this
+        wheel ships (see `loom.cpp` BACKLOG.md P4.8b).
         """
         resolved = Path(path).expanduser()
         if not resolved.is_file():

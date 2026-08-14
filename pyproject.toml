@@ -8,11 +8,11 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "loom-py-rt"
-version = "1.0.0-rc2"
+version = "1.0.0-rc3"
 description = "Python bindings for loom.cpp, a data-driven ggml inference engine"
 readme = "README.md"
 license = { file = "LICENSE" }
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 classifiers = [
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
@@ -26,6 +26,26 @@ dependencies = []
 
 [project.optional-dependencies]
 hub = ["huggingface_hub>=0.24"]
+
+# ACCELERATORS (BACKLOG.md P4.8). `pip install "loom-py-rt[vulkan]"` fetches one small wheel holding
+# one libggml-vulkan.so; this package finds it on sys.path at import and `device="auto"` uses it. The
+# base wheel is unchanged either way -- that is the point of GGML_BACKEND_DL, and it is why there is
+# no `cu121`-style second copy of everything.
+#
+# Note these are UNLIKE `[hub]`, which is a pure-Python feature toggle that always resolves. An
+# accelerator extra is a hardware claim, it is architecture-specific, and it may not exist for the
+# platform at all -- `pip install "loom-py-rt[metal]"` on Linux will FAIL to resolve, and that is the
+# intended behaviour rather than an oversight. The alternative (an environment marker, so `[metal]`
+# quietly resolves to nothing off macOS) hands back a successful install and no Metal, and the user
+# finds out from an unexplained performance number much later. It is the same call `Device::open("gpu")`
+# already makes in raising rather than silently running on the CPU: someone who spelled out the
+# accelerator is asserting something about the machine, and should be told when it is not true.
+#
+# There is deliberately NO `[all]` extra. That is the per-accelerator wheel matrix wearing a hat -- it
+# cannot resolve on any single platform, since these are mutually exclusive by architecture.
+# `[vulkan,cuda]` together is legitimate: with GGML_BACKEND_DL the registry picks at run time.
+vulkan = ["loom-py-rt-vulkan == 1.0.0rc3"]
+cuda = ["loom-py-rt-cuda == 1.0.0rc3"]
 # `gguf` writes the handful of tiny synthetic GGUFs tests/ci builds to check what the binding does with
 # a file it has never seen -- an unrecognized `tokenizer.ggml.model` tag, most importantly. Those cases
 # are unreachable with a fake handle (they are decisions the C++ makes at load time), and mocking them
@@ -55,7 +75,7 @@ markers = [
 [tool.cibuildwheel]
 # CPython only, matching requires-python -- no PyPy (an untested build target for a pybind11 extension
 # this small a user base doesn't need yet) and no 32-bit (irrelevant for the models this ships).
-build = "cp39-* cp310-* cp311-* cp312-* cp313-*"
+build = "cp310-* cp311-* cp312-* cp313-*"
 # musllinux skipped for now: LuaJIT's Makefile build (cmake/Dependencies.cmake in the vendored engine)
 # is untested against musl's libc, and nothing here has verified it works. Lift this once someone has.
 skip = "pp* *-musllinux_* *_i686"
