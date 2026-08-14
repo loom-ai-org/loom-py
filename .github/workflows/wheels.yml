@@ -27,7 +27,16 @@ concurrency:
 
 jobs:
   build-wheels:
-    runs-on: ubuntu-latest
+    # NATIVE ARM RUNNERS, not QEMU. cibuildwheel can emulate aarch64 and it is the wrong tool here:
+    # the base wheel compiles the whole engine, and the accelerator wheels below compile hundreds of
+    # CUDA kernels, which under emulation is an overnight job rather than a slow one.
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest,    arch: x86_64 }
+          - { runner: ubuntu-24.04-arm, arch: aarch64 }
     steps:
       # `submodules: recursive` is load-bearing here too -- same reason as ci.yml: the engine is a
       # submodule, and cibuildwheel copies this checkout as-is into its build containers.
@@ -36,11 +45,99 @@ jobs:
           submodules: recursive
 
       - uses: pypa/cibuildwheel@v2
+        env:
+          CIBW_ARCHS: ${{ matrix.arch }}
 
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels
+          name: wheels-base-${{ matrix.arch }}
           path: wheelhouse/*.whl
+
+  # The accelerator packages. One wheel per platform and NOT per interpreter: the payload is a plain
+  # shared library that ggml dlopens and Python never imports, so these are tagged `py3-none-*` and
+  # `build = "cp310-*"` in each pyproject names only the interpreter that runs the build.
+  #
+  # `packaging/stage.py` is required rather than convenient. cibuildwheel mounts ONLY the package
+  # directory into its container, and a backend package deliberately reaches outside itself for the
+  # shared BackendPackage.cmake and for the engine submodule's GgmlPin.cmake -- which is what stops a
+  # backend wheel being built against a ggml its base wheel never saw. Staging assembles a complete
+  # tree from the submodule instead of duplicating the pin (BACKLOG.md P4.8i).
+  build-backends:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [cuda, vulkan]
+        include:
+          - { runner: ubuntu-latest,    arch: x86_64 }
+          - { runner: ubuntu-24.04-arm, arch: aarch64 }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # A CUDA image is several gigabytes against a hosted runner's ~14 GB of free disk.
+      - name: Reclaim disk
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc; df -h /
+
+      - name: Stage the package
+        run: python packaging/stage.py ${{ matrix.backend }} staged
+
+      # The image carries the SDK, so there is no before-all here -- see .github/docker/Dockerfile.
+      # Run FROM the staged directory: cibuildwheel requires the package to be inside the working
+      # directory, which is also why staging writes into the workspace rather than to a temp path.
+      - name: Build
+        working-directory: staged
+        env:
+          CIBW_ARCHS: ${{ matrix.arch }}
+          CIBW_MANYLINUX_X86_64_IMAGE: ghcr.io/${{ github.repository_owner }}/manylinux-loom:${{ matrix.backend }}
+          CIBW_MANYLINUX_AARCH64_IMAGE: ghcr.io/${{ github.repository_owner }}/manylinux-loom:${{ matrix.backend }}
+        run: pipx run cibuildwheel --output-dir ../wheelhouse
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.backend }}-${{ matrix.arch }}
+          path: wheelhouse/*.whl
+
+  # THE ONE CHECK A HOSTED RUNNER CANNOT DO. Building CUDA needs no GPU, so everything above runs on
+  # hosted runners; running a model needs one. This job is why the workstation is registered as a
+  # self-hosted runner, and it is not ceremony -- a soname mismatch between the base wheel and a
+  # backend loads without error, registers nothing, and shows up only as an accelerator missing from
+  # `loom.devices()` (BACKLOG.md P4.8g). Nothing in the build catches that.
+  gpu-smoke-test:
+    needs: [build-wheels, build-backends]
+    if: ${{ !cancelled() }}
+    runs-on: [self-hosted, linux, x64, gpu]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*-x86_64
+          path: dist
+          merge-multiple: true
+
+      - name: Install into a clean venv and run a model
+        env:
+          # A real exported GGUF on the runner. The gate suite's own fixture rule, not a path baked in
+          # here -- see the engine's tests/support/fixtures.h.
+          LOOM_FIXTURES: ${{ env.LOOM_FIXTURES }}
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/loom-smoke
+          /tmp/loom-smoke/bin/pip install --quiet dist/*.whl
+          cd /tmp   # a neutral cwd, so the venv's package is what gets imported
+          /tmp/loom-smoke/bin/python - <<'EOF'
+          import loom
+          names = [d["name"] for d in loom.devices()]
+          print("devices:", names)
+          assert any(n != "CPU" for n in names), (
+              "no accelerator registered -- a backend that fails to load does so SILENTLY, "
+              "so this assertion is the only thing standing between that and a green release"
+          )
+          EOF
 
   build-sdist:
     runs-on: ubuntu-latest
@@ -64,7 +161,7 @@ jobs:
           path: dist/*.tar.gz
 
   publish-pypi:
-    needs: [build-wheels, build-sdist]
+    needs: [build-wheels, build-backends, build-sdist, gpu-smoke-test]
     if: github.event_name == 'release' || inputs.publish
     runs-on: ubuntu-latest
     environment: pypi
