@@ -17,6 +17,13 @@ name: Probe arm64 runner
 # that point wheels.yml itself is the better probe.
 
 on:
+  # BOTH triggers, and the push one is not redundant: `workflow_dispatch` only registers for workflows
+  # that exist on the DEFAULT branch, so until this is merged to main it cannot be dispatched at all
+  # (`gh workflow run` answers 404). A path-scoped push trigger is how a workflow on a feature branch
+  # gets to run at all -- the same reason build-image.yml has one.
+  push:
+    paths:
+      - ".github/workflows/probe-arm.yml"
   workflow_dispatch:
 
 jobs:
