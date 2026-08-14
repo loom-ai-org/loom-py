@@ -9,7 +9,7 @@ name = "loom-py-rt-cuda"
 version = "1.0.0-rc2"
 description = "CUDA backend for loom-py-rt"
 readme = "README.md"
-license = { file = "../../LICENSE" }
+license = { file = "LICENSE" }
 requires-python = ">=3.10"
 classifiers = [
     "License :: OSI Approved :: MIT License",
@@ -82,4 +82,9 @@ archs = "x86_64 aarch64"
 # `libggml-base.so` is excluded for a different reason: it is genuinely absent at repair time, being
 # the BASE wheel's to ship, and auditwheel treats a library it cannot locate as an error rather than
 # as somebody else's problem.
-repair-wheel-command = "auditwheel repair --exclude libcudart.so.12 --exclude libcublas.so.12 --exclude libcublasLt.so.12 --exclude libnvrtc.so.12 --exclude libggml-base.so -w {dest_dir} {wheel}"
+# `libcuda.so.1` is the DRIVER, and excluding it is a correctness point rather than a size one:
+# it is not redistributable and belongs to whatever driver the user has installed. The build
+# container links against a stub (`cuda-driver-devel`), so auditwheel finds a reference it cannot
+# resolve and stops -- "Cannot repair wheel, because required library libcuda.so.1 could not be
+# located" -- which is auditwheel doing its job, not a broken build.
+repair-wheel-command = "auditwheel repair --exclude libcuda.so.1 --exclude libcudart.so.12 --exclude libcublas.so.12 --exclude libcublasLt.so.12 --exclude libnvrtc.so.12 --exclude libggml-base.so -w {dest_dir} {wheel}"

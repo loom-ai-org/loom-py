@@ -9,7 +9,7 @@ name = "loom-py-rt-vulkan"
 version = "1.0.0-rc2"
 description = "Vulkan backend for loom-py-rt"
 readme = "README.md"
-license = { file = "../../LICENSE" }
+license = { file = "LICENSE" }
 requires-python = ">=3.10"
 classifiers = [
     "License :: OSI Approved :: MIT License",
