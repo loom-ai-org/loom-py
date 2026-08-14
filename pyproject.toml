@@ -45,6 +45,7 @@ hub = ["huggingface_hub>=0.24"]
 # cannot resolve on any single platform, since these are mutually exclusive by architecture.
 # `[vulkan,cuda]` together is legitimate: with GGML_BACKEND_DL the registry picks at run time.
 vulkan = ["loom-py-rt-vulkan == 1.0.0rc2"]
+cuda = ["loom-py-rt-cuda == 1.0.0rc2"]
 # `gguf` writes the handful of tiny synthetic GGUFs tests/ci builds to check what the binding does with
 # a file it has never seen -- an unrecognized `tokenizer.ggml.model` tag, most importantly. Those cases
 # are unreachable with a fake handle (they are decisions the C++ makes at load time), and mocking them

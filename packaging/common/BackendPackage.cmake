@@ -59,21 +59,30 @@ function(loom_rt_backend_package)
     set(GGML_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
     set(${ARG_GGML_OPTION} ON CACHE BOOL "" FORCE)
 
-    # Vulkan needs a glslc and Vulkan-Headers newer than a stable distribution ships, in two ways that
-    # name neither cause. The engine already solved that; this reuses the solution rather than
-    # reproducing it, and it is a no-op for every other backend.
+    # Populate-then-add_subdirectory rather than FetchContent_MakeAvailable, for EVERY backend, and
+    # `EXCLUDE_FROM_ALL` is the load-bearing word. MakeAvailable brings ggml's OWN `install()` rules
+    # into this project, so `pip wheel` collected them alongside the one target that was asked for:
+    # the first CUDA wheel built here was 297 MB and contained `libggml-cuda.so` TWICE -- once at
+    # `loom_rt_cuda/` where the install() below puts it, and once at `bin/` where ggml's own rule does
+    # -- plus a `lib/libggml-base.so` that the note above says must never travel, because two of them
+    # on one sys.path have no rule about which loads. EXCLUDE_FROM_ALL drops ggml's install rules and
+    # leaves only ours.
+    #
+    # This was previously the Vulkan branch's behaviour only, because Vulkan needed Populate for an
+    # unrelated reason (a glslc and Vulkan-Headers newer than a stable distribution ships, which the
+    # engine already solved and this reuses). CUDA was the first backend to take the other branch and
+    # the first to find the bug -- so the branches now differ only in the toolchain step, which is the
+    # only thing that is genuinely per-backend.
+    FetchContent_GetProperties(ggml)
+    if(NOT ggml_POPULATED)
+        FetchContent_Populate(ggml)
+    endif()
     if(ARG_GGML_OPTION STREQUAL "GGML_VULKAN")
         find_package(Python3 COMPONENTS Interpreter REQUIRED)
         include(${LOOM_ENGINE_DIR}/cmake/VulkanToolchain.cmake)
-        FetchContent_GetProperties(ggml)
-        if(NOT ggml_POPULATED)
-            FetchContent_Populate(ggml)
-        endif()
         loom_setup_vulkan_toolchain()
-        add_subdirectory(${ggml_SOURCE_DIR} ${ggml_BINARY_DIR} EXCLUDE_FROM_ALL)
-    else()
-        FetchContent_MakeAvailable(ggml)
     endif()
+    add_subdirectory(${ggml_SOURCE_DIR} ${ggml_BINARY_DIR} EXCLUDE_FROM_ALL)
 
     set(backend_target ggml-${ARG_NAME})
     if(NOT TARGET ${backend_target})
@@ -82,6 +91,32 @@ function(loom_rt_backend_package)
             "or this machine is missing the backend's SDK -- ggml skips a backend whose toolchain it "
             "cannot find, and does it without failing the configure step.")
     endif()
+
+    # EXCLUDE_FROM_ALL above took the whole ggml directory out of the default build, this one target
+    # included -- so `ninja` had nothing to do and the install below failed looking for a library that
+    # was never compiled. Putting exactly one target back is the point: everything ggml would otherwise
+    # build and install stays excluded, and the artifact this package exists for gets built.
+    set_target_properties(${backend_target} PROPERTIES EXCLUDE_FROM_ALL FALSE)
+
+    # The SONAME the base wheel actually provides. This has to match the root CMakeLists.txt, which
+    # unsets VERSION/SOVERSION on the ggml libraries because a wheel is a zip and a zip cannot carry a
+    # symlink -- so the base ships one `libggml-base.so`, not the usual .so -> .so.0 -> .so.0.19.0
+    # chain. Built with ggml's defaults instead, this backend records `NEEDED libggml-base.so.0`,
+    # nothing provides that name, and the dlopen fails.
+    #
+    # The failure is silent, which is why this is worth the comment: ggml logs a backend that fails to
+    # load at a level the binding drops, so the whole symptom is an accelerator that does not appear in
+    # `loom.devices()`. It cost a build cycle to find with `ctypes.CDLL` on the shipped file.
+    #
+    # `set_property` with NO value, which UNSETS. `set_target_properties(... VERSION "")` looks
+    # equivalent and is not -- an empty version is still a version, and the library comes out named
+    # `libggml-base.so.` with a trailing dot (recorded in BACKLOG.md P4.8a).
+    foreach(ggml_lib ggml-base ggml)
+        if(TARGET ${ggml_lib})
+            set_property(TARGET ${ggml_lib} PROPERTY VERSION)
+            set_property(TARGET ${ggml_lib} PROPERTY SOVERSION)
+        endif()
+    endforeach()
 
     # Only the backend .so travels. libggml-base.so is the base wheel's to ship, and shipping a second
     # copy here would put two of them on the same sys.path with no rule about which loads.
