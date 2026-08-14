@@ -29,9 +29,41 @@ project(loom_rt_cuda LANGUAGES C CXX)
 # uncovered; there is no 12.x spelling that reaches it, because ggml rewrites every `12X` to `12Xa`
 # (Blackwell's FP4 tensor-core instructions are not forward-compatible and cannot be branched on in
 # host code), and an `a` cubin runs only on its exact architecture.
-set(LOOM_RT_CUDA_ARCHS "75-virtual;80-virtual;86-real;89-real;90-virtual;120a-real;121a-real"
+# THE LIST DEPENDS ON THE CPU ARCHITECTURE, because the GPUs that appear next to each one barely
+# overlap. pip already selects the wheel by platform tag, so this costs the user nothing and keeps the
+# aarch64 wheel -- the one going to the most constrained devices -- from carrying desktop kernels.
+#
+#   x86_64   desktop and workstation. RTX 30x (8.6), RTX 40x (8.9), RTX 50x (12.0a) get real cubins;
+#            Turing (7.5), A100 (8.0) and Hopper (9.0) JIT from PTX. No 12.1a: GB10 is an ARM part.
+#   aarch64  Jetson and Grace. Orin (8.7) and DGX Spark (12.1a) get real cubins; GH200 (9.0) and
+#            Thor JIT from PTX. No 8.9 or 12.0a -- there is no Ada or RTX 50x board on an ARM host.
+#
+# 8.7 gets its OWN cubin here rather than relying on 8.6 binary compatibility, because Orin is a
+# first-class target on this side and the wheel has room once the desktop kernels are gone.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+    set(LOOM_RT_CUDA_ARCHS_DEFAULT "80-virtual;87-real;90-virtual;121a-real")
+else()
+    set(LOOM_RT_CUDA_ARCHS_DEFAULT "75-virtual;80-virtual;86-real;89-real;90-virtual;120a-real")
+endif()
+set(LOOM_RT_CUDA_ARCHS "${LOOM_RT_CUDA_ARCHS_DEFAULT}"
     CACHE STRING "CUDA architectures for the packaged backend")
 set(CMAKE_CUDA_ARCHITECTURES ${LOOM_RT_CUDA_ARCHS} CACHE STRING "" FORCE)
+message(STATUS "loom-rt-cuda: ${CMAKE_SYSTEM_PROCESSOR} -> CUDA archs ${LOOM_RT_CUDA_ARCHS}")
+
+# WHERE libcudart AND libcublas COME FROM AT RUN TIME. This package depends on the `nvidia-*-cu12`
+# wheels (see pyproject.toml), which unpack to `nvidia/cuda_runtime/lib/` and `nvidia/cublas/lib/` --
+# siblings of this package's own directory in site-packages. A relative RPATH reaches them.
+#
+# Deliberately NOT the other approach. torch preloads its CUDA libraries with ctypes at import time,
+# which does not fit here: `loom/__init__.py` finds accelerator packages by SCANNING sys.path and never
+# imports them, precisely so a broken accelerator cannot take the base package down. An RPATH needs
+# nobody to execute anything.
+#
+# BUILD_WITH_INSTALL_RPATH so the value survives into the installed artifact; without it CMake relinks
+# at install time and the build-tree RPATH is what ends up in the wheel -- which is how the first
+# build shipped a path into this machine's conda prefix.
+set(CMAKE_INSTALL_RPATH "$ORIGIN:$ORIGIN/../nvidia/cuda_runtime/lib:$ORIGIN/../nvidia/cublas/lib")
+set(CMAKE_BUILD_WITH_INSTALL_RPATH ON)
 
 # FlashAttention kernels are UNREACHABLE from loom and are a third of the binary. The engine builds
 # attention compositely -- `mul_mat` -> `soft_max_ext` -> `mul_mat`, with `mul_mat_set_prec` on the QK

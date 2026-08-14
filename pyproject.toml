@@ -12,7 +12,7 @@ version = "1.0.0-rc2"
 description = "Python bindings for loom.cpp, a data-driven ggml inference engine"
 readme = "README.md"
 license = { file = "LICENSE" }
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 classifiers = [
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
@@ -75,7 +75,7 @@ markers = [
 [tool.cibuildwheel]
 # CPython only, matching requires-python -- no PyPy (an untested build target for a pybind11 extension
 # this small a user base doesn't need yet) and no 32-bit (irrelevant for the models this ships).
-build = "cp39-* cp310-* cp311-* cp312-* cp313-*"
+build = "cp310-* cp311-* cp312-* cp313-*"
 # musllinux skipped for now: LuaJIT's Makefile build (cmake/Dependencies.cmake in the vendored engine)
 # is untested against musl's libc, and nothing here has verified it works. Lift this once someone has.
 skip = "pp* *-musllinux_* *_i686"

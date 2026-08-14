@@ -10,7 +10,7 @@ version = "1.0.0-rc2"
 description = "CUDA backend for loom-py-rt"
 readme = "README.md"
 license = { file = "../../LICENSE" }
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 classifiers = [
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
@@ -25,7 +25,24 @@ classifiers = [
 #
 # This is not hypothetical for this package: it was built against ggml v0.19.0 only because the pin
 # moved off v0.16.0 first (P4.9), and a wheel built an hour earlier would already be wrong.
-dependencies = ["loom-py-rt == 1.0.0rc2"]
+dependencies = [
+    "loom-py-rt == 1.0.0rc2",
+    # The CUDA runtime, from NVIDIA's own wheels rather than bundled here. `libcublas.so.12` alone
+    # would dwarf this package, and a machine with an NVIDIA GPU is not surprised to be asked for
+    # NVIDIA's runtime. They unpack to `nvidia/cublas/lib` and `nvidia/cuda_runtime/lib`, siblings of
+    # this package in site-packages, which is what the RPATH in CMakeLists.txt points at.
+    #
+    # `cu12`, NOT `cu13`, and that decision drove the toolkit choice rather than following it: the
+    # `nvidia-*-cu13` names exist on PyPI only as 1.4 KB placeholder sdists at version 0.0.1, so a
+    # CUDA 13 build has no distributable runtime. The `cu12` line reaches 12.9, and 12.9 is exactly
+    # the minimum for `121a-real` -- so building against 12.9 gets DGX Spark coverage AND a runtime
+    # that pip can actually install, where 13.x gets only the first.
+    #
+    # Lower bound rather than a pin: these are ABI-stable within the CUDA 12 major version, and
+    # pinning would fight every other package in an environment that also wants them (torch above all).
+    "nvidia-cuda-runtime-cu12 >= 12.9",
+    "nvidia-cublas-cu12 >= 12.9",
+]
 
 [tool.scikit-build]
 wheel.packages = ["loom_rt_cuda"]
@@ -44,7 +61,7 @@ sdist.exclude = ["*"]
 [tool.cibuildwheel]
 # The .so contains no Python at all -- no CPython ABI, no extension module -- so one build serves
 # every interpreter.
-build = "cp39-*"
+build = "cp310-*"
 skip = "pp* *-musllinux_* *_i686"
 manylinux-x86_64-image = "manylinux_2_28"
 # x86-64 and aarch64: the second is Jetson/Grace, which is a real CUDA target rather than a
@@ -52,5 +69,17 @@ manylinux-x86_64-image = "manylinux_2_28"
 archs = "x86_64 aarch64"
 # The CUDA toolkit is not in the manylinux image, so CI has to put it there before cmake runs. Left
 # as a comment rather than a command because the right one depends on the runner, and a wrong one
-# fails deep inside a container build:
-#   before-all = "..."   # install cuda-toolkit for the image's package manager
+# fails deep inside a container build. It must be **12.9 or newer**: 12.9 is the minimum for
+# `121a-real` (DGX Spark) and the newest the `nvidia-*-cu12` runtime wheels exist for, so it is the
+# only version that gets both coverage and a runtime pip can install.
+#   before-all = "..."   # install cuda-toolkit >= 12.9 via the image's package manager
+#
+# THE REPAIR STEP HAS TO EXCLUDE WHAT WE DELIBERATELY DID NOT BUNDLE. cibuildwheel runs `auditwheel
+# repair` by default, and auditwheel's whole job is to copy external shared libraries INTO the wheel
+# and rewrite RPATHs to point at its own `.libs` directory. Left alone it would pull `libcublas.so.12`
+# in -- undoing the `nvidia-*` dependency, and adding hundreds of megabytes to a 72 MB wheel.
+#
+# `libggml-base.so` is excluded for a different reason: it is genuinely absent at repair time, being
+# the BASE wheel's to ship, and auditwheel treats a library it cannot locate as an error rather than
+# as somebody else's problem.
+repair-wheel-command = "auditwheel repair --exclude libcudart.so.12 --exclude libcublas.so.12 --exclude libcublasLt.so.12 --exclude libnvrtc.so.12 --exclude libggml-base.so -w {dest_dir} {wheel}"
