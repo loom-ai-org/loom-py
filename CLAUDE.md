@@ -27,10 +27,26 @@ If you find yourself special-casing a model name here, the fix belongs in the ex
 ## Build and test
 
 ```sh
-cmake -B build && cmake --build build -j"$(nproc)"   # writes loom/_loom*.so in place
-pytest tests/ci      # 24, no model needed. What CI runs.
+cmake -B build && cmake --build build -j"$(nproc)"   # writes loom/_loom*.so and the .so it needs
+pytest tests/ci      # no model needed. What CI runs.
 pytest tests/gate    # a real GGUF, via LOOM_TEST_MODEL (+ LOOM_TEST_MODEL_INPUTS as JSON)
 ```
+
+## The build is SHARED, and every backend is loaded at run time
+
+`GGML_BACKEND_DL`: `_loom.so`, `libloom_engine.so`, `libggml-base.so` and a set of per-microarchitecture
+`libggml-cpu-*.so` all ship inside the `loom/` package directory, wired together with `$ORIGIN` RPATH.
+This reverses an earlier deliberate static build — `CMakeLists.txt` states both reasons — and it is what
+lets **one arch-tagged wheel serve every accelerator**: `pip install "loom-py-rt[vulkan]"` adds a small
+`loom_rt_vulkan` package holding one `libggml-vulkan.so`, and nothing in the base wheel changes. See
+`packaging/README.md` for the shape and for what to copy when adding CUDA.
+
+**The consequence to keep in mind: with `GGML_BACKEND_DL` there is no CPU either until something is
+loaded.** A registry with no backend .so found is empty, so `device="cpu"` and `device="auto"` fail as
+surely as `device="gpu"` does — and ggml's own search (executable directory, current directory) never
+finds them from inside an interpreter, where the executable is `python`. `loom/__init__.py` registers
+the search paths at import for exactly this reason; `tests/ci/test_backend_discovery.py` is what fails
+loudly if that breaks. `loom.devices()` is the way to check what actually loaded.
 
 ## What the layers own
 
