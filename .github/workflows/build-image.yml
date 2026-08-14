@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write        # pushing to ghcr.io under this org
@@ -30,6 +30,13 @@ jobs:
       fail-fast: false
       matrix:
         target: [cuda, vulkan]
+        arch: [x86_64, aarch64]
+        # NATIVE per architecture, never QEMU. The CUDA target only installs RPMs and would survive
+        # emulation; the Vulkan target compiles shaderc from source, which under emulation is a
+        # different order of magnitude rather than merely slower.
+        include:
+          - { arch: x86_64,  runner: ubuntu-latest,    manylinux: quay.io/pypa/manylinux_2_28_x86_64:latest,  cuda_repo: x86_64 }
+          - { arch: aarch64, runner: ubuntu-24.04-arm, manylinux: quay.io/pypa/manylinux_2_28_aarch64:latest, cuda_repo: sbsa }
     steps:
       - uses: actions/checkout@v4
 
@@ -54,8 +61,15 @@ jobs:
           context: .github/docker
           target: ${{ matrix.target }}
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/manylinux-loom:${{ matrix.target }}
+          build-args: |
+            MANYLINUX=${{ matrix.manylinux }}
+            CUDA_REPO_ARCH=${{ matrix.cuda_repo }}
+          # ARCH-SUFFIXED TAGS rather than one multi-arch manifest. A manifest would be tidier for a
+          # `docker pull`, but it needs both arches merged in a third job, and cibuildwheel names its
+          # image per architecture anyway (CIBW_MANYLINUX_X86_64_IMAGE / _AARCH64_IMAGE) -- so the
+          # explicit tag is what the consumer actually wants, and one fewer moving part.
+          tags: ghcr.io/${{ github.repository_owner }}/manylinux-loom:${{ matrix.target }}-${{ matrix.arch }}
           # A registry cache rather than the default inline one, so the shaderc build is reused across
           # runs even when the layer above it changed.
-          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/manylinux-loom:${{ matrix.target }}-cache
-          cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/manylinux-loom:${{ matrix.target }}-cache,mode=max
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/manylinux-loom:${{ matrix.target }}-${{ matrix.arch }}-cache
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/manylinux-loom:${{ matrix.target }}-${{ matrix.arch }}-cache,mode=max

@@ -80,15 +80,10 @@ jobs:
         # the first to every combination and then finds the second one conflicts -- producing jobs with
         # no `backend` set rather than the four intended. Listing both axes and using `include` purely
         # to map an arch onto its runner is the spelling that means what it looks like.
-        arch: [x86_64]
-        # aarch64 IS NOT HERE YET, and dropping it is deliberate rather than an omission. The build
-        # image below is manylinux_2_28_**x86_64** and is built on an x86 runner, so pointing
-        # CIBW_MANYLINUX_AARCH64_IMAGE at the same tag hands an arm64 runner an amd64 image. Adding
-        # aarch64 needs an arm image first: a second build-image.yml job on ubuntu-24.04-arm, an
-        # arch-suffixed tag, and CUDA's `sbsa` repository path rather than `x86_64` -- none of which
-        # has been tried. Until then a release would fail on a job that never could have worked.
+        arch: [x86_64, aarch64]
         include:
-          - { arch: x86_64, runner: ubuntu-latest }
+          - { arch: x86_64,  runner: ubuntu-latest }
+          - { arch: aarch64, runner: ubuntu-24.04-arm }
     steps:
       - uses: actions/checkout@v4
         with:
@@ -125,7 +120,10 @@ jobs:
         working-directory: staged
         env:
           CIBW_ARCHS: ${{ matrix.arch }}
-          CIBW_MANYLINUX_X86_64_IMAGE: ghcr.io/${{ github.repository_owner }}/manylinux-loom:${{ matrix.backend }}
+          # Arch-suffixed, matching build-image.yml's tags. cibuildwheel reads whichever of these two
+          # matches the arch it is building, so setting both is correct rather than redundant.
+          CIBW_MANYLINUX_X86_64_IMAGE: ghcr.io/${{ github.repository_owner }}/manylinux-loom:${{ matrix.backend }}-x86_64
+          CIBW_MANYLINUX_AARCH64_IMAGE: ghcr.io/${{ github.repository_owner }}/manylinux-loom:${{ matrix.backend }}-aarch64
         run: pipx run cibuildwheel --output-dir ../wheelhouse
 
       - uses: actions/upload-artifact@v4
