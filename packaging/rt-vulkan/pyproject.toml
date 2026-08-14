@@ -6,7 +6,7 @@ build-backend = "scikit_build_core.build"
 name = "loom-py-rt-vulkan"
 # Deliberately the same version as the base package, and see `dependencies` for why it is not merely
 # a convention.
-version = "1.0.0-rc2"
+version = "1.0.0-rc3"
 description = "Vulkan backend for loom-py-rt"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -25,7 +25,7 @@ classifiers = [
 #
 # The cost of this is real and accepted: a base release requires re-releasing every backend package.
 # That is the trade for a base wheel that does not have to be republished per accelerator.
-dependencies = ["loom-py-rt == 1.0.0rc2"]
+dependencies = ["loom-py-rt == 1.0.0rc3"]
 
 [tool.scikit-build]
 wheel.packages = ["loom_rt_vulkan"]
