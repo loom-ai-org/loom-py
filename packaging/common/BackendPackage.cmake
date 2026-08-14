@@ -24,13 +24,29 @@
 
 include(FetchContent)
 
-# loom-py/packaging/common/ -> loom-py/vendor/loom.cpp
-set(LOOM_ENGINE_DIR ${CMAKE_CURRENT_LIST_DIR}/../../vendor/loom.cpp)
-if(NOT EXISTS ${LOOM_ENGINE_DIR}/cmake/GgmlPin.cmake)
+# TWO LAYOUTS, because a container only sees the package directory.
+#
+# In the repo, this file sits in loom-py/packaging/common/ and the engine is two levels up at
+# vendor/loom.cpp -- which is what makes the ggml pin unforgeable, since it is read from the engine
+# checkout rather than copied here.
+#
+# `cibuildwheel` mounts ONLY the package directory as /project, so neither `../common` nor
+# `../../vendor` exists inside the build container. `packaging/stage.py` therefore assembles a
+# self-contained copy: this file and the engine's own cmake modules land side by side in the staged
+# package's `cmake/` directory. Nothing is duplicated in the REPO -- the copy exists for the duration
+# of one build and is made from the submodule, so there is still exactly one source of truth.
+#
+# Staged layout wins when present, because that is the one a build container is looking at.
+if(EXISTS ${CMAKE_CURRENT_LIST_DIR}/GgmlPin.cmake)
+    set(LOOM_ENGINE_CMAKE_DIR ${CMAKE_CURRENT_LIST_DIR})
+else()
+    set(LOOM_ENGINE_CMAKE_DIR ${CMAKE_CURRENT_LIST_DIR}/../../vendor/loom.cpp/cmake)
+endif()
+if(NOT EXISTS ${LOOM_ENGINE_CMAKE_DIR}/GgmlPin.cmake)
     message(FATAL_ERROR
-        "The engine submodule is not checked out at ${LOOM_ENGINE_DIR}. A backend package builds "
-        "against the engine's pinned ggml revision and cannot substitute another one; run "
-        "`git submodule update --init --recursive` in loom-py.")
+        "No GgmlPin.cmake at ${LOOM_ENGINE_CMAKE_DIR}. Building from the repo needs the engine "
+        "submodule (`git submodule update --init --recursive`); building in a container needs the "
+        "package staged first (`python packaging/stage.py cuda <dir>`).")
 endif()
 
 # Builds one ggml backend and installs it into the Python package directory.
@@ -42,7 +58,7 @@ endif()
 function(loom_rt_backend_package)
     cmake_parse_arguments(ARG "" "NAME;PACKAGE;GGML_OPTION" "" ${ARGN})
 
-    include(${LOOM_ENGINE_DIR}/cmake/GgmlPin.cmake)
+    include(${LOOM_ENGINE_CMAKE_DIR}/GgmlPin.cmake)
     FetchContent_Declare(ggml
         GIT_REPOSITORY ${LOOM_GGML_REPOSITORY}
         GIT_TAG        ${LOOM_GGML_TAG}
@@ -79,7 +95,7 @@ function(loom_rt_backend_package)
     endif()
     if(ARG_GGML_OPTION STREQUAL "GGML_VULKAN")
         find_package(Python3 COMPONENTS Interpreter REQUIRED)
-        include(${LOOM_ENGINE_DIR}/cmake/VulkanToolchain.cmake)
+        include(${LOOM_ENGINE_CMAKE_DIR}/VulkanToolchain.cmake)
         loom_setup_vulkan_toolchain()
     endif()
     add_subdirectory(${ggml_SOURCE_DIR} ${ggml_BINARY_DIR} EXCLUDE_FROM_ALL)

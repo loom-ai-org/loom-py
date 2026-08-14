@@ -75,7 +75,13 @@ set(CMAKE_BUILD_WITH_INSTALL_RPATH ON)
 # reduction order and internal precision.
 set(GGML_CUDA_FA OFF CACHE BOOL "" FORCE)
 
-include(${CMAKE_CURRENT_LIST_DIR}/../common/BackendPackage.cmake)
+# Staged layout first (packaging/stage.py assembles it for a build container, which only
+# mounts this directory), then the in-repo layout.
+if(EXISTS ${CMAKE_CURRENT_LIST_DIR}/cmake/BackendPackage.cmake)
+    include(${CMAKE_CURRENT_LIST_DIR}/cmake/BackendPackage.cmake)
+else()
+    include(${CMAKE_CURRENT_LIST_DIR}/../common/BackendPackage.cmake)
+endif()
 
 loom_rt_backend_package(
     NAME        cuda
