@@ -10,7 +10,7 @@ version = "1.0.0-rc2"
 description = "Vulkan backend for loom-py-rt"
 readme = "README.md"
 license = { file = "../../LICENSE" }
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 classifiers = [
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
@@ -46,9 +46,14 @@ sdist.exclude = ["*"]
 # The .so contains no Python at all -- no CPython ABI, no extension module -- so one build serves
 # every interpreter. Building it once under cp39 and letting the wheel tag say so is the difference
 # between one 46 MB artifact and five identical ones.
-build = "cp39-*"
+build = "cp310-*"
 skip = "pp* *-musllinux_* *_i686"
 manylinux-x86_64-image = "manylinux_2_28"
 # Vulkan is the broadest backend: x86-64 and aarch64 both. (CUDA would be the same two; Metal would
 # be arm64 macOS alone.)
 archs = "x86_64 aarch64"
+# auditwheel would otherwise try to bundle `libggml-base.so`, which is genuinely absent at repair time
+# -- it is the BASE wheel's to ship -- and auditwheel treats a library it cannot find as an error.
+# Nothing else needs excluding here: unlike CUDA, the Vulkan loader is a system library every target
+# already has, and bundling it would be wrong rather than merely large.
+repair-wheel-command = "auditwheel repair --exclude libggml-base.so -w {dest_dir} {wheel}"
