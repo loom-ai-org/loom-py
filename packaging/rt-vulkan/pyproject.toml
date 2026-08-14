@@ -56,4 +56,8 @@ archs = "x86_64 aarch64"
 # -- it is the BASE wheel's to ship -- and auditwheel treats a library it cannot find as an error.
 # Nothing else needs excluding here: unlike CUDA, the Vulkan loader is a system library every target
 # already has, and bundling it would be wrong rather than merely large.
-repair-wheel-command = "auditwheel repair --exclude libggml-base.so -w {dest_dir} {wheel}"
+# `libvulkan.so.1` is excluded for the same reason `rt-cuda` excludes `libcuda.so.1`: it is the ICD
+# LOADER, part of the target system's graphics stack, and its job is to find that system's
+# installed drivers. Bundling a loader built against a container's headers is at best pointless
+# and at worst a loader that disagrees with the machine it lands on.
+repair-wheel-command = "auditwheel repair --exclude libvulkan.so.1 --exclude libggml-base.so -w {dest_dir} {wheel}"
