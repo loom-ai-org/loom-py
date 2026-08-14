@@ -20,6 +20,10 @@ on:
         description: "Upload the built wheels/sdist to PyPI"
         type: boolean
         default: false
+      gpu_smoke_test:
+        description: "Also run the GPU smoke test (needs a self-hosted runner online)"
+        type: boolean
+        default: false
 
 concurrency:
   group: wheels-${{ github.workflow }}-${{ github.ref }}
@@ -108,9 +112,19 @@ jobs:
   # self-hosted runner, and it is not ceremony -- a soname mismatch between the base wheel and a
   # backend loads without error, registers nothing, and shows up only as an accelerator missing from
   # `loom.devices()` (BACKLOG.md P4.8g). Nothing in the build catches that.
+  # OPT-IN, AND NOT A RELEASE GATE -- deliberately, because the alternative is worse than no check.
+  # A job targeting self-hosted labels with no matching runner online does not fail fast: it sits
+  # queued for up to 24 hours and then times out, so putting this in `publish-pypi`'s `needs:` would
+  # mean every release silently depends on one machine being switched on, and hangs rather than fails
+  # when it is not.
+  #
+  # When a runner is registered and you want releases actually gated on a model running: add
+  # `gpu-smoke-test` back to publish-pypi's `needs:` and drop the `if:` below. That is a deliberate
+  # trade -- it buys the one check a hosted runner cannot do, at the cost of tying releases to a
+  # machine's uptime.
   gpu-smoke-test:
     needs: [build-wheels, build-backends]
-    if: ${{ !cancelled() }}
+    if: ${{ inputs.gpu_smoke_test }}
     runs-on: [self-hosted, linux, x64, gpu]
     steps:
       - uses: actions/download-artifact@v4
@@ -161,7 +175,7 @@ jobs:
           path: dist/*.tar.gz
 
   publish-pypi:
-    needs: [build-wheels, build-backends, build-sdist, gpu-smoke-test]
+    needs: [build-wheels, build-backends, build-sdist]
     if: github.event_name == 'release' || inputs.publish
     runs-on: ubuntu-latest
     environment: pypi
