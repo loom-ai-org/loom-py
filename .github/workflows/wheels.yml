@@ -48,7 +48,13 @@ jobs:
         with:
           submodules: recursive
 
-      - uses: pypa/cibuildwheel@v2
+      # A FULL VERSION, because `pypa/cibuildwheel@v2` does not resolve -- that repository publishes no
+      # bare major tags at all, so the ref this workflow shipped with had never been valid. It went
+      # unnoticed because this workflow had never run: its first execution, after the P4.8 merge,
+      # failed both base-wheel jobs at "Unable to resolve action". The backend jobs below were
+      # unaffected because they invoke `pipx run cibuildwheel` instead, which is also the evidence
+      # that this project's [tool.cibuildwheel] config is v4-compatible.
+      - uses: pypa/cibuildwheel@v4.2.0
         env:
           CIBW_ARCHS: ${{ matrix.arch }}
 
