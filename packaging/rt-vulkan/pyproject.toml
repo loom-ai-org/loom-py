@@ -1,0 +1,54 @@
+[build-system]
+requires = ["scikit-build-core>=0.9"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "loom-py-rt-vulkan"
+# Deliberately the same version as the base package, and see `dependencies` for why it is not merely
+# a convention.
+version = "1.0.0-rc2"
+description = "Vulkan backend for loom-py-rt"
+readme = "README.md"
+license = { file = "../../LICENSE" }
+requires-python = ">=3.9"
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# An EXACT pin, not a compatible-release range (BACKLOG.md P4.8). This wheel carries a
+# libggml-vulkan.so that gets dlopened beside the base wheel's libggml-base.so, and ggml makes no ABI
+# promise across revisions -- so any loom-py-rt release that bumps its ggml pin invalidates every
+# backend wheel published before it. `~=` would let pip pair two libraries that do not agree and the
+# failure would surface as a symbol error at model load, or worse, not at all.
+#
+# The cost of this is real and accepted: a base release requires re-releasing every backend package.
+# That is the trade for a base wheel that does not have to be republished per accelerator.
+dependencies = ["loom-py-rt == 1.0.0rc2"]
+
+[tool.scikit-build]
+wheel.packages = ["loom_rt_vulkan"]
+# `py3-none-manylinux_...` rather than `cp39-cp39-manylinux_...`. The payload is a plain shared
+# library with no CPython ABI in it -- it is dlopened by ggml, never imported by Python -- so the
+# interpreter dimension the default tag would encode is not real, and encoding it would mean five
+# identical 46 MB wheels per architecture. The architecture half of the tag stays, because that half
+# is real.
+wheel.py-api = "py3"
+cmake.version = ">=3.24"
+cmake.build-type = "Release"
+# No sdist. This build reads the engine submodule above the package root for its ggml pin, which an
+# sdist would not carry -- and a backend sdist that built standalone would be one that could build
+# against the wrong ggml. See packaging/common/BackendPackage.cmake.
+sdist.exclude = ["*"]
+
+[tool.cibuildwheel]
+# The .so contains no Python at all -- no CPython ABI, no extension module -- so one build serves
+# every interpreter. Building it once under cp39 and letting the wheel tag say so is the difference
+# between one 46 MB artifact and five identical ones.
+build = "cp39-*"
+skip = "pp* *-musllinux_* *_i686"
+manylinux-x86_64-image = "manylinux_2_28"
+# Vulkan is the broadest backend: x86-64 and aarch64 both. (CUDA would be the same two; Metal would
+# be arm64 macOS alone.)
+archs = "x86_64 aarch64"
