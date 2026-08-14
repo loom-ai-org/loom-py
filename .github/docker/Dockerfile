@@ -15,7 +15,16 @@
 #
 # The tag `manylinux-x86_64-image` in each package's [tool.cibuildwheel] is what points at these.
 
+# Both are passed per architecture by .github/workflows/build-image.yml. An image is built NATIVELY
+# on a runner of its own architecture rather than emulated: the CUDA target only installs RPMs and
+# would survive QEMU, but the Vulkan target COMPILES shaderc from source, and that under emulation is
+# not a slow build, it is a different order of magnitude.
 ARG MANYLINUX=quay.io/pypa/manylinux_2_28_x86_64:latest
+# NVIDIA's repository path for the target architecture. `sbsa` -- Server Base System Architecture --
+# is the aarch64 one; verified against the alternatives, `rhel8/arm64` does not exist. Note that
+# Jetson's own L4T packages live somewhere else again, which matters if Orin ever needs something
+# beyond what the generic aarch64 build provides.
+ARG CUDA_REPO_ARCH=x86_64
 
 # ---------------------------------------------------------------------------------------------------
 FROM ${MANYLINUX} AS base
@@ -38,9 +47,10 @@ FROM base AS cuda
 # container has no driver. Without it the configure fails with `Target "ggml-cuda" links to
 # CUDA::cuda_driver but the target was not found`, and the tempting fix (GGML_CUDA_NO_VMM=ON) would
 # change shipped memory-pool behaviour to work around a build-environment gap.
+ARG CUDA_REPO_ARCH
 ARG CUDA_VERSION=12-9
 RUN dnf config-manager --add-repo \
-        https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo && \
+        https://developer.download.nvidia.com/compute/cuda/repos/rhel8/${CUDA_REPO_ARCH}/cuda-rhel8.repo && \
     dnf -y install \
         cuda-nvcc-${CUDA_VERSION} \
         cuda-cudart-devel-${CUDA_VERSION} \
