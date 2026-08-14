@@ -17,7 +17,14 @@ import loom
 
 class TestPackage:
     def test_it_imports_and_exports_what_it_says(self):
-        assert loom.__all__ == ["Model", "Tokenizer", "LoomError", "download", "__version__"]
+        assert loom.__all__ == [
+            "Model",
+            "Tokenizer",
+            "LoomError",
+            "devices",
+            "download",
+            "__version__",
+        ]
         assert isinstance(loom.__version__, str)
 
     def test_loom_error_is_a_runtime_error(self):
