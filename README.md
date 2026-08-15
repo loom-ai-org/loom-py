@@ -10,40 +10,86 @@
 import loom
 
 model = loom.Model.from_pretrained("loom-ai-org/lfm2-350m-monolithic-loom")
-print(model.generate("The capital of France is", max_new_tokens=14))
+print(model.text2text.infer("The capital of France is", max_new_tokens=14))
 # ':\nA) Paris\nB) Lyon\nC) Marseille\nD'
 ```
 
-## Text in, text out
+## Two APIs, and which one you want
 
-`generate` tokenizes with the vocabulary the GGUF embeds, runs the driver, and detokenizes what comes
-back. The same steps are available separately when you want them:
+**The high-level API is one door per task, named for the modality pair it maps between.** Every model
+carries all of them; the ones it does not answer to say so when called, naming what it actually is.
+
+```python
+model.text2text.infer("The capital of France is")        # -> str
+model.speech2text.infer(waveform, language="en")         # -> Transcription
+model.text2speech.infer("hello world")                   # -> Audio
+```
+
+Which door a model answers is read off the file, not guessed from its name:
+
+```python
+model.task            # 'automatic-speech-recognition'
+model.capabilities    # ('speech2text',)
+model.text2speech.infer("hi")
+# UnsupportedTask: this model is speech2text (automatic-speech-recognition), not text2speech.
+```
+
+Each door does the whole job, including the parts you cannot do from outside. `speech2text` windows
+audio for a model whose graph is built at one clip length, decodes with the early stop armed, splits
+the output into timestamped segments and **seeks to where the model closed its last segment** — so an
+utterance straddling a window edge is re-decoded whole rather than arriving as two fragments:
+
+```python
+r = model.speech2text.infer(audio, language="en", timestamps=True)
+r.text                        # the joined transcript
+r.segments[0].start, .end     # seconds, whole-file
+r.timestamped                 # whether those are boundaries the model chose
+```
+
+`text2speech` returns audio with its rate attached, because a bare list of floats played at the wrong
+rate does not fail — it plays at the wrong speed:
+
+```python
+audio = model.text2speech.infer("hello world", steps=8, seed=1)
+audio.sample_rate             # 22050
+audio.save("out.wav")
+```
+
+**The low-level API is the driver's own entry point, and stays raw.** `infer` passes your arguments
+straight through, so which ones a model takes is a property of the model rather than of this package:
 
 ```python
 model.tokenize("The capital of France is")   # [1, 1098, 5706, 803, 4481, 856]
 model.detokenize([1, 1098, 5706])            # '<|startoftext|>The capital'
-model.tokenizer                               # <loom.Tokenizer 'gpt2' size=64400>
+model.infer(tokens=[16, 40, 22, 30], n_steps=4, seed=1234)   # the driver's own inputs
+print(model.driver_source)                   # the Lua that will run, and what it accepts
 ```
 
-The four vocabulary families a loom GGUF can carry — byte-level BPE, SentencePiece, WordPiece and
-byte-level — are dispatched on the file's own `tokenizer.ggml.model`, so this is one call whichever
-one a model uses.
+Use it when you want a knob the high-level door does not name — VITS's `noise_scale_w`, a specific
+voice vector, a model's own second entry point. That is the boundary between the two: **a knob with no
+canonical role is reachable through `infer` and nowhere else.**
 
-For a speech model there is nothing to encode; detokenizing the driver's output is the other half of
-the same thing:
+## Text to speech, and the one step that is not in the file
+
+Every TTS model here takes text now, but two of them get there differently. Supertonic encodes
+graphemes itself. The other four consume *phoneme* ids — and the symbol table that turns phonemes into
+their ids ships in the GGUF, so `model.tokenizer` is a real vocabulary for all of them:
 
 ```python
-transcript = model.detokenize(model.infer(waveform=audio, audio_samples=len(audio)))
+model.tokenizer                      # <loom.Tokenizer 'phonemes' size=159>
+model.tokenize("h\u0259\u02c8lo\u028a")             # -> ids, with the model's own BOS/blank/EOS assembly
 ```
 
-**A TTS model has no `generate`, and that is a real limitation rather than a missing feature.** Matcha,
-VITS, Kokoro and StyleTTS2 consume *phoneme* ids that a phonemiser produces outside the engine, so
-their GGUFs embed no vocabulary at all — `model.tokenizer` is `None` for them and they take ids
-directly:
+What is *not* in the file is grapheme-to-phoneme, because that is a property of the language rather
+than of any checkpoint. It is an optional extra:
 
-```python
-audio = model.infer(tokens=[16, 40, 22, 30, 12, 3], n_steps=4, seed=1234)
+```sh
+pip install "loom-py-rt[phonemes]"
 ```
+
+With it, `text2speech.infer("hello world")` works on all five. Without it, passing `phonemes=` or
+`tokens=` works exactly as before and only the text door is absent, with an error naming the install.
+`loom.phonemizers.register("ipa", fn)` substitutes your own.
 
 ## Choosing a device
 
@@ -122,7 +168,8 @@ anything here.
 | [`loom-ai-org/smollm2-360m-instruct-loom`](https://huggingface.co/loom-ai-org/smollm2-360m-instruct-loom) | [`HuggingFaceTB/SmolLM2-360M-Instruct`](https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct) |
 | [`loom-ai-org/gemma-3-270m-it-loom`](https://huggingface.co/loom-ai-org/gemma-3-270m-it-loom) | [`google/gemma-3-270m-it`](https://huggingface.co/google/gemma-3-270m-it) |
 
-These are the models `generate` works on.
+These are the models `text2text` answers to; `model.generate(...)` is the same call under the name
+it shipped with.
 
 ### Speech recognition
 
@@ -136,8 +183,8 @@ These are the models `generate` works on.
 | [`loom-ai-org/qwen3-asr-0.6b-loom`](https://huggingface.co/loom-ai-org/qwen3-asr-0.6b-loom) | [`Qwen/Qwen3-ASR-0.6B`](https://huggingface.co/Qwen/Qwen3-ASR-0.6B) |
 | [`loom-ai-org/granite-speech-4.0-1b-loom`](https://huggingface.co/loom-ai-org/granite-speech-4.0-1b-loom) | [`ibm-granite/granite-4.0-1b-speech`](https://huggingface.co/ibm-granite/granite-4.0-1b-speech) |
 
-`model.detokenize(model.infer(waveform=audio, audio_samples=len(audio)))` — the mel frontend is inside
-the graph, so a raw waveform is the input.
+`model.speech2text.infer(waveform, language="en")` — the mel frontend is inside the graph, so a raw
+waveform is the input, and long audio is windowed and seeked for you.
 
 ### Speech synthesis
 
@@ -149,8 +196,10 @@ the graph, so a raw waveform is the input.
 | [`loom-ai-org/vits-piper-en-gb-miro-loom`](https://huggingface.co/loom-ai-org/vits-piper-en-gb-miro-loom) | [`OpenVoiceOS/pipertts_en-GB_miro`](https://huggingface.co/OpenVoiceOS/pipertts_en-GB_miro) |
 | [`loom-ai-org/styletts2-ljspeech-loom`](https://huggingface.co/loom-ai-org/styletts2-ljspeech-loom) | [`yl4579/StyleTTS2-LJSpeech`](https://huggingface.co/yl4579/StyleTTS2-LJSpeech) |
 
-Supertonic is the one with a text door — `model.tokenize` works on it and is `None` for the other
-four, which take phoneme ids (see above). `model.driver_source` is the authority on what each accepts.
+All five take text through `model.text2speech.infer(...)`; the four phoneme-input ones need the
+`[phonemes]` extra for the G2P step (see above), and every one of them accepts `phonemes=` or `tokens=`
+without it. Kokoro and Supertonic ship a default voice, so a published file speaks on its own.
+`model.driver_source` is the authority on what each driver accepts.
 
 ## The three repos
 
