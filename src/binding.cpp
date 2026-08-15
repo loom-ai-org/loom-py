@@ -17,7 +17,7 @@
 #include <pybind11/stl.h>
 
 #include "loom/loom.h"
-#include "loom/core/audio_window.h"
+#include "loom/core/transcribe.h"
 
 #include <ggml.h>
 
@@ -206,59 +206,51 @@ public:
     // `inputs` is {name: float | sequence[float]}, which is exactly the bridge's own Value variant --
     // a driver's world is numbers and arrays of numbers, and nothing here needs to know that one
     // model's array is a waveform and another's is a run of token ids.
-    // FIXED-CLIP AUDIO. The three facts this needs -- the clip length, that padding is zeros, and the
-    // two decode arguments a fixed-clip driver needs armed -- now come from the engine
-    // (`loom/core/audio_window.h`) rather than being spelled again here. They are properties of the
-    // file format, and the CLI needs the identical ones; the first draft of this method reimplemented
-    // them, which is exactly the second source of truth that header exists to prevent.
+    // TRANSCRIPTION, which is the engine's `loom::audio::transcribe` and nothing else (see
+    // loom/core/transcribe.h). An earlier draft of this method reimplemented the windowing here and
+    // accepted that Python would transcribe long audio worse than the CLI, because the timestamp-aware
+    // seek "belonged" to the CLI. It did not: the timestamp ids come from the vocabulary the GGUF
+    // embeds and the frame duration is arithmetic on declared hparams, so the engine can do it for
+    // everyone. Both front ends now run the identical loop -- windowing, segment splitting, seeking on
+    // the model's own boundaries, prev_tokens conditioning.
     //
-    // What stays here is the COMPOSITION: walk the windows, call the driver per window, concatenate.
-    // The CLI's own composition differs -- it seeks by the model's timestamps rather than by a fixed
-    // stride, so an utterance straddling a window edge is re-decoded whole, and it carries each
-    // window's tokens forward as `prev_tokens`. That is long-form policy, not a property of the file,
-    // and reproducing it here would need the timestamp ids out of the vocabulary and a segment
-    // splitter. Fixed cuts are the CLI's own documented fallback for a model exposing no timestamp
-    // tokens, so this is a real path -- but on long-form audio the CLI still transcribes better.
-    py::object infer_audio(const py::dict& inputs) {
-        const uint32_t clip = loom::audio::fixed_clip_samples(*model_);
-        if (clip == 0 || !inputs.contains("waveform")) return call("infer", inputs);
-
-        const auto waveform = inputs["waveform"].cast<std::vector<float>>();
-        py::dict rest;
-        for (auto item : inputs) {
-            if (item.first.cast<std::string>() != "waveform") rest[item.first] = item.second;
+    // Returns the segments, because throwing them away here would be inventing the same asymmetry in a
+    // different place: a caller who wants one string joins them, and a caller building subtitles or
+    // seeking in a player needs the times. `Model.transcribe` in loom/__init__.py is what turns this
+    // into either shape.
+    py::object transcribe(const std::vector<float>& waveform, const py::dict& options) {
+        if (driver_.empty()) {
+            throw std::runtime_error(
+                "this GGUF carries no driver script, so there is nothing to transcribe.");
         }
-        // DEFAULTS, not overrides: a caller who names either keeps it. Without them a fixed-clip
-        // decode is silently wrong rather than failing -- 16 tokens cut mid-sentence with neither, or
-        // the sentence followed by two hundred end-of-text tokens with only the ceiling.
-        if (!rest.contains("eos_token")) {
-            const int32_t eos = loom::audio::default_eos_token(*model_);
-            if (eos >= 0) rest["eos_token"] = py::float_(static_cast<double>(eos));
-        }
-        if (!rest.contains("max_new_tokens")) {
-            rest["max_new_tokens"] =
-                py::float_(static_cast<double>(loom::audio::default_max_new_tokens(*model_)));
+        loom::audio::TranscribeOptions opts;
+        // Names, resolved by the engine against the file's own vocabulary -- a Python caller has no
+        // way to look up the id of `<|en|>`, and used to have to.
+        if (options.contains("language")) opts.language = options["language"].cast<std::string>();
+        if (options.contains("task")) opts.task = options["task"].cast<std::string>();
+        if (options.contains("timestamps")) opts.timestamps = options["timestamps"].cast<bool>();
+        if (options.contains("condition_on_previous")) {
+            opts.condition_on_previous = options["condition_on_previous"].cast<bool>();
         }
 
-        auto run_window = [&](size_t seek) {
-            py::dict args = rest;
-            args["waveform"] = py::cast(loom::audio::window_at(waveform, seek, clip));
-            return call("infer", args);
-        };
+        const loom::audio::Transcription result =
+            loom::audio::transcribe(*bridge_, *model_, waveform, opts);
 
-        if (waveform.size() <= clip) return run_window(0);
-
-        std::vector<double> ids;
-        for (size_t seek = 0; seek < waveform.size(); seek += clip) {
-            const py::object out = run_window(seek);
-            if (py::isinstance<py::float_>(out)) {
-                ids.push_back(out.cast<double>());
-            } else {
-                const auto chunk = out.cast<std::vector<double>>();
-                ids.insert(ids.end(), chunk.begin(), chunk.end());
-            }
+        py::list segments;
+        for (const loom::audio::Segment& seg : result.segments) {
+            py::dict d;
+            d["start"] = seg.start;
+            d["end"] = seg.end;
+            d["text"] = seg.text;
+            d["closed"] = seg.closed;
+            segments.append(d);
         }
-        return py::cast(ids);
+        py::dict out;
+        out["segments"] = segments;
+        out["text"] = result.text;
+        out["windows"] = result.windows;
+        out["timestamped"] = result.timestamped;
+        return out;
     }
 
     py::object call(const std::string& fn_name, const py::dict& inputs) {
@@ -409,5 +401,5 @@ PYBIND11_MODULE(_loom, m) {
         .def("encode", &Model::encode, py::arg("text"), py::arg("lang") = std::string{})
         .def("decode", &Model::decode, py::arg("ids"))
         .def("call", &Model::call, py::arg("fn_name"), py::arg("inputs"))
-        .def("infer_audio", &Model::infer_audio, py::arg("inputs"));
+        .def("transcribe", &Model::transcribe, py::arg("waveform"), py::arg("options"));
 }
