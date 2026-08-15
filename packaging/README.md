@@ -57,6 +57,21 @@ Copy `rt-vulkan/`, change four things, and build it next to the base wheel:
 3. `loom_rt_<backend>/__init__.py` — the docstring; there is no code in it.
 4. `pyproject.toml` in the repo root — a `<backend> = ["loom-py-rt-<backend> == <version>"]` extra.
 
+**A version bump is SEVEN strings across three files, and they are a circular exact-pin set.** The base
+package and both backends pin each other by exact version, in two spellings — `version = "1.0.0-rc4"`
+and the normalised `== 1.0.0rc4` — so bumping any subset publishes a package that resolves against a
+version nobody released:
+
+```
+pyproject.toml                     version, + the vulkan and cuda extras' pins   (3)
+packaging/rt-cuda/pyproject.toml   version, + its loom-py-rt pin                 (2)
+packaging/rt-vulkan/pyproject.toml version, + its loom-py-rt pin                 (2)
+```
+
+Nothing in `.github/workflows/` carries a version — it flows from these files through scikit-build and
+cibuildwheel — and the git tag is not read either, so a tag that disagrees with `version` publishes the
+pyproject's number without complaint.
+
 Most backends are worth building for one or two architectures, so the real matrix is far sparser than
 the cross product — roughly nine wheels, not backends times platforms:
 
