@@ -17,6 +17,8 @@
 #include <pybind11/stl.h>
 
 #include "loom/loom.h"
+#include "loom/core/model_contract.h"
+#include "loom/core/text_generate.h"
 #include "loom/core/transcribe.h"
 
 #include <ggml.h>
@@ -65,6 +67,12 @@ public:
             tokenizer->byte_ = loom::ByteVocab::load(model);
         } else if (tokenizer->kind_ == "gpt2") {
             tokenizer->bpe_ = loom::BpeVocab::load(model);
+        } else if (tokenizer->kind_ == "phonemes") {
+            // The phoneme-input TTS families, which had no vocabulary at all until the symbol table
+            // their checkpoints always carried was exported (loom/core/phoneme_vocab.h). `tokenize`
+            // takes IPA and returns model-ready ids, assembly included -- the same shape Supertonic's
+            // grapheme table already had, one step further down the pipeline.
+            tokenizer->phoneme_ = loom::PhonemeVocab::load(model);
         } else if (tokenizer->kind_ == "supertonic") {
             tokenizer->supertonic_ = loom::SupertonicTextVectorizer::load(model);
         } else if (tokenizer->kind_ == "llama" || tokenizer->kind_ == "t5") {
@@ -74,7 +82,7 @@ public:
         return tokenizer;
     }
 
-    bool valid() const { return spm_ || bpe_ || wordpiece_ || byte_ || supertonic_; }
+    bool valid() const { return spm_ || bpe_ || wordpiece_ || byte_ || supertonic_ || phoneme_; }
     const std::string& kind() const { return kind_; }
 
     size_t size() const {
@@ -82,6 +90,7 @@ public:
         if (bpe_) return bpe_->size();
         if (wordpiece_) return wordpiece_->size();
         if (byte_) return byte_->size();
+        if (phoneme_) return phoneme_->size();
         // n_tokens(), not vocab_size() -- the latter is the 65536-entry BMP lookup table, which is not
         // what any caller reading `tokenizer.size()` means.
         return supertonic_->n_tokens();
@@ -100,6 +109,7 @@ public:
         if (bpe_) return bpe_->encode(text);
         if (wordpiece_) return wordpiece_->encode(text);
         if (byte_) return byte_->encode(text);
+        if (phoneme_) return phoneme_->encode(text);
         return supertonic_->tokenize(text, lang);  // empty lang -> the file's own default_lang
     }
 
@@ -108,6 +118,7 @@ public:
         if (bpe_) return bpe_->decode(ids);
         if (wordpiece_) return wordpiece_->decode(ids);
         if (byte_) return byte_->decode(ids);
+        if (phoneme_) return phoneme_->decode(ids);
         return supertonic_->detokenize(ids);
     }
 
@@ -122,7 +133,25 @@ private:
     std::unique_ptr<loom::WordPieceVocab> wordpiece_;
     std::unique_ptr<loom::ByteVocab> byte_;
     std::unique_ptr<loom::SupertonicTextVectorizer> supertonic_;
+    std::unique_ptr<loom::PhonemeVocab> phoneme_;
 };
+
+// One driver input, marshalled. A driver's world is numbers and arrays of numbers -- the bridge's own
+// Value variant is exactly those two -- so this is the whole conversion, and it is a free function
+// because two entry points need it: `call`, and the extra inputs a `generate` forwards.
+loom::LoomLuaBridge::Value to_value(const std::string& key, const py::handle& value) {
+    if (py::isinstance<py::float_>(value) || py::isinstance<py::int_>(value)) {
+        return value.cast<double>();
+    }
+    try {
+        return value.cast<std::vector<double>>();
+    } catch (const py::cast_error&) {
+        throw std::runtime_error(
+            "input '" + key + "' is neither a number nor a sequence of numbers. A driver's "
+            "inputs are numbers and arrays of numbers; anything with more structure than "
+            "that belongs in the model, not in the call.");
+    }
+}
 
 // Owns everything the engine needs alive for the duration of a session, in an order that matters:
 // the bridge holds non-owning references to the model and the cache, so they are declared first and
@@ -193,6 +222,58 @@ public:
 
     std::vector<std::string> topologies() const { return names_; }
     std::string architecture() const { return model_->architecture(); }
+
+    // WHAT THIS FILE SAYS IT IS, which is what the Python layer dispatches its end-to-end doors on.
+    // `architecture` above is a per-MODEL name, so anything keyed on it would be a table of model names
+    // living in this package -- exactly what loom-py's CLAUDE.md forbids and what the declared contract
+    // exists to replace (loom.cpp docs/HIGH-LEVEL-API.md).
+    //
+    // Marshalled as a dict rather than a bound struct: every field is optional and absence is
+    // meaningful, and a dict says "this key was not declared" in the one way Python already reads
+    // without a sentinel per field. `declared` is separate because a host must be able to tell a file
+    // that states its contract from one it has to be told about.
+    py::dict contract() const {
+        const loom::ModelContract c = loom::ModelContract::read(*model_);
+        py::dict out;
+        out["declared"] = c.declared();
+        out["task"] = c.task;
+        out["input_kind"] = c.input_kind;
+        out["output_kind"] = c.output_kind;
+        out["interface"] = c.interface_name();
+        out["sample_rate"] = c.sample_rate;
+        out["clip_samples"] = c.clip_samples;
+        out["max_input_tokens"] = c.max_input_tokens;
+        out["text_frontend"] = c.text_frontend;
+        out["phoneme_alphabet"] = c.phoneme_alphabet;
+        out["phonemizer_ruleset"] = c.phonemizer_ruleset;
+        out["languages"] = c.languages;
+        out["entry_points"] = c.entry_points;
+        out["default_steps"] = c.default_steps;
+        out["voices"] = c.voices;
+        return out;
+    }
+
+    // The causal-LM decode loop, which is the ENGINE's (loom/core/text_generate.h) rather than a Python
+    // reimplementation of it. The Python one that used to live in `Model.generate_ids` was correct and
+    // was still a second copy: loom_cli's differed in three ways, and nothing but coincidence kept this
+    // one in step. Both hosts call the same function now.
+    std::vector<int32_t> generate(const std::vector<int32_t>& tokens, uint32_t max_new_tokens,
+                                  int32_t eos_token, const py::dict& extra_inputs) {
+        if (driver_.empty()) {
+            throw std::runtime_error(
+                "this GGUF carries no driver script, so there is nothing to generate with.");
+        }
+        loom::text::GenerateOptions options;
+        options.max_new_tokens = max_new_tokens;
+        options.eos_token = eos_token;
+        // Anything else the caller named, forwarded verbatim to the driver -- a model whose `infer`
+        // takes more than tokens (a style vector, a speaker id) is driven through the same loop.
+        for (auto item : extra_inputs) {
+            const auto key = item.first.cast<std::string>();
+            options.extra_inputs[key] = to_value(key, item.second);
+        }
+        return loom::text::generate(*bridge_, *model_, tokens, options);
+    }
     bool has_driver() const { return !driver_.empty(); }
     std::string driver_source() const { return driver_; }
 
@@ -261,20 +342,8 @@ public:
         }
         std::unordered_map<std::string, loom::LoomLuaBridge::Value> args;
         for (auto item : inputs) {
-            const auto key = item.first.cast<std::string>();
-            const py::handle value = item.second;
-            if (py::isinstance<py::float_>(value) || py::isinstance<py::int_>(value)) {
-                args.emplace(key, value.cast<double>());
-            } else {
-                try {
-                    args.emplace(key, value.cast<std::vector<double>>());
-                } catch (const py::cast_error&) {
-                    throw std::runtime_error(
-                        "input '" + key + "' is neither a number nor a sequence of numbers. A driver's "
-                        "inputs are numbers and arrays of numbers; anything with more structure than "
-                        "that belongs in the model, not in the call.");
-                }
-            }
+            args.emplace(item.first.cast<std::string>(), to_value(item.first.cast<std::string>(),
+                                                                   item.second));
         }
         // Held in a named local before converting: `call` returns by value, and binding a reference
         // into the returned variant reads freed memory -- the bug that cost a full bisect on the C++
@@ -401,5 +470,8 @@ PYBIND11_MODULE(_loom, m) {
         .def("encode", &Model::encode, py::arg("text"), py::arg("lang") = std::string{})
         .def("decode", &Model::decode, py::arg("ids"))
         .def("call", &Model::call, py::arg("fn_name"), py::arg("inputs"))
-        .def("transcribe", &Model::transcribe, py::arg("waveform"), py::arg("options"));
+        .def("transcribe", &Model::transcribe, py::arg("waveform"), py::arg("options"))
+        .def("contract", &Model::contract)
+        .def("generate", &Model::generate, py::arg("tokens"), py::arg("max_new_tokens"),
+             py::arg("eos_token"), py::arg("extra_inputs"));
 }
