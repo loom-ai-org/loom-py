@@ -20,6 +20,8 @@ class TestPackage:
         assert loom.__all__ == [
             "Model",
             "Tokenizer",
+            "Transcription",
+            "Segment",
             "LoomError",
             "devices",
             "download",
@@ -168,6 +170,13 @@ class _FakeHandle:
     def call(self, fn_name, inputs):
         self.calls.append(inputs)
         return self._returns.pop(0) if self._returns else 0.0
+    # `Model.transcribe` runs the engine's whole long-form loop, which a fake cannot stand in for --
+    # it needs a real vocabulary and a real driver. What a double CAN pin is the marshalling either
+    # side of it, so this returns the shape the binding returns and nothing more.
+    def transcribe(self, waveform, options):
+        self.calls.append({"waveform": waveform, **options})
+        return {"segments": [{"start": 0.0, "end": 1.0, "text": "hello", "closed": True}],
+                "text": "hello", "windows": 1, "timestamped": True}
 
 
 def _model(handle):

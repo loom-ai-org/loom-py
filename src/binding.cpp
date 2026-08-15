@@ -17,6 +17,7 @@
 #include <pybind11/stl.h>
 
 #include "loom/loom.h"
+#include "loom/core/transcribe.h"
 
 #include <ggml.h>
 
@@ -205,6 +206,53 @@ public:
     // `inputs` is {name: float | sequence[float]}, which is exactly the bridge's own Value variant --
     // a driver's world is numbers and arrays of numbers, and nothing here needs to know that one
     // model's array is a waveform and another's is a run of token ids.
+    // TRANSCRIPTION, which is the engine's `loom::audio::transcribe` and nothing else (see
+    // loom/core/transcribe.h). An earlier draft of this method reimplemented the windowing here and
+    // accepted that Python would transcribe long audio worse than the CLI, because the timestamp-aware
+    // seek "belonged" to the CLI. It did not: the timestamp ids come from the vocabulary the GGUF
+    // embeds and the frame duration is arithmetic on declared hparams, so the engine can do it for
+    // everyone. Both front ends now run the identical loop -- windowing, segment splitting, seeking on
+    // the model's own boundaries, prev_tokens conditioning.
+    //
+    // Returns the segments, because throwing them away here would be inventing the same asymmetry in a
+    // different place: a caller who wants one string joins them, and a caller building subtitles or
+    // seeking in a player needs the times. `Model.transcribe` in loom/__init__.py is what turns this
+    // into either shape.
+    py::object transcribe(const std::vector<float>& waveform, const py::dict& options) {
+        if (driver_.empty()) {
+            throw std::runtime_error(
+                "this GGUF carries no driver script, so there is nothing to transcribe.");
+        }
+        loom::audio::TranscribeOptions opts;
+        // Names, resolved by the engine against the file's own vocabulary -- a Python caller has no
+        // way to look up the id of `<|en|>`, and used to have to.
+        if (options.contains("language")) opts.language = options["language"].cast<std::string>();
+        if (options.contains("task")) opts.task = options["task"].cast<std::string>();
+        if (options.contains("timestamps")) opts.timestamps = options["timestamps"].cast<bool>();
+        if (options.contains("condition_on_previous")) {
+            opts.condition_on_previous = options["condition_on_previous"].cast<bool>();
+        }
+
+        const loom::audio::Transcription result =
+            loom::audio::transcribe(*bridge_, *model_, waveform, opts);
+
+        py::list segments;
+        for (const loom::audio::Segment& seg : result.segments) {
+            py::dict d;
+            d["start"] = seg.start;
+            d["end"] = seg.end;
+            d["text"] = seg.text;
+            d["closed"] = seg.closed;
+            segments.append(d);
+        }
+        py::dict out;
+        out["segments"] = segments;
+        out["text"] = result.text;
+        out["windows"] = result.windows;
+        out["timestamped"] = result.timestamped;
+        return out;
+    }
+
     py::object call(const std::string& fn_name, const py::dict& inputs) {
         if (driver_.empty()) {
             throw std::runtime_error(
@@ -352,5 +400,6 @@ PYBIND11_MODULE(_loom, m) {
         .def("tokenizer_default_lang", &Model::tokenizer_default_lang)
         .def("encode", &Model::encode, py::arg("text"), py::arg("lang") = std::string{})
         .def("decode", &Model::decode, py::arg("ids"))
-        .def("call", &Model::call, py::arg("fn_name"), py::arg("inputs"));
+        .def("call", &Model::call, py::arg("fn_name"), py::arg("inputs"))
+        .def("transcribe", &Model::transcribe, py::arg("waveform"), py::arg("options"));
 }
