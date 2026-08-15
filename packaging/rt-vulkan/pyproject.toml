@@ -8,6 +8,14 @@ name = "loom-py-rt-vulkan"
 # a convention.
 version = "1.0.0-rc4"
 description = "Vulkan backend for loom-py-rt"
+# Two entries, not one table with both keys, and that is the difference between `pip show` printing
+# an author and printing a blank line. PEP 621 maps {name, email} TOGETHER onto a single
+# `Author-email: Name <email>` header and leaves `Author:` empty; a name-only entry is what populates
+# `Author:`. Split, both fields are filled, which is what a reader of `pip show` expects.
+authors = [
+    { name = "Flávio De Melo" },
+    { email = "flavio.eler@gmail.com" },
+]
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
@@ -61,3 +69,8 @@ archs = "x86_64 aarch64"
 # installed drivers. Bundling a loader built against a container's headers is at best pointless
 # and at worst a loader that disagrees with the machine it lands on.
 repair-wheel-command = "auditwheel repair --exclude libvulkan.so.1 --exclude libggml-base.so -w {dest_dir} {wheel}"
+
+
+[project.urls]
+Homepage = "https://github.com/loom-ai-org/loom-py"
+Engine = "https://github.com/loom-ai-org/loom.cpp"

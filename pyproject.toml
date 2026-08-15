@@ -10,6 +10,14 @@ build-backend = "scikit_build_core.build"
 name = "loom-py-rt"
 version = "1.0.0-rc4"
 description = "Python bindings for loom.cpp, a data-driven ggml inference engine"
+# Two entries, not one table with both keys, and that is the difference between `pip show` printing
+# an author and printing a blank line. PEP 621 maps {name, email} TOGETHER onto a single
+# `Author-email: Name <email>` header and leaves `Author:` empty; a name-only entry is what populates
+# `Author:`. Split, both fields are filled, which is what a reader of `pip show` expects.
+authors = [
+    { name = "Flávio De Melo" },
+    { email = "flavio.eler@gmail.com" },
+]
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
