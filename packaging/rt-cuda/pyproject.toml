@@ -8,6 +8,14 @@ name = "loom-py-rt-cuda"
 # a convention.
 version = "1.0.0-rc4"
 description = "CUDA backend for loom-py-rt"
+# Two entries, not one table with both keys, and that is the difference between `pip show` printing
+# an author and printing a blank line. PEP 621 maps {name, email} TOGETHER onto a single
+# `Author-email: Name <email>` header and leaves `Author:` empty; a name-only entry is what populates
+# `Author:`. Split, both fields are filled, which is what a reader of `pip show` expects.
+authors = [
+    { name = "Flávio De Melo" },
+    { email = "flavio.eler@gmail.com" },
+]
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
@@ -88,3 +96,8 @@ archs = "x86_64 aarch64"
 # resolve and stops -- "Cannot repair wheel, because required library libcuda.so.1 could not be
 # located" -- which is auditwheel doing its job, not a broken build.
 repair-wheel-command = "auditwheel repair --exclude libcuda.so.1 --exclude libcudart.so.12 --exclude libcublas.so.12 --exclude libcublasLt.so.12 --exclude libnvrtc.so.12 --exclude libggml-base.so -w {dest_dir} {wheel}"
+
+
+[project.urls]
+Homepage = "https://github.com/loom-ai-org/loom-py"
+Engine = "https://github.com/loom-ai-org/loom.cpp"
