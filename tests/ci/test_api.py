@@ -34,6 +34,8 @@ class TestPackage:
             "Text2Text",
             "Speech2Text",
             "Text2Speech",
+            # The G2P frontend: a module rather than a class, because a caller registers into it.
+            "phonemizers",
             "LoomError",
             "devices",
             "download",
@@ -406,12 +408,36 @@ class TestText2Speech:
         model.text2speech.infer(phonemes=[1], steps=4)
         assert [c["n_steps"] for c in handle.calls] == [10.0, 4.0]
 
-    def test_a_phoneme_model_refuses_text_and_says_it_is_the_model_not_the_package(self):
-        handle = _FakeHandle([], contract=_TTS_PHONEME_CONTRACT)
+    def test_a_model_with_no_text_front_end_refuses_text(self):
+        """Declaring nothing is different from declaring `phonemes`: the first cannot encode text at
+        all, and says so pointing at the doors that do work."""
+        handle = _FakeHandle([], contract=dict(_TTS_PHONEME_CONTRACT, text_frontend=""))
         with pytest.raises(loom.UnsupportedTask) as excinfo:
             _model(handle).text2speech.infer("hello")
-        assert "ipa" in str(excinfo.value)
-        assert "phonemes=" in str(excinfo.value), "it must name the door that does work"
+        assert "phonemes=" in str(excinfo.value) and "tokens=" in str(excinfo.value)
+
+    def test_a_phoneme_model_phonemizes_then_encodes_with_its_own_table(self):
+        """Two steps, and only the second is in the file. G2P is a property of the LANGUAGE so it lives
+        outside every GGUF; the symbol table that turns its output into this checkpoint's ids is the
+        checkpoint's own and now travels with it."""
+        handle = _FakeHandle([[0.0]], contract=dict(_TTS_PHONEME_CONTRACT, text_frontend="phonemes"))
+        seen = []
+        loom.phonemizers.register("ipa", lambda text, language: seen.append((text, language)) or "hɛ")
+        try:
+            _model(handle).text2speech.infer("hello", language="en")
+        finally:
+            loom.phonemizers._PROVIDERS.pop("ipa", None)
+        assert seen == [("hello", "en")], "the raw text reaches the phonemizer, not ids"
+        assert handle.calls[0]["tokens"] == [10.0, 11.0, 12.0], "its output is encoded by the model"
+
+    def test_a_phoneme_model_with_no_table_says_the_table_is_missing(self):
+        """A model exported before the symbol table was written. The fix is a re-export, not a
+        different call, and the message says which."""
+        handle = _FakeHandle([], contract=dict(_TTS_PHONEME_CONTRACT, text_frontend="phonemes"),
+                             vocab=None)
+        with pytest.raises(loom.UnsupportedTask) as excinfo:
+            _model(handle).text2speech.infer("hello")
+        assert "re-export" in str(excinfo.value)
 
     def test_a_grapheme_model_takes_text_directly(self):
         """Supertonic is not in the phoneme group -- it encodes graphemes itself. The distinction is
