@@ -211,18 +211,70 @@ jobs:
   # Until that is configured the working path is: publish a release, download this run's artifacts, and
   # `twine upload` them. That also CREATES the two backend projects, which is the step trusted
   # publishing cannot do for a name that has never been seen.
+  # PUBLISHES ON RELEASE, one project at a time. This is three uploads rather than one because the
+  # artifacts belong to THREE PyPI projects -- loom-py-rt, -cuda and -vulkan -- and trusted publishing
+  # mints its token by exchanging an OIDC claim per project. One upload of a mixed directory may work,
+  # depending on how the exchange scopes the token across projects that share a publisher; three
+  # unambiguously do, and a failure names which project it was rather than leaving you to guess.
+  #
+  # Each project needs a TRUSTED PUBLISHER configured on PyPI before this can work at all (project
+  # settings -> Publishing -> add a GitHub Actions publisher: owner `loom-ai-org`, repo `loom-py`,
+  # workflow `wheels.yml`, environment `pypi`). There is no token in this repo and none should be
+  # added. Until all three are configured the job fails at the upload step; everything above it still
+  # runs and its artifacts are downloadable from the run.
+  #
+  # `skip-existing` because PyPI filenames are IMMUTABLE and re-running a partly-failed release is the
+  # normal recovery: without it the second attempt dies on the files the first one already uploaded.
+  # It does not paper over a real problem -- a file that differs from what is published cannot be
+  # uploaded under either setting.
+  #
+  # ORDER: the backends last. A base wheel with no backend published leaves `[cuda]` unresolvable,
+  # which is a visible install error; a backend with no base is the same error from the other side.
+  # Neither is silent, so this is about which half is fixed sooner rather than about safety.
   publish-pypi:
     needs: [build-wheels, build-backends, build-sdist]
-    if: ${{ inputs.publish }}
+    if: ${{ github.event_name == 'release' || inputs.publish }}
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
       id-token: write  # trusted publishing (OIDC) -- no token stored in this repo
     steps:
+      # Each project's files into their own directory. The artifact NAMES already carry the split --
+      # `wheels-base-*`, `wheels-cuda-*`, `wheels-vulkan-*` -- which is why they are named that way.
       - uses: actions/download-artifact@v4
         with:
-          pattern: "*"
-          path: dist
+          pattern: "wheels-base-*"
+          path: dist-base
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist-base
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "wheels-cuda-*"
+          path: dist-cuda
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "wheels-vulkan-*"
+          path: dist-vulkan
           merge-multiple: true
 
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - name: Publish loom-py-rt
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist-base
+          skip-existing: true
+
+      - name: Publish loom-py-rt-cuda
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist-cuda
+          skip-existing: true
+
+      - name: Publish loom-py-rt-vulkan
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist-vulkan
+          skip-existing: true
