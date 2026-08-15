@@ -26,12 +26,14 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence
 
 from . import _loom
 from ._hub import download
 
-__all__ = ["Model", "Tokenizer", "LoomError", "devices", "download", "__version__"]
+__all__ = ["Model", "Tokenizer", "Transcription", "Segment", "LoomError", "devices",
+           "download", "__version__"]
 
 
 def _register_backend_paths() -> None:
@@ -330,15 +332,56 @@ class Model:
         Returns whatever the driver returns: a list for a token sequence or a waveform, a float for a
         single value.
 
-        **A model that fixes its audio length has its waveform padded or windowed for it**, matching
-        what `loom_cli` has always done -- Whisper's graph is built at exactly `loom.n_samples`, and
-        handing its driver anything else is a shape the graph cannot take rather than a worse
-        transcript. That happens in the binding (`Model::infer_audio`) rather than here, because it is
-        a property of the FILE and every host reaching the binding wants it, not only the ones coming
-        through this wrapper. See that method for what it does not do: long audio is cut at fixed
-        boundaries, where the CLI seeks by the model's own timestamps and transcribes better.
+        This is the RAW call and stays raw: one driver invocation, your inputs, no interpretation. For
+        speech, `transcribe` is almost certainly what you want -- a model whose graph is built at one
+        clip length (Whisper) needs its audio windowed and its decode arguments supplied, and doing
+        that yourself is the thing `transcribe` exists to save you.
         """
-        return self._handle.infer_audio({k: _as_value(k, v) for k, v in inputs.items()})
+        return self.call("infer", inputs)
+
+    def transcribe(
+        self,
+        waveform: Sequence[float],
+        *,
+        language: str | None = None,
+        task: str | None = None,
+        timestamps: bool = False,
+        condition_on_previous: bool = True,
+    ) -> "Transcription":
+        """Transcribe a waveform, with everything a long file needs.
+
+        This is the engine's own transcription loop -- the same one `loom_cli` runs, not a reduced
+        version of it. Audio for a model whose graph is built at one clip length is windowed and
+        zero-padded; each window is decoded with the driver's early stop armed; the output is split
+        into timestamped segments; and **the next window starts where the model closed its last
+        segment** rather than a fixed stride on, so an utterance straddling a window edge is
+        re-decoded whole instead of arriving as two fragments.
+
+        `waveform` is mono floats in [-1, 1] at the rate the model expects -- 16 kHz for every ASR
+        family exported so far.
+
+        `language` and `task` are NAMES -- `"en"`, `"translate"` -- not token ids. The engine resolves
+        them against the vocabulary the GGUF embeds, which is the only thing that can: `<|en|>` is a
+        vocabulary entry, and a caller has no way to look up its id. Leaving them None omits the
+        argument, which is how a driver is told to detect or fall back to its own default rather than
+        being handed one; naming something this model does not have raises, rather than quietly
+        transcribing as if you had not asked.
+
+        Returns a `Transcription`: `.text` for the joined transcript, `.segments` for timed spans.
+        """
+        options: dict[str, Any] = {"timestamps": timestamps,
+                                   "condition_on_previous": condition_on_previous}
+        if language is not None:
+            options["language"] = str(language)
+        if task is not None:
+            options["task"] = str(task)
+        raw = self._handle.transcribe([float(x) for x in waveform], options)
+        return Transcription(
+            text=raw["text"],
+            segments=[Segment(**s) for s in raw["segments"]],
+            windows=int(raw["windows"]),
+            timestamped=bool(raw["timestamped"]),
+        )
 
     def call(self, fn_name: str, inputs: Mapping[str, Any]) -> list[float] | float:
         """`infer` by another name, for a model whose driver exposes more than one entry point."""
@@ -349,6 +392,38 @@ class Model:
         return (f"<loom.Model {self.architecture!r} topologies={self.topologies} "
                 f"driver={'yes' if self.has_driver else 'no'} tokenizer={vocab} "
                 f"path={self._path.name!r}>")
+
+
+@dataclass(frozen=True)
+class Segment:
+    """One span of a transcript, in whole-file seconds.
+
+    `closed` is False for text the model had not finished when a window ran out: real transcript, but
+    its `end` is the window edge rather than a boundary the model chose -- which matters if you are
+    using these times for anything but display.
+    """
+    start: float
+    end: float
+    text: str
+    closed: bool
+
+
+@dataclass(frozen=True)
+class Transcription:
+    """What `Model.transcribe` returns.
+
+    `text` is the segments joined, which is what most callers want. `segments` is there because
+    discarding the times would be throwing away something the model computed -- subtitles and seeking
+    need them, and re-deriving them is impossible after the fact.
+
+    `timestamped` is False when the model exposes no timestamp tokens at all: the segments are then
+    window slices rather than boundaries the model chose, and the long-form seek degrades to fixed
+    cuts. Worth checking before trusting the times.
+    """
+    text: str
+    segments: list[Segment]
+    windows: int
+    timestamped: bool
 
 
 class Tokenizer:
