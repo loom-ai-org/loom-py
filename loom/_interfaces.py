@@ -84,29 +84,6 @@ class Audio:
         return array
 
 
-#: What a model that declares no sample rate is assumed to produce.
-#:
-#: 16 kHz because that is what every speech model in this tree takes on the way IN, so it is the one
-#: rate a loom model is known to have opinions about. It is a guess all the same, and for a TTS export
-#: it is usually the wrong one -- the families here run at 22.05, 24 and 44.1 kHz -- so it warns rather
-#: than defaulting silently: audio at the wrong rate does not fail, it plays at the wrong speed, and a
-#: caller who never hears the warning has no other signal that the number was invented.
-DEFAULT_SAMPLE_RATE = 16000
-
-
-def _sample_rate_or_default(contract: dict, model) -> int:
-    declared = int(contract.get("sample_rate") or 0)
-    if declared:
-        return declared
-    warnings.warn(
-        f"{model.path.name} declares no sample rate, so {DEFAULT_SAMPLE_RATE} Hz is assumed. If this "
-        f"model does not run at that rate the audio will play at the wrong speed rather than fail -- "
-        f"re-export it with a current loom-exporter, or set `Audio.sample_rate` yourself.",
-        RuntimeWarning, stacklevel=3,
-    )
-    return DEFAULT_SAMPLE_RATE
-
-
 class Interface:
     """Base for every X2Y door. Subclasses declare the modality pair they serve and implement `infer`.
 
@@ -200,12 +177,25 @@ class Text2Speech(Interface):
 
     def _infer(self, text: str | None = None, *, phonemes: Sequence[int] | None = None,
                tokens: Sequence[int] | None = None, steps: int | None = None,
-               seed: int | None = None, language: str | None = None, **driver_inputs) -> Audio:
+               seed: int | None = None, language: str | None = None,
+               sample_rate: int = 16000, **driver_inputs) -> Audio:
         """Three ways in, and which ones a given model accepts is a property of the model.
 
         `text` needs a front end that can encode it -- `contract["text_frontend"] == "vocab"`. The four
         phoneme-input families have none embedded, so for them `text` is not a missing feature of this
         package but a step that happens outside the engine, and the error says so rather than pretending.
+
+        **`sample_rate` is the FALLBACK, not an override.** A model that declares its own rate is
+        believed, because the export read it off the checkpoint and the caller is guessing; a model that
+        declares none is a real gap today (only Supertonic states it) and this is what fills it. The
+        16 kHz default is here in the signature rather than in a module constant so it is visible at the
+        call site and replaceable per call -- these families run at 22.05, 24 and 44.1 kHz, so a caller
+        who knows their model has somewhere to say so.
+
+        The fallback still warns, because it is still a guess: audio at the wrong rate does not fail, it
+        plays at the wrong speed, and that is the only signal a caller gets that the number was invented.
+        Passing one you know to be right silences nothing -- there is no way for this to tell a good
+        guess from a bad one -- so a model whose rate matters should be re-exported declaring it.
         """
         contract = self._model.contract
         ids = self._resolve_ids(text, phonemes, tokens, language, contract)
@@ -229,8 +219,15 @@ class Text2Speech(Interface):
                 f"declared output kind is audio, so either the export or the driver is wrong -- "
                 f"`model.driver_source` documents what `infer` actually returns."
             )
-        return Audio(samples=[float(s) for s in samples],
-                     sample_rate=_sample_rate_or_default(contract, self._model))
+        declared = int(contract.get("sample_rate") or 0)
+        if not declared:
+            warnings.warn(
+                f"{self._model.path.name} declares no sample rate, so {sample_rate} Hz is used. If that "
+                f"is not this model's rate the audio will play at the wrong speed rather than fail -- "
+                f"pass sample_rate= if you know it, or re-export the model declaring it.",
+                RuntimeWarning, stacklevel=3,
+            )
+        return Audio(samples=[float(s) for s in samples], sample_rate=declared or int(sample_rate))
 
     def _resolve_ids(self, text, phonemes, tokens, language, contract) -> Sequence[int]:
         named = [n for n, v in (("text", text), ("phonemes", phonemes), ("tokens", tokens))

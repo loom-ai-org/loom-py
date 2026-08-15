@@ -448,29 +448,47 @@ class TestAudio:
                 loom.Audio(samples=[0.0], sample_rate=0).save(os.path.join(d, "x.wav"))
 
 
-class TestSampleRateDefault:
-    """A model that declares no rate gets one, loudly.
+class TestSampleRateFallback:
+    """A declared rate wins; a caller-supplied one fills the gap; both beat guessing silently.
 
-    16 kHz is what every speech model in this tree takes on the way IN, so it is the one rate a loom
-    model is known to have opinions about -- and for a TTS export it is usually the wrong one, since
-    these families run at 22.05, 24 and 44.1 kHz. Audio at the wrong rate does not fail, it plays at the
-    wrong speed, so the warning is the only signal a caller gets that the number was invented.
+    Only Supertonic declares its rate today, and the other four TTS families run at 22.05, 24 and
+    44.1 kHz -- so the fallback is usually wrong, and audio at the wrong rate does not fail, it plays at
+    the wrong speed. The warning is the only signal a caller gets that the number was invented.
     """
 
-    def test_a_declared_rate_is_used_and_says_nothing(self):
+    def test_a_declared_rate_wins_and_says_nothing(self):
+        """The export read it off the checkpoint; the caller is guessing. So an argument does NOT
+        override a declaration -- it fills in for its absence."""
         handle = _FakeHandle([[0.0]], contract=_TTS_PHONEME_CONTRACT)
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            audio = _model(handle).text2speech.infer(phonemes=[1])
+            audio = _model(handle).text2speech.infer(phonemes=[1], sample_rate=8000)
         assert audio.sample_rate == 22050
         assert not caught
 
-    def test_an_undeclared_rate_is_assumed_and_warns(self):
+    def test_the_argument_is_used_when_nothing_is_declared(self):
+        handle = _FakeHandle([[0.0]], contract=dict(_TTS_PHONEME_CONTRACT, sample_rate=0))
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            audio = _model(handle).text2speech.infer(phonemes=[1], sample_rate=24000)
+        assert audio.sample_rate == 24000
+        assert len(caught) == 1, "still a guess, so still worth saying"
+        assert "24000 Hz is used" in str(caught[0].message)
+
+    def test_the_default_is_16000_and_comes_from_the_signature(self):
         handle = _FakeHandle([[0.0]], contract=dict(_TTS_PHONEME_CONTRACT, sample_rate=0))
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             audio = _model(handle).text2speech.infer(phonemes=[1])
         assert audio.sample_rate == 16000
-        assert len(caught) == 1 and issubclass(caught[0].category, RuntimeWarning)
+        assert issubclass(caught[0].category, RuntimeWarning)
         # The message has to say what goes wrong if the guess is wrong, not merely that it guessed.
         assert "wrong speed" in str(caught[0].message)
+
+    def test_the_default_is_visible_where_a_caller_looks_for_it(self):
+        """In the signature rather than a module constant, so `help(...)` shows it and a caller can
+        replace it per call."""
+        import inspect
+
+        sig = inspect.signature(loom.Text2Speech._infer)
+        assert sig.parameters["sample_rate"].default == 16000
