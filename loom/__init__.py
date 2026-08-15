@@ -31,8 +31,11 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from . import _loom
 from ._hub import download
+from ._interfaces import (ALL_INTERFACES, Audio, Interface, Speech2Text, Text2Speech, Text2Text,
+                          UnsupportedTask)
 
-__all__ = ["Model", "Tokenizer", "Transcription", "Segment", "LoomError", "devices",
+__all__ = ["Model", "Tokenizer", "Transcription", "Segment", "Audio", "Interface",
+           "UnsupportedTask", "Text2Text", "Speech2Text", "Text2Speech", "LoomError", "devices",
            "download", "__version__"]
 
 
@@ -124,6 +127,12 @@ class Model:
     def __init__(self, handle: "_loom.Model", path: Path):
         self._handle = handle
         self._path = path
+        self._contract = dict(handle.contract())
+        # One instance per interface, all of them, always. Most raise -- see `_interfaces.Interface`
+        # for why that is better than a method that is absent: "can this model do X" stays a question
+        # you can ask, and the answer names what the model actually is.
+        for cls in ALL_INTERFACES:
+            setattr(self, cls.name, cls(self))
 
     # -- construction --------------------------------------------------------------------------
 
@@ -173,8 +182,40 @@ class Model:
 
     @property
     def architecture(self) -> str:
-        """The `loom.architecture` this GGUF declares -- what the exporter called it."""
+        """The `loom.architecture` this GGUF declares -- what the exporter called it.
+
+        A per-MODEL name, and deliberately not what anything here dispatches on: code keyed to it would
+        be a table of architecture names living in this package, which is the one thing loom-py is not
+        allowed to grow. :attr:`task` and :attr:`contract` are what the high-level doors read.
+        """
         return self._handle.architecture()
+
+    @property
+    def contract(self) -> dict:
+        """What this file says it IS: its task, the modality pair it maps between, and the facts a host
+        needs to call it -- sample rate, fixed clip length, whether it can encode text itself.
+
+        `contract["declared"]` is False for a GGUF exported before models stated any of this, which is
+        most of them today. That is not an error and not a gap to fill by guessing: the high-level
+        interfaces below stay unavailable and the low-level API is unchanged, which is exactly what such
+        a file supports.
+        """
+        return dict(self._contract)
+
+    @property
+    def task(self) -> str:
+        """The canonical task this model was exported under -- `"text-generation"`,
+        `"automatic-speech-recognition"`, `"text-to-speech"` -- or `""` when the file declares none."""
+        return self._contract.get("task", "")
+
+    @property
+    def capabilities(self) -> tuple:
+        """The names of the interfaces this model actually answers to, usually exactly one.
+
+        The same information the interfaces give by raising, without having to call one to find out.
+        Empty for a file that declares no contract.
+        """
+        return tuple(cls.name for cls in ALL_INTERFACES if getattr(self, cls.name).supported)
 
     @property
     def topologies(self) -> list[str]:
@@ -257,29 +298,20 @@ class Model:
     ) -> str:
         """Text in, text out: tokenize, run the driver, detokenize.
 
-        The end-to-end door for any model whose driver consumes token ids and produces them -- a
-        causal LM completing a prompt, most obviously.
+        The same call as ``model.text2text.infer(prompt)``, which is the door this package now names
+        every task's end-to-end entry by. Kept because it shipped -- it is public API as of 1.0.0-rc3
+        and removing it would break installed code for a rename -- and because for the one task it was
+        written for it reads better than the general form.
 
-        **`tokens` is a convention, not a guess.** Every driver the exporter generates accepts
-        `tokens` as an alias for its primary input, whatever the traced graph happens to call it
-        (`input_ids`, `token_ids`, `audio_signal`); `driver_components.GENERIC_PRIMARY_INPUT` is where
-        that is written down. So this passes `tokens`, and any model carrying a vocabulary works --
-        including ones this package has never heard of.
+        The LOOP is the engine's (`loom::text::generate`), not this package's. A Python one lived here
+        and was correct, and was still a second copy of a per-task loop: `loom_cli`'s differed in three
+        ways -- it ran to the token ceiling with no end-of-sequence stop, took the first element of a
+        list return where the new token is the last, and silently rewrote any id >= 65536 to 0. Nothing
+        but coincidence kept the two in step, and nothing would have caught them diverging further.
 
-        **Two driver shapes, told apart by what the driver returns rather than by knowing the model.**
-        A driver whose cross-step state is entirely the KV cache generates internally and hands back
-        the whole sequence; one whose state is not -- LFM2's ten ShortConv blocks, say -- exports a
-        single forward pass and returns ONE next token, leaving the loop to the host. A list means the
-        first, a number means the second, and the host loop below is what `loom_cli` does for exactly
-        that case: append the token, feed the grown prompt back.
-
-        `eos_token` defaults to the model's own `tokenizer.ggml.eos_token_id`, so the loop stops where
-        the checkpoint says it should. It only applies to the host-loop shape; a driver that generates
-        internally carries its own stop condition.
-
-        For a model whose input is audio rather than text -- an ASR model -- there is nothing to
-        encode, so use `model.detokenize(model.infer(waveform=...))`: the same two steps with the
-        first one absent.
+        `eos_token` defaults to the model's own `tokenizer.ggml.eos_token_id`, so generation stops where
+        the checkpoint says it should. Extra keyword arguments are forwarded to the driver verbatim, for
+        a model whose `infer` takes more than tokens.
         """
         return self.detokenize(self.generate_ids(
             self.tokenize(prompt), max_new_tokens=max_new_tokens, eos_token=eos_token, **inputs))
@@ -293,31 +325,16 @@ class Model:
     ) -> list[int]:
         """The token ids `generate` produces, without the encode/decode either side.
 
-        Separate because the ids are sometimes the answer -- comparing against a reference decode,
-        or feeding a model whose vocabulary this package cannot read.
+        Separate because the ids are sometimes the answer -- comparing against a reference decode, or
+        feeding a model whose vocabulary this package cannot read.
         """
-        if eos_token is None:
-            eos_token = self._handle.kv_i32("tokenizer.ggml.eos_token_id", -1)
-
-        first = self.infer(tokens=list(tokens), max_new_tokens=max_new_tokens,
-                           eos_token=eos_token, **inputs)
-        if isinstance(first, list):
-            return [int(i) for i in first]
-
-        # One token per call. The prompt grows and is re-fed, which is what a driver without
-        # cross-step state requires and what `loom_cli` does for this model shape.
-        running = [int(i) for i in tokens]
-        generated = [int(first)]
-        running.append(generated[0])
-        while len(generated) < max_new_tokens and generated[-1] != eos_token:
-            step = self.infer(tokens=running, max_new_tokens=max_new_tokens,
-                              eos_token=eos_token, **inputs)
-            token = int(step[-1]) if isinstance(step, list) else int(step)
-            generated.append(token)
-            running.append(token)
-        if generated and generated[-1] == eos_token:
-            generated.pop()
-        return generated
+        # -2 is "ask the file", which is how the engine distinguishes a caller who named no stop token
+        # from one who passed -1 to mean "do not stop early" -- the generated drivers' own reading of a
+        # negative eos, and a distinction a single sentinel could not carry.
+        return list(self._handle.generate(
+            [int(t) for t in tokens], int(max_new_tokens),
+            -2 if eos_token is None else int(eos_token),
+            {k: _as_value(k, v) for k, v in inputs.items()}))
 
     # -- running it ----------------------------------------------------------------------------
 

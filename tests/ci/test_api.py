@@ -7,7 +7,9 @@ are wrong in a way nobody notices until a wrong number reaches a model.
 The half that needs a real model is `tests/gate/`.
 """
 import builtins
+import os
 import sys
+import tempfile
 import types
 
 import pytest
@@ -22,6 +24,15 @@ class TestPackage:
             "Tokenizer",
             "Transcription",
             "Segment",
+            # The end-to-end layer. `Audio` and the three implemented interfaces are exported because
+            # a caller annotates against them; the thirteen not-yet-implemented ones are reached as
+            # `model.<name>` and are deliberately not names to import.
+            "Audio",
+            "Interface",
+            "UnsupportedTask",
+            "Text2Text",
+            "Speech2Text",
+            "Text2Speech",
             "LoomError",
             "devices",
             "download",
@@ -148,12 +159,30 @@ class _FakeHandle:
     """A stand-in for the pybind11 `Model`, so the Python layer's decisions can be tested without a
     GGUF. Only the methods `loom.Model` actually calls are here."""
 
-    def __init__(self, returns, vocab="gpt2", eos=-1):
+    def __init__(self, returns, vocab="gpt2", eos=-1, contract=None):
         self._returns = list(returns)      # what successive infer() calls hand back
         self._vocab = vocab
         self._eos = eos
         self.calls = []                    # every inputs dict infer() was given
         self.langs = []                    # every `lang` encode() was given
+        self.generate_calls = []           # every argument set generate() was given
+        self._contract = dict(contract or {})
+
+    def contract(self):
+        """What the file declares. Empty-but-present by default, which is a pre-contract GGUF -- the
+        shape most models on disk still have, and the one the interface layer has to handle."""
+        return dict(self._contract)
+
+    def generate(self, tokens, max_new_tokens, eos_token, extra_inputs):
+        """The engine's LM loop, which this double CANNOT stand in for -- and does not try to. It
+        records what it was handed and replays a canned answer, so the tests below are about the
+        marshalling either side of the call. The loop itself is pinned in loom.cpp
+        (tests/ci/test_text_generate.cpp), where it now lives; a Python double asserting on loop
+        behaviour would be asserting about a reimplementation of the thing under test."""
+        self.generate_calls.append(
+            {"tokens": list(tokens), "max_new_tokens": max_new_tokens, "eos_token": eos_token,
+             "extra_inputs": dict(extra_inputs)})
+        return self._returns.pop(0) if self._returns else []
 
     def has_tokenizer(self): return self._vocab is not None
     def tokenizer_kind(self): return self._vocab or ""
@@ -225,32 +254,43 @@ class TestTokenizer:
         assert "lang=" not in repr(tok), "an empty default must not print as lang=''"
 
 
-class TestGenerateHandlesBothDriverShapes:
-    """A driver whose cross-step state is entirely the KV cache generates internally and returns a
-    sequence; one whose state is not (LFM2's ShortConv blocks) returns a single next token and leaves
-    the loop to the host. `generate_ids` tells them apart by what came back, not by knowing the model."""
+class TestGenerateMarshalsAroundTheEngineLoop:
+    """The loop that tells a sequence-returning driver from a single-token one is the ENGINE's now
+    (`loom::text::generate`), and its behaviour is pinned in loom.cpp rather than here. It was a Python
+    loop, correct, and still a second copy: loom_cli's differed in three ways at once -- no eos stop,
+    the first element of a list return rather than the last, and a silent id clamp -- with nothing but
+    coincidence keeping them in step.
 
-    def test_a_sequence_returning_driver_is_taken_at_its_word(self):
-        handle = _FakeHandle([[7.0, 8.0, 9.0]])
-        assert _model(handle).generate_ids([1, 2], max_new_tokens=64) == [7, 8, 9]
-        assert len(handle.calls) == 1, "a driver that generated internally must not be looped over"
+    What stays this layer's job, and is what these check: encode/decode either side, and handing the
+    engine a request that says what the caller meant."""
 
-    def test_a_single_token_driver_is_looped_with_the_prompt_growing(self):
-        handle = _FakeHandle([4.0, 5.0, 6.0])
-        assert _model(handle).generate_ids([1, 2], max_new_tokens=3) == [4, 5, 6]
-        assert [c["tokens"] for c in handle.calls] == [[1, 2], [1, 2, 4], [1, 2, 4, 5]]
-
-    def test_the_host_loop_stops_at_max_new_tokens(self):
-        handle = _FakeHandle([1.0] * 10)
-        assert len(_model(handle).generate_ids([0], max_new_tokens=4)) == 4
-
-    def test_the_host_loop_stops_at_eos_and_does_not_emit_it(self):
-        handle = _FakeHandle([4.0, 5.0, 99.0, 6.0], eos=99)
-        assert _model(handle).generate_ids([1], max_new_tokens=10) == [4, 5]
-
-    def test_generate_encodes_and_decodes_around_it(self):
-        handle = _FakeHandle([[7.0, 8.0]])
+    def test_generate_encodes_and_decodes_around_the_call(self):
+        handle = _FakeHandle([[7, 8]])
         assert _model(handle).generate("anything") == "7|8"
+        assert handle.generate_calls[0]["tokens"] == [10, 11, 12], "the encoded prompt, not the string"
+
+    def test_no_eos_named_asks_the_file_rather_than_disabling_the_stop(self):
+        """-2 is 'ask the file', -1 is 'do not stop early'. One sentinel could not carry both, and
+        collapsing them would turn 'I did not specify' into 'run to the ceiling' -- which is how the
+        CLI's copy of this loop behaved, for exactly that reason."""
+        handle = _FakeHandle([[1]])
+        _model(handle).generate_ids([1], max_new_tokens=5)
+        assert handle.generate_calls[0]["eos_token"] == -2
+
+    def test_an_explicit_eos_is_passed_as_given_including_the_disabling_one(self):
+        handle = _FakeHandle([[1], [1]])
+        model = _model(handle)
+        model.generate_ids([1], eos_token=99)
+        model.generate_ids([1], eos_token=-1)
+        assert [c["eos_token"] for c in handle.generate_calls] == [99, -1]
+
+    def test_extra_driver_inputs_are_forwarded(self):
+        """A model whose `infer` takes more than tokens -- a style vector, a speaker id -- is driven
+        through the same loop, so the extras have to survive the trip."""
+        handle = _FakeHandle([[1]])
+        _model(handle).generate_ids([1], style=[0.5, 0.25], speaker=3)
+        extras = handle.generate_calls[0]["extra_inputs"]
+        assert extras == {"style": [0.5, 0.25], "speaker": 3.0}
 
 
 class TestDeviceIsPassedThroughAndReadBack:
@@ -287,3 +327,121 @@ class TestDeviceIsPassedThroughAndReadBack:
         model = _model(handle)
         assert model.device == "CPU"
         assert model.device_description == "a fake device"
+
+
+# The declared contract a Whisper-like export writes, as the interface layer sees it.
+_ASR_CONTRACT = {
+    "declared": True, "task": "automatic-speech-recognition", "input_kind": "audio",
+    "output_kind": "token_ids", "interface": "speech2text", "sample_rate": 16000,
+    "clip_samples": 480000, "max_input_tokens": 0, "text_frontend": "vocab",
+    "phoneme_alphabet": "", "phonemizer_ruleset": "", "languages": ["en"], "entry_points": ["infer"],
+    "default_steps": 0, "voices": [],
+}
+_TTS_PHONEME_CONTRACT = dict(_ASR_CONTRACT, task="text-to-speech", input_kind="phoneme_ids",
+                             output_kind="audio", interface="text2speech", text_frontend="",
+                             phoneme_alphabet="ipa", sample_rate=22050, clip_samples=0,
+                             default_steps=10)
+_TTS_TEXT_CONTRACT = dict(_TTS_PHONEME_CONTRACT, input_kind="text", text_frontend="vocab")
+
+
+class TestInterfacesAreTheModalityPair:
+    """Which door a model answers to is read off its declared contract, never off its architecture.
+
+    That is the whole reason this layer can exist inside a package whose standing rule is that it holds
+    no per-architecture code: `Text2Speech` is not a category invented here, it is the I/O contract, and
+    the file states it."""
+
+    def test_the_declared_pair_selects_the_interface(self):
+        model = _model(_FakeHandle([], contract=_ASR_CONTRACT))
+        assert model.task == "automatic-speech-recognition"
+        assert model.capabilities == ("speech2text",)
+        assert model.speech2text.supported
+        assert not model.text2speech.supported
+
+    def test_every_interface_is_present_even_when_it_raises(self):
+        """A missing method answers 'no such thing'; a present one that raises answers 'not this
+        model, and here is what it is'. The second is what a caller probing capabilities needs."""
+        model = _model(_FakeHandle([], contract=_ASR_CONTRACT))
+        assert hasattr(model, "text2image") and hasattr(model, "image2segmentationmask")
+        with pytest.raises(loom.UnsupportedTask) as excinfo:
+            model.text2speech.infer("hello")
+        assert "speech2text" in str(excinfo.value), "the error must name what the model actually is"
+
+    def test_an_undeclared_file_offers_no_door_and_says_why(self):
+        """Every GGUF exported before the contract existed lands here. Guessing from its architecture
+        is exactly the per-architecture code this layer refuses to contain, so it offers nothing --
+        and `infer` is untouched, which is what such a file does support."""
+        model = _model(_FakeHandle([], contract={}))
+        assert model.task == "" and model.capabilities == ()
+        with pytest.raises(loom.UnsupportedTask) as excinfo:
+            model.text2text.infer("hello")
+        assert "declares no task" in str(excinfo.value)
+        assert "model.infer" in str(excinfo.value), "it must point at the door that does work"
+
+    def test_text2text_is_the_same_call_as_generate(self):
+        handle = _FakeHandle([[7, 8], [7, 8]],
+                             contract=dict(_ASR_CONTRACT, task="text-generation", input_kind="text",
+                                           output_kind="text", interface="text2text"))
+        model = _model(handle)
+        assert model.text2text.infer("anything") == model.generate("anything") == "7|8"
+
+
+class TestText2Speech:
+    def test_a_waveform_comes_back_with_its_rate_attached(self):
+        """A bare list whose rate the caller has to remember is the same defect `Transcription` avoids
+        one modality over: 24 kHz played at 22.05 kHz is not an error, it is a slightly deep voice."""
+        handle = _FakeHandle([[0.0, 0.5, -0.5]], contract=_TTS_PHONEME_CONTRACT)
+        audio = _model(handle).text2speech.infer(phonemes=[1, 2, 3])
+        assert isinstance(audio, loom.Audio)
+        assert audio.sample_rate == 22050 and len(audio) == 3
+        assert audio.duration == pytest.approx(3 / 22050)
+
+    def test_the_declared_step_default_is_applied_and_the_caller_still_wins(self):
+        """A sampler step count is a property of the export. A host inventing one is how two front ends
+        produce different audio from the same file."""
+        handle = _FakeHandle([[0.0], [0.0]], contract=_TTS_PHONEME_CONTRACT)
+        model = _model(handle)
+        model.text2speech.infer(phonemes=[1])
+        model.text2speech.infer(phonemes=[1], steps=4)
+        assert [c["n_steps"] for c in handle.calls] == [10.0, 4.0]
+
+    def test_a_phoneme_model_refuses_text_and_says_it_is_the_model_not_the_package(self):
+        handle = _FakeHandle([], contract=_TTS_PHONEME_CONTRACT)
+        with pytest.raises(loom.UnsupportedTask) as excinfo:
+            _model(handle).text2speech.infer("hello")
+        assert "ipa" in str(excinfo.value)
+        assert "phonemes=" in str(excinfo.value), "it must name the door that does work"
+
+    def test_a_grapheme_model_takes_text_directly(self):
+        """Supertonic is not in the phoneme group -- it encodes graphemes itself. The distinction is
+        per-model and declared, which is why no code here names either model."""
+        handle = _FakeHandle([[0.0]], contract=_TTS_TEXT_CONTRACT)
+        _model(handle).text2speech.infer("hello")
+        assert handle.calls[0]["tokens"] == [10.0, 11.0, 12.0]
+
+    def test_the_three_inputs_are_depths_not_alternatives(self):
+        handle = _FakeHandle([], contract=_TTS_TEXT_CONTRACT)
+        with pytest.raises(TypeError):
+            _model(handle).text2speech.infer("hello", phonemes=[1])
+        with pytest.raises(TypeError):
+            _model(handle).text2speech.infer()
+
+
+class TestAudio:
+    def test_it_writes_a_wav_a_reader_can_open(self):
+        import wave
+
+        audio = loom.Audio(samples=[0.0, 1.0, -1.0, 0.5], sample_rate=16000)
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "out.wav")
+            audio.save(path)
+            with wave.open(path, "rb") as f:
+                assert f.getframerate() == 16000 and f.getnchannels() == 1
+                assert f.getnframes() == 4
+
+    def test_a_model_that_declared_no_rate_refuses_rather_than_guessing(self):
+        """Writing 22.05 kHz audio at an assumed 16 kHz produces a file that plays, which is worse
+        than one that does not."""
+        with tempfile.TemporaryDirectory() as d:
+            with pytest.raises(ValueError):
+                loom.Audio(samples=[0.0], sample_rate=0).save(os.path.join(d, "x.wav"))
