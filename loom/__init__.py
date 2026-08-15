@@ -329,8 +329,16 @@ class Model:
 
         Returns whatever the driver returns: a list for a token sequence or a waveform, a float for a
         single value.
+
+        **A model that fixes its audio length has its waveform padded or windowed for it**, matching
+        what `loom_cli` has always done -- Whisper's graph is built at exactly `loom.n_samples`, and
+        handing its driver anything else is a shape the graph cannot take rather than a worse
+        transcript. That happens in the binding (`Model::infer_audio`) rather than here, because it is
+        a property of the FILE and every host reaching the binding wants it, not only the ones coming
+        through this wrapper. See that method for what it does not do: long audio is cut at fixed
+        boundaries, where the CLI seeks by the model's own timestamps and transcribes better.
         """
-        return self.call("infer", inputs)
+        return self._handle.infer_audio({k: _as_value(k, v) for k, v in inputs.items()})
 
     def call(self, fn_name: str, inputs: Mapping[str, Any]) -> list[float] | float:
         """`infer` by another name, for a model whose driver exposes more than one entry point."""
