@@ -6,8 +6,16 @@ build-backend = "scikit_build_core.build"
 name = "loom-py-rt-cuda"
 # Deliberately the same version as the base package, and see `dependencies` for why it is not merely
 # a convention.
-version = "1.0.0-rc3"
+version = "1.0.0-rc4"
 description = "CUDA backend for loom-py-rt"
+# Two entries, not one table with both keys, and that is the difference between `pip show` printing
+# an author and printing a blank line. PEP 621 maps {name, email} TOGETHER onto a single
+# `Author-email: Name <email>` header and leaves `Author:` empty; a name-only entry is what populates
+# `Author:`. Split, both fields are filled, which is what a reader of `pip show` expects.
+authors = [
+    { name = "Flávio De Melo" },
+    { email = "flavio.eler@gmail.com" },
+]
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
@@ -26,7 +34,7 @@ classifiers = [
 # This is not hypothetical for this package: it was built against ggml v0.19.0 only because the pin
 # moved off v0.16.0 first (P4.9), and a wheel built an hour earlier would already be wrong.
 dependencies = [
-    "loom-py-rt == 1.0.0rc3",
+    "loom-py-rt == 1.0.0rc4",
     # The CUDA runtime, from NVIDIA's own wheels rather than bundled here. `libcublas.so.12` alone
     # would dwarf this package, and a machine with an NVIDIA GPU is not surprised to be asked for
     # NVIDIA's runtime. They unpack to `nvidia/cublas/lib` and `nvidia/cuda_runtime/lib`, siblings of
@@ -88,3 +96,8 @@ archs = "x86_64 aarch64"
 # resolve and stops -- "Cannot repair wheel, because required library libcuda.so.1 could not be
 # located" -- which is auditwheel doing its job, not a broken build.
 repair-wheel-command = "auditwheel repair --exclude libcuda.so.1 --exclude libcudart.so.12 --exclude libcublas.so.12 --exclude libcublasLt.so.12 --exclude libnvrtc.so.12 --exclude libggml-base.so -w {dest_dir} {wheel}"
+
+
+[project.urls]
+Homepage = "https://github.com/loom-ai-org/loom-py"
+Engine = "https://github.com/loom-ai-org/loom.cpp"

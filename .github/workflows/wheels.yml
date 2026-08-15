@@ -6,10 +6,9 @@ name: Wheels
 # has, to test fast on every push; this workflow's job is the artifact that gets uploaded to PyPI,
 # which is a slower, containerized, once-per-release thing.
 #
-# Publishing to PyPI needs this repo registered as a trusted publisher on the PyPI project first
-# (PyPI project settings -> Publishing -> add a GitHub Actions publisher for this repo/workflow) --
-# there is no API token to configure here. Until that's done, `publish-pypi` will fail at the upload
-# step; `build` still runs and its artifacts are downloadable from the run regardless.
+# Publishing goes through PyPI trusted publishing, configured for all three projects (loom-py-rt and
+# the two backends) -- there is no API token in this repo and none should be added. All three shipped
+# 1.0.0rc3 through this path, which is what proves it rather than an assumption.
 
 on:
   release:
@@ -204,24 +203,16 @@ jobs:
           name: sdist
           path: dist/*.tar.gz
 
-  # OPT-IN, not automatic on a release. PyPI trusted publishing is not configured for any of the three
-  # projects, and two of them do not exist on PyPI at all -- which needs a `pending publisher` set up
-  # per project in advance. Firing this on every release would mean a red job on every release.
-  #
-  # Until that is configured the working path is: publish a release, download this run's artifacts, and
-  # `twine upload` them. That also CREATES the two backend projects, which is the step trusted
-  # publishing cannot do for a name that has never been seen.
   # PUBLISHES ON RELEASE, one project at a time. This is three uploads rather than one because the
   # artifacts belong to THREE PyPI projects -- loom-py-rt, -cuda and -vulkan -- and trusted publishing
   # mints its token by exchanging an OIDC claim per project. One upload of a mixed directory may work,
   # depending on how the exchange scopes the token across projects that share a publisher; three
   # unambiguously do, and a failure names which project it was rather than leaving you to guess.
   #
-  # Each project needs a TRUSTED PUBLISHER configured on PyPI before this can work at all (project
-  # settings -> Publishing -> add a GitHub Actions publisher: owner `loom-ai-org`, repo `loom-py`,
-  # workflow `wheels.yml`, environment `pypi`). There is no token in this repo and none should be
-  # added. Until all three are configured the job fails at the upload step; everything above it still
-  # runs and its artifacts are downloadable from the run.
+  # Each project has a TRUSTED PUBLISHER on PyPI (owner `loom-ai-org`, repo `loom-py`, workflow
+  # `wheels.yml`, environment `pypi`), which is what mints the token -- there is none stored here and
+  # none should be added. A fourth project would need its own publisher added before its first upload;
+  # everything above this job runs regardless, and its artifacts are downloadable from the run.
   #
   # `skip-existing` because PyPI filenames are IMMUTABLE and re-running a partly-failed release is the
   # normal recovery: without it the second attempt dies on the files the first one already uploaded.
