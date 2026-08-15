@@ -177,7 +177,7 @@ class Text2Speech(Interface):
 
     def _infer(self, text: str | None = None, *, phonemes: Sequence[int] | None = None,
                tokens: Sequence[int] | None = None, steps: int | None = None,
-               seed: int | None = None, language: str | None = None,
+               seed: int = 0, language: str | None = None,
                sample_rate: int = 16000, **driver_inputs) -> Audio:
         """Three ways in, and which ones a given model accepts is a property of the model.
 
@@ -209,8 +209,11 @@ class Text2Speech(Interface):
             inputs["n_steps"] = float(steps)
         elif contract.get("default_steps"):
             inputs["n_steps"] = float(contract["default_steps"])
-        if seed is not None:
-            inputs["seed"] = float(seed)
+        # Always passed, and 0 by default. Every sampler here needs one, and a driver handed none fails
+        # inside Lua rather than telling a caller what to supply; defaulting it also makes the same text
+        # produce the same audio twice, which is the behaviour a caller is more likely to want from a
+        # library than from a demo. Name one to vary the voice's noise.
+        inputs["seed"] = float(seed)
 
         samples = self._model.infer(**inputs)
         if not isinstance(samples, list):
@@ -241,13 +244,28 @@ class Text2Speech(Interface):
             return [int(t) for t in tokens]
         if phonemes is not None:
             return [int(p) for p in phonemes]
-        if contract.get("text_frontend") != "vocab":
-            alphabet = contract.get("phoneme_alphabet") or "phoneme"
+        frontend = contract.get("text_frontend")
+        if frontend == "phonemes":
+            # Two steps, and only the second is in the file: G2P is a property of the LANGUAGE and lives
+            # outside every GGUF, while the symbol table that turns its output into ids is the
+            # checkpoint's own and now travels with it. So this phonemizes here and encodes there, which
+            # is why a model with a phoneme vocabulary still needs an installed provider to take text.
+            from . import phonemizers
+
+            alphabet = contract.get("phoneme_alphabet") or "ipa"
+            if self._model.tokenizer is None:
+                raise UnsupportedTask(
+                    f"this model takes {alphabet} ids and embeds no symbol table to produce them from, "
+                    f"so it has no text door. Pass phonemes=[...] from your own G2P, or re-export it "
+                    f"with a current loom-exporter, which writes the table its checkpoint already had."
+                )
+            spoken = phonemizers.phonemize(
+                text, alphabet=alphabet, language=language or (contract.get("languages") or ["en"])[0])
+            return self._model.tokenize(spoken)
+        if frontend != "vocab":
             raise UnsupportedTask(
-                f"this model takes {alphabet} ids and embeds no vocabulary to produce them from text, "
-                f"so it has no text door yet. Pass phonemes=[...] from your own G2P. A phonemizer "
-                f"integration is planned (loom.cpp BACKLOG.md Task #79); until it lands this is a real "
-                f"limitation of the model rather than a missing convenience here."
+                f"this model declares no text front end, so it cannot encode text. Pass tokens=[...] "
+                f"or phonemes=[...] directly, which is what `model.driver_source` documents it taking."
             )
         return self._model.tokenize(text, lang=language)
 

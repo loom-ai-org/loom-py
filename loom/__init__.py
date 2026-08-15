@@ -30,13 +30,14 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence
 
 from . import _loom
+from . import phonemizers
 from ._hub import download
 from ._interfaces import (ALL_INTERFACES, Audio, Interface, Speech2Text, Text2Speech, Text2Text,
                           UnsupportedTask)
 
 __all__ = ["Model", "Tokenizer", "Transcription", "Segment", "Audio", "Interface",
-           "UnsupportedTask", "Text2Text", "Speech2Text", "Text2Speech", "LoomError", "devices",
-           "download", "__version__"]
+           "UnsupportedTask", "Text2Text", "Speech2Text", "Text2Speech", "phonemizers",
+           "LoomError", "devices", "download", "__version__"]
 
 
 def _register_backend_paths() -> None:

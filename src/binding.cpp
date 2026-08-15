@@ -67,6 +67,12 @@ public:
             tokenizer->byte_ = loom::ByteVocab::load(model);
         } else if (tokenizer->kind_ == "gpt2") {
             tokenizer->bpe_ = loom::BpeVocab::load(model);
+        } else if (tokenizer->kind_ == "phonemes") {
+            // The phoneme-input TTS families, which had no vocabulary at all until the symbol table
+            // their checkpoints always carried was exported (loom/core/phoneme_vocab.h). `tokenize`
+            // takes IPA and returns model-ready ids, assembly included -- the same shape Supertonic's
+            // grapheme table already had, one step further down the pipeline.
+            tokenizer->phoneme_ = loom::PhonemeVocab::load(model);
         } else if (tokenizer->kind_ == "supertonic") {
             tokenizer->supertonic_ = loom::SupertonicTextVectorizer::load(model);
         } else if (tokenizer->kind_ == "llama" || tokenizer->kind_ == "t5") {
@@ -76,7 +82,7 @@ public:
         return tokenizer;
     }
 
-    bool valid() const { return spm_ || bpe_ || wordpiece_ || byte_ || supertonic_; }
+    bool valid() const { return spm_ || bpe_ || wordpiece_ || byte_ || supertonic_ || phoneme_; }
     const std::string& kind() const { return kind_; }
 
     size_t size() const {
@@ -84,6 +90,7 @@ public:
         if (bpe_) return bpe_->size();
         if (wordpiece_) return wordpiece_->size();
         if (byte_) return byte_->size();
+        if (phoneme_) return phoneme_->size();
         // n_tokens(), not vocab_size() -- the latter is the 65536-entry BMP lookup table, which is not
         // what any caller reading `tokenizer.size()` means.
         return supertonic_->n_tokens();
@@ -102,6 +109,7 @@ public:
         if (bpe_) return bpe_->encode(text);
         if (wordpiece_) return wordpiece_->encode(text);
         if (byte_) return byte_->encode(text);
+        if (phoneme_) return phoneme_->encode(text);
         return supertonic_->tokenize(text, lang);  // empty lang -> the file's own default_lang
     }
 
@@ -110,6 +118,7 @@ public:
         if (bpe_) return bpe_->decode(ids);
         if (wordpiece_) return wordpiece_->decode(ids);
         if (byte_) return byte_->decode(ids);
+        if (phoneme_) return phoneme_->decode(ids);
         return supertonic_->detokenize(ids);
     }
 
@@ -124,6 +133,7 @@ private:
     std::unique_ptr<loom::WordPieceVocab> wordpiece_;
     std::unique_ptr<loom::ByteVocab> byte_;
     std::unique_ptr<loom::SupertonicTextVectorizer> supertonic_;
+    std::unique_ptr<loom::PhonemeVocab> phoneme_;
 };
 
 // One driver input, marshalled. A driver's world is numbers and arrays of numbers -- the bridge's own

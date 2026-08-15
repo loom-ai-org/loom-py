@@ -27,6 +27,14 @@ dependencies = []
 [project.optional-dependencies]
 hub = ["huggingface_hub>=0.24"]
 
+# TEXT-TO-SPEECH FROM TEXT (loom.cpp BACKLOG.md Task #79). A phoneme-input TTS model carries the symbol
+# table that turns phonemes into its own ids, but not grapheme-to-phoneme conversion -- that is a
+# property of the language rather than of any checkpoint, so it lives here. Optional because this
+# package declares no runtime dependencies on purpose and orthography2ipa brings numpy, langcodes and
+# ovos-spec-tools with it: a caller running an LM or an ASR model should not pay for a G2P engine.
+# Apache-2.0, so nothing about it constrains this package's own licensing.
+phonemes = ["orthography2ipa>=7.30"]
+
 # ACCELERATORS (BACKLOG.md P4.8). `pip install "loom-py-rt[vulkan]"` fetches one small wheel holding
 # one libggml-vulkan.so; this package finds it on sys.path at import and `device="auto"` uses it. The
 # base wheel is unchanged either way -- that is the point of GGML_BACKEND_DL, and it is why there is
