@@ -11,6 +11,7 @@ import os
 import sys
 import tempfile
 import types
+import warnings
 
 import pytest
 
@@ -445,3 +446,31 @@ class TestAudio:
         with tempfile.TemporaryDirectory() as d:
             with pytest.raises(ValueError):
                 loom.Audio(samples=[0.0], sample_rate=0).save(os.path.join(d, "x.wav"))
+
+
+class TestSampleRateDefault:
+    """A model that declares no rate gets one, loudly.
+
+    16 kHz is what every speech model in this tree takes on the way IN, so it is the one rate a loom
+    model is known to have opinions about -- and for a TTS export it is usually the wrong one, since
+    these families run at 22.05, 24 and 44.1 kHz. Audio at the wrong rate does not fail, it plays at the
+    wrong speed, so the warning is the only signal a caller gets that the number was invented.
+    """
+
+    def test_a_declared_rate_is_used_and_says_nothing(self):
+        handle = _FakeHandle([[0.0]], contract=_TTS_PHONEME_CONTRACT)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            audio = _model(handle).text2speech.infer(phonemes=[1])
+        assert audio.sample_rate == 22050
+        assert not caught
+
+    def test_an_undeclared_rate_is_assumed_and_warns(self):
+        handle = _FakeHandle([[0.0]], contract=dict(_TTS_PHONEME_CONTRACT, sample_rate=0))
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            audio = _model(handle).text2speech.infer(phonemes=[1])
+        assert audio.sample_rate == 16000
+        assert len(caught) == 1 and issubclass(caught[0].category, RuntimeWarning)
+        # The message has to say what goes wrong if the guess is wrong, not merely that it guessed.
+        assert "wrong speed" in str(caught[0].message)

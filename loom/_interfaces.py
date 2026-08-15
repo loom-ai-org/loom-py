@@ -22,6 +22,7 @@ decode strategy is in the wrong layer.
 """
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import Any, Sequence
 
@@ -52,8 +53,8 @@ class Audio:
 
     @property
     def duration(self) -> float:
-        """Seconds. Zero when the model declared no sample rate, which is honest: without one there is
-        no duration to report, only a count of numbers."""
+        """Seconds, or 0 for an Audio built by hand with no rate -- without one there is no duration to
+        report, only a count of numbers."""
         return len(self.samples) / self.sample_rate if self.sample_rate else 0.0
 
     def save(self, path: str) -> None:
@@ -64,9 +65,9 @@ class Audio:
 
         if not self.sample_rate:
             raise ValueError(
-                "this model declared no sample rate, so the samples cannot be written as audio. "
-                "`model.contract['sample_rate']` is 0 -- re-export the model with a current "
-                "loom-exporter, or write the raw samples yourself at a rate you know."
+                "this Audio has no sample rate, so it cannot be written as audio. A synthesised one "
+                "always has a rate (the model's, or the warned default); this is an Audio built by "
+                "hand with 0."
             )
         clipped = [max(-1.0, min(1.0, float(s))) for s in self.samples]
         frames = b"".join(int(s * 32767.0).to_bytes(2, "little", signed=True) for s in clipped)
@@ -81,6 +82,29 @@ class Audio:
 
         array = np.asarray(self.samples, dtype=dtype or np.float32)
         return array
+
+
+#: What a model that declares no sample rate is assumed to produce.
+#:
+#: 16 kHz because that is what every speech model in this tree takes on the way IN, so it is the one
+#: rate a loom model is known to have opinions about. It is a guess all the same, and for a TTS export
+#: it is usually the wrong one -- the families here run at 22.05, 24 and 44.1 kHz -- so it warns rather
+#: than defaulting silently: audio at the wrong rate does not fail, it plays at the wrong speed, and a
+#: caller who never hears the warning has no other signal that the number was invented.
+DEFAULT_SAMPLE_RATE = 16000
+
+
+def _sample_rate_or_default(contract: dict, model) -> int:
+    declared = int(contract.get("sample_rate") or 0)
+    if declared:
+        return declared
+    warnings.warn(
+        f"{model.path.name} declares no sample rate, so {DEFAULT_SAMPLE_RATE} Hz is assumed. If this "
+        f"model does not run at that rate the audio will play at the wrong speed rather than fail -- "
+        f"re-export it with a current loom-exporter, or set `Audio.sample_rate` yourself.",
+        RuntimeWarning, stacklevel=3,
+    )
+    return DEFAULT_SAMPLE_RATE
 
 
 class Interface:
@@ -206,7 +230,7 @@ class Text2Speech(Interface):
                 f"`model.driver_source` documents what `infer` actually returns."
             )
         return Audio(samples=[float(s) for s in samples],
-                     sample_rate=int(contract.get("sample_rate") or 0))
+                     sample_rate=_sample_rate_or_default(contract, self._model))
 
     def _resolve_ids(self, text, phonemes, tokens, language, contract) -> Sequence[int]:
         named = [n for n, v in (("text", text), ("phonemes", phonemes), ("tokens", tokens))
