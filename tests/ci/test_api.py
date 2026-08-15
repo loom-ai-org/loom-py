@@ -168,6 +168,14 @@ class _FakeHandle:
     def call(self, fn_name, inputs):
         self.calls.append(inputs)
         return self._returns.pop(0) if self._returns else 0.0
+    # `Model.infer` goes through `infer_audio`, which on the real handle reads the file's clip length
+    # and windows the waveform before delegating to `call`. A fake stands in for a model that declares
+    # no clip length -- the common case, every family but Whisper -- so delegating straight to `call`
+    # is what that model does. Present at all because the fake is an interface stand-in: when the
+    # binding grew a method, every double had to grow it too, which is the test suite noticing an API
+    # change rather than an inconvenience to route around.
+    def infer_audio(self, inputs):
+        return self.call("infer", inputs)
 
 
 def _model(handle):
