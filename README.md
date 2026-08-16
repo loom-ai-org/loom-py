@@ -217,6 +217,40 @@ pip install loom-py-rt           # once published -- `loom-py` on PyPI clashes w
 pip install loom-py-rt[hub]      # + from_pretrained()
 ```
 
+### Supported platforms
+
+CPython 3.10–3.13, on:
+
+| Platform | Wheel tag | Covers |
+|---|---|---|
+| Linux x86-64, glibc ≥ 2.28 | `manylinux_2_28_x86_64` | anything not already EOL |
+| Linux aarch64, glibc ≥ 2.28 | `manylinux_2_28_aarch64` | **Raspberry Pi 4 and 5 on 64-bit Raspberry Pi OS**, Jetson/Grace, Graviton, Ampere |
+
+There is no per-CPU choice to make. The wheel ships every `libggml-cpu-*.so` variant ggml builds for
+the architecture and picks one at import by scoring each against the CPU's own feature flags, so the
+same file serves the oldest and newest machine on its architecture. `loom.devices()` is how you check
+it worked.
+
+**Raspberry Pi.** A 64-bit OS is the requirement, and the only one: `uname -m` must say `aarch64`. On
+32-bit Raspberry Pi OS pip reports `armv7l`, matches no wheel, and falls back to building the sdist,
+which does not work — the build enables `GGML_CPU_ALL_VARIANTS`, whose Linux-ARM variant list is
+AArch64-only. 32-bit is not a slower configuration here, it is an unsupported one.
+
+Which variant a board loads, verified under QEMU on every release by `raspberry-pi-check` in
+`.github/workflows/wheels.yml`:
+
+| Board | Core | Loads | Because |
+|---|---|---|---|
+| Pi 4 / 400 / CM4 | Cortex-A72, ARMv8.0-A | `armv8.0_1` | no dotprod, no FP16 arithmetic, no SVE — the other seven variants score 0 |
+| Pi 5 / CM5 | Cortex-A76, ARMv8.2-A | `armv8.2_2` | dotprod + FP16, no SVE |
+
+Nothing extra is installed on a Pi: the CPU is the backend. `[vulkan]` does resolve on aarch64 and a
+Pi 5's V3D exposes Vulkan through Mesa, but no measurement here says that is worth doing — the CPU
+path is the supported one.
+
+**macOS and Windows have no wheels**, and a source install does not currently work on either. Tracked
+as `BACKLOG.md` P4.10, which scopes what Apple Silicon and Apple Intel would take.
+
 From a checkout — note `--recursive`, since the engine is a submodule:
 
 ```sh
@@ -265,9 +299,12 @@ to build and test against. Tracked as `BACKLOG.md` P4.8, along with which backen
 reachable at all (CUDA, OpenVINO and Qualcomm's are already in the pinned ggml; CoreML and RKNPU2 are
 not).
 
-**2. Wheels for more platforms.** Linux x86-64 today; next macOS on Intel, macOS on Apple Silicon and
-Linux on ARM. This is the item most visible from here, since it is what `pip install loom-py-rt` can
-resolve to.
+**2. Wheels for more platforms.** Linux x86-64 and aarch64 today — see *Supported platforms* above,
+which is what `pip install loom-py-rt` resolves to. What remains is Apple: **macOS on Apple Silicon**
+(`arm64`, and the only one of the two where a `[metal]` package would ever apply) and **macOS on Apple
+Intel** (`x86_64`, a target Apple has said is ending). Neither is a missing CI row — `$ORIGIN` RPATH,
+a `*.so`-only install rule and LuaJIT's `MACOSX_DEPLOYMENT_TARGET` all have to be dealt with first,
+which `BACKLOG.md` P4.10 scopes. Windows is behind that again.
 
 **3. More models — P5 in the ledger**, ordered by coverage per unit of effort: BERT token classifiers
 (the smallest possible template, and the first non-audio task) → codec decoders → CNN+CTC and SANM
