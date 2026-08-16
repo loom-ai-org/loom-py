@@ -175,15 +175,19 @@ class Text2Speech(Interface):
     name = "text2speech"
     summary = "text (or phonemes) in, a waveform out"
 
-    def _infer(self, text: str | None = None, *, phonemes: Sequence[int] | None = None,
+    def _infer(self, text: str | None = None, *, phonemes: str | Sequence[int] | None = None,
                tokens: Sequence[int] | None = None, steps: int | None = None,
                seed: int = 0, language: str | None = None,
                sample_rate: int = 16000, **driver_inputs) -> Audio:
         """Three ways in, and which ones a given model accepts is a property of the model.
 
-        `text` needs a front end that can encode it -- `contract["text_frontend"] == "vocab"`. The four
-        phoneme-input families have none embedded, so for them `text` is not a missing feature of this
-        package but a step that happens outside the engine, and the error says so rather than pretending.
+        `text` needs a front end that can encode it: `"vocab"` encodes it directly, `"phonemes"` runs a
+        G2P first and encodes that. A model declaring neither has no text door -- that is a step
+        happening outside the engine, and the error says so rather than pretending.
+
+        `phonemes` takes either the STRING a G2P produced (encoded here, through the model's own table
+        and its own BOS/EOS assembly) or ids already encoded. `tokens` is the third and lowest: ids
+        passed through untouched, assembly included, which is what the driver's own header documents.
 
         **`sample_rate` is the FALLBACK, not an override.** A model that declares its own rate is
         believed, because the export read it off the checkpoint and the caller is guessing; a model that
@@ -243,6 +247,22 @@ class Text2Speech(Interface):
         if tokens is not None:
             return [int(t) for t in tokens]
         if phonemes is not None:
+            # A STRING goes through the model's own table, ids go straight through. Both spellings are
+            # what a caller actually holds: `phonemize()` returns a str and so does every external G2P,
+            # while a caller who has already encoded holds ids. Before, `phonemes=` was `[int(p) for p
+            # in phonemes]` -- byte-identical to the `tokens=` branch above, so the str form died on
+            # `invalid literal for int() with base 10: 'h'` and the two parameters were one parameter
+            # under two names. Encoding here rather than telling the caller to call `tokenize` first is
+            # also what applies the model's own BOS/EOS assembly, which is exactly the step a
+            # bring-your-own-G2P caller has no way to know about (Kokoro wraps with 0 at both ends).
+            if isinstance(phonemes, str):
+                if self._model.tokenizer is None:
+                    raise UnsupportedTask(
+                        f"this model embeds no symbol table, so it cannot encode a phoneme string. Pass "
+                        f"phonemes=[ids] or tokens=[ids] from your own table, or re-export it with a "
+                        f"current loom-exporter, which writes the table its checkpoint already had."
+                    )
+                return self._model.tokenize(phonemes)
             return [int(p) for p in phonemes]
         frontend = contract.get("text_frontend")
         if frontend == "phonemes":
