@@ -136,6 +136,99 @@ jobs:
           name: wheels-${{ matrix.backend }}-${{ matrix.arch }}
           path: wheelhouse/*.whl
 
+  # THE RUNG NO RUNNER OCCUPIES. The aarch64 wheel ships eight `libggml-cpu-armv*.so` and ggml picks
+  # between them at run time by scoring each against `getauxval(AT_HWCAP)` -- so which one a machine
+  # loads is decided by that machine's CPU, and CI only ever exercises the CPU it runs on.
+  # `ubuntu-24.04-arm` is Neoverse: dotprod, FP16, i8mm. It therefore never selects `armv8.0_1`, which
+  # is the ONLY variant a Raspberry Pi 4 can load -- its Cortex-A72 is ARMv8.0-A with none of those
+  # features, so the other seven score 0 there. Without this job the Pi 4 claim in README.md rests on
+  # reading the score function rather than on running it.
+  #
+  # QEMU is the right tool HERE and the wrong one for building (see build-wheels): emulating an import
+  # takes seconds, and `QEMU_CPU` is the only way to obtain a CPU without dotprod at all -- no hosted
+  # runner, on any provider, is that old.
+  #
+  # The images are Debian, which is what Raspberry Pi OS is: bookworm carries glibc 2.36 and bullseye
+  # 2.31, so the bullseye row also puts a floor under the `manylinux_2_28` tag rather than trusting it.
+  #
+  # A GATE, unlike the GPU smoke test below. That one cannot gate a release because a self-hosted
+  # runner may be offline and the job would queue for 24 hours; this one runs on a hosted runner with
+  # nothing but docker, so there is no reason to let a release past it.
+  raspberry-pi-check:
+    needs: build-wheels
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # A72 has no dotprod, no FP16 arithmetic, no SVE -- exactly one variant is loadable, so this
+          # row is an equality check.
+          - board: "Pi 4 / 400 / CM4, Bookworm"
+            image: "arm64v8/python:3.12-slim-bookworm"
+            cpu: cortex-a72
+            expect: "libggml-cpu-armv8.0_1.so"
+          - board: "Pi 4 / 400 / CM4, Bullseye (glibc 2.31)"
+            image: "arm64v8/python:3.11-slim-bullseye"
+            cpu: cortex-a72
+            expect: "libggml-cpu-armv8.0_1.so"
+          # A76 has dotprod and FP16 but no SVE. Two variants are legitimate winners depending on
+          # whether QEMU's model advertises FPHP, and both are safe to execute -- so this row asserts
+          # the ladder CLIMBS off the baseline, without pinning a detail of QEMU's CPU modelling that
+          # would fail a release for no defect of ours.
+          - board: "Pi 5 / CM5, Bookworm"
+            image: "arm64v8/python:3.12-slim-bookworm"
+            cpu: cortex-a76
+            expect: "libggml-cpu-armv8.2_1.so,libggml-cpu-armv8.2_2.so"
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels-base-aarch64
+          path: dist
+
+      - uses: docker/setup-qemu-action@v3
+
+      # Written here rather than taken from the checkout because this job needs no checkout at all --
+      # it tests the built artifact, and pulling the source tree in would invite the very sys.path
+      # shadowing the wheel test step goes out of its way to avoid.
+      - name: Write the check
+        run: |
+          cat > check.py <<'PY'
+          import os, pathlib, re
+          import loom
+
+          allowed = os.environ["EXPECT"].split(",")
+          devices = loom.devices()   # populates the registry, which is what runs the selection
+
+          # ggml dlopens every candidate to score it and dlcloses the losers (RTLD_NOW | RTLD_LOCAL,
+          # no RTLD_NODELETE), so the winner is the only one still mapped.
+          maps = pathlib.Path("/proc/self/maps").read_text()
+          mapped = sorted(set(re.findall(r"libggml-cpu-[\w.]+\.so", maps)))
+          print(f"cpu={os.environ['QEMU_CPU']} devices={[d['name'] for d in devices]} mapped={mapped}")
+
+          assert any(d["is_cpu"] for d in devices), (
+              f"no CPU device on {os.environ['QEMU_CPU']} -- with GGML_BACKEND_DL that means no "
+              f"variant scored above 0, which is a wheel that cannot run on this board AT ALL"
+          )
+          assert len(mapped) == 1, f"expected one variant to survive selection, got {mapped}"
+          assert mapped[0] in allowed, (
+              f"{mapped[0]} was selected on {os.environ['QEMU_CPU']}; expected one of {allowed}"
+          )
+          PY
+
+      - name: Install and select on ${{ matrix.board }}
+        run: |
+          docker run --rm --platform linux/arm64 \
+            -e QEMU_CPU=${{ matrix.cpu }} \
+            -e EXPECT='${{ matrix.expect }}' \
+            -v "$PWD/dist:/dist:ro" \
+            -v "$PWD/check.py:/check.py:ro" \
+            ${{ matrix.image }} \
+            bash -euo pipefail -c '
+              pip install --quiet --no-index --find-links /dist loom-py-rt
+              cd /tmp   # a neutral cwd, so the installed package is what gets imported
+              python /check.py
+            '
+
   # THE ONE CHECK A HOSTED RUNNER CANNOT DO. Building CUDA needs no GPU, so everything above runs on
   # hosted runners; running a model needs one. This job is why the workstation is registered as a
   # self-hosted runner, and it is not ceremony -- a soname mismatch between the base wheel and a
@@ -223,7 +316,7 @@ jobs:
   # which is a visible install error; a backend with no base is the same error from the other side.
   # Neither is silent, so this is about which half is fixed sooner rather than about safety.
   publish-pypi:
-    needs: [build-wheels, build-backends, build-sdist]
+    needs: [build-wheels, build-backends, build-sdist, raspberry-pi-check]
     if: ${{ github.event_name == 'release' || inputs.publish }}
     runs-on: ubuntu-latest
     environment: pypi
