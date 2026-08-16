@@ -430,6 +430,34 @@ class TestText2Speech:
         assert seen == [("hello", "en")], "the raw text reaches the phonemizer, not ids"
         assert handle.calls[0]["tokens"] == [10.0, 11.0, 12.0], "its output is encoded by the model"
 
+    def test_a_phoneme_string_is_encoded_by_the_model_and_ids_are_not(self):
+        """`phonemes=` takes both spellings a caller actually holds: the STRING every G2P returns, and
+        ids already encoded. It used to take only the second -- `[int(p) for p in phonemes]`, byte for
+        byte the `tokens=` branch -- so the string form died on `invalid literal for int(): 'h'` and the
+        two parameters were one parameter under two names.
+
+        Which one is passed decides more than convenience: encoding here is what applies the model's own
+        BOS/EOS assembly, and that assembly is precisely what a bring-your-own-G2P caller cannot know
+        about (Kokoro's driver needs its ids wrapped with 0 at both ends). `tokens=` deliberately keeps
+        going through untouched, for the caller who has already done it.
+        """
+        handle = _FakeHandle([[0.0]], contract=dict(_TTS_PHONEME_CONTRACT, text_frontend="phonemes"))
+        _model(handle).text2speech.infer(phonemes="hɛ")
+        assert handle.calls[0]["tokens"] == [10.0, 11.0, 12.0], "the table encoded it"
+
+        handle = _FakeHandle([[0.0]], contract=dict(_TTS_PHONEME_CONTRACT, text_frontend="phonemes"))
+        _model(handle).text2speech.infer(phonemes=[7, 8])
+        assert handle.calls[0]["tokens"] == [7.0, 8.0], "ids pass through, assembly included"
+
+    def test_a_phoneme_string_with_no_table_says_the_table_is_missing(self):
+        """The str form needs the embedded table; the id form does not. A model exported before the
+        table was written must say so rather than failing on an int() of a letter."""
+        handle = _FakeHandle([], contract=dict(_TTS_PHONEME_CONTRACT, text_frontend="phonemes"),
+                             vocab=None)
+        with pytest.raises(loom.UnsupportedTask) as excinfo:
+            _model(handle).text2speech.infer(phonemes="hɛ")
+        assert "re-export" in str(excinfo.value)
+
     def test_a_phoneme_model_with_no_table_says_the_table_is_missing(self):
         """A model exported before the symbol table was written. The fix is a re-export, not a
         different call, and the message says which."""
