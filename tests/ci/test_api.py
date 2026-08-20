@@ -163,8 +163,12 @@ class _FakeHandle:
     """A stand-in for the pybind11 `Model`, so the Python layer's decisions can be tested without a
     GGUF. Only the methods `loom.Model` actually calls are here."""
 
-    def __init__(self, returns, vocab="gpt2", eos=-1, contract=None):
+    def __init__(self, returns, vocab="gpt2", eos=-1, contract=None, transcribe_warnings=()):
         self._returns = list(returns)      # what successive infer() calls hand back
+        # What the ENGINE reports as ignored -- an argument this file has nothing to select with. The
+        # engine returns these instead of printing them (a library has no logger); the Python layer is
+        # what turns them into warnings, and that hand-off is what the test below pins.
+        self._transcribe_warnings = tuple(transcribe_warnings)
         self._vocab = vocab
         self._eos = eos
         self.calls = []                    # every inputs dict infer() was given
@@ -209,7 +213,33 @@ class _FakeHandle:
     def transcribe(self, waveform, options):
         self.calls.append({"waveform": waveform, **options})
         return {"segments": [{"start": 0.0, "end": 1.0, "text": "hello", "closed": True}],
-                "text": "hello", "windows": 1, "timestamped": True}
+                "text": "hello", "windows": 1, "timestamped": True,
+                "warnings": list(self._transcribe_warnings)}
+
+
+class TestTranscribeWarnings:
+    """An argument the engine ignored becomes a Python warning, not an exception and not silence.
+
+    `language="en"` on a monolingual checkpoint used to RAISE, which sent callers looking for a defect
+    in a pipeline that had none -- the argument named exactly what the model was always going to do.
+    It is ignored now, and the engine says so. Refusing was wrong; staying quiet would be worse, since
+    the caller clearly believed the argument did something.
+
+    A request the model cannot SERVE -- a language a multilingual file lacks, `translate` on a file
+    with no task tokens -- still raises, from the engine, and there is nothing for this layer to do.
+    """
+
+    def test_an_ignored_argument_is_raised_as_a_runtime_warning(self):
+        handle = _FakeHandle([], transcribe_warnings=["language=\"en\" selects nothing here"])
+        with pytest.warns(RuntimeWarning, match="selects nothing"):
+            result = _model(handle).transcribe([0.0, 1.0], language="en")
+        assert result.text == "hello", "the call still returns its transcript"
+
+    def test_no_warning_when_the_engine_reports_none(self):
+        handle = _FakeHandle([])
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")      # any warning at all fails here
+            _model(handle).transcribe([0.0, 1.0], language="en")
 
 
 def tmp_lexicon():

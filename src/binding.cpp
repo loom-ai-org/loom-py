@@ -331,6 +331,12 @@ public:
         out["text"] = result.text;
         out["windows"] = result.windows;
         out["timestamped"] = result.timestamped;
+        // Arguments the engine ignored because this file has nothing for them to select. Passed up as
+        // data rather than raised here: the engine has no logger and no opinion about stderr, and
+        // `Model.transcribe` is the layer that already turns this sort of thing into a Python warning.
+        py::list warnings;
+        for (const std::string& w : result.warnings) warnings.append(w);
+        out["warnings"] = warnings;
         return out;
     }
 
