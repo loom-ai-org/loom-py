@@ -12,6 +12,7 @@ import sys
 import tempfile
 import types
 import warnings
+from unittest import mock
 
 import pytest
 
@@ -162,8 +163,12 @@ class _FakeHandle:
     """A stand-in for the pybind11 `Model`, so the Python layer's decisions can be tested without a
     GGUF. Only the methods `loom.Model` actually calls are here."""
 
-    def __init__(self, returns, vocab="gpt2", eos=-1, contract=None):
+    def __init__(self, returns, vocab="gpt2", eos=-1, contract=None, transcribe_warnings=()):
         self._returns = list(returns)      # what successive infer() calls hand back
+        # What the ENGINE reports as ignored -- an argument this file has nothing to select with. The
+        # engine returns these instead of printing them (a library has no logger); the Python layer is
+        # what turns them into warnings, and that hand-off is what the test below pins.
+        self._transcribe_warnings = tuple(transcribe_warnings)
         self._vocab = vocab
         self._eos = eos
         self.calls = []                    # every inputs dict infer() was given
@@ -208,7 +213,42 @@ class _FakeHandle:
     def transcribe(self, waveform, options):
         self.calls.append({"waveform": waveform, **options})
         return {"segments": [{"start": 0.0, "end": 1.0, "text": "hello", "closed": True}],
-                "text": "hello", "windows": 1, "timestamped": True}
+                "text": "hello", "windows": 1, "timestamped": True,
+                "warnings": list(self._transcribe_warnings)}
+
+
+class TestTranscribeWarnings:
+    """An argument the engine ignored becomes a Python warning, not an exception and not silence.
+
+    `language="en"` on a monolingual checkpoint used to RAISE, which sent callers looking for a defect
+    in a pipeline that had none -- the argument named exactly what the model was always going to do.
+    It is ignored now, and the engine says so. Refusing was wrong; staying quiet would be worse, since
+    the caller clearly believed the argument did something.
+
+    A request the model cannot SERVE -- a language a multilingual file lacks, `translate` on a file
+    with no task tokens -- still raises, from the engine, and there is nothing for this layer to do.
+    """
+
+    def test_an_ignored_argument_is_raised_as_a_runtime_warning(self):
+        handle = _FakeHandle([], transcribe_warnings=["language=\"en\" selects nothing here"])
+        with pytest.warns(RuntimeWarning, match="selects nothing"):
+            result = _model(handle).transcribe([0.0, 1.0], language="en")
+        assert result.text == "hello", "the call still returns its transcript"
+
+    def test_no_warning_when_the_engine_reports_none(self):
+        handle = _FakeHandle([])
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")      # any warning at all fails here
+            _model(handle).transcribe([0.0, 1.0], language="en")
+
+
+def tmp_lexicon():
+    """A two-entry `word<TAB>ipa` TSV on disk. Never read here -- orthography2ipa resolves a lexicon
+    lazily, on the first transcription for that language -- but a real path is what a caller passes."""
+    fd, path = tempfile.mkstemp(suffix=".tsv")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write("time\ttˈaɪm\nfriend\tfɹˈɛnd\n")
+    return path
 
 
 def _model(handle):
@@ -429,6 +469,36 @@ class TestText2Speech:
             loom.phonemizers._PROVIDERS.pop("ipa", None)
         assert seen == [("hello", "en")], "the raw text reaches the phonemizer, not ids"
         assert handle.calls[0]["tokens"] == [10.0, 11.0, 12.0], "its output is encoded by the model"
+
+    def test_a_lexicon_is_named_once_and_stored_under_the_resolved_language(self):
+        """`set_lexicon` exists because orthography2ipa cannot reach English by rule -- "time" is `tɪm`
+        without one -- and because no PARAMETER fixes that: `search="beam"` returns the greedy string
+        unchanged at every width. It is stored rather than passed per call because registration in that
+        library is process-global and lazily resolved.
+
+        The resolution is the part worth pinning. A lexicon registered under an unresolved tag is
+        SILENT when it is wrong -- nothing raises, the overlay simply never loads -- so `"en"` and the
+        `"en-GB"` it resolves to must land in the same slot.
+        """
+        o2i = pytest.importorskip("orthography2ipa")
+        tsv = tmp_lexicon()
+        try:
+            loom.phonemizers.set_lexicon(tsv, language="en")
+            assert loom.phonemizers.lexicons() == {o2i.resolve("en"): str(tsv)}
+            loom.phonemizers.set_lexicon(tsv, language="en-GB")
+            assert len(loom.phonemizers.lexicons()) == 1, "one slot, not one per spelling"
+            loom.phonemizers.set_lexicon(None)
+            assert loom.phonemizers.lexicons() == {}, "None clears rather than registering 'None'"
+        finally:
+            loom.phonemizers._LEXICONS.clear()
+
+    def test_a_lexicon_without_the_default_provider_installed_is_refused(self):
+        """Accepting it would be worse than refusing: a lexicon set on a provider that does not exist
+        is stored, never applied, and the caller hears unchanged audio with nothing to explain it."""
+        with mock.patch.dict(sys.modules, {"orthography2ipa": None}):
+            with pytest.raises(LookupError) as excinfo:
+                loom.phonemizers.set_lexicon("/does/not/matter.tsv")
+        assert "phonemes" in str(excinfo.value)
 
     def test_a_phoneme_string_is_encoded_by_the_model_and_ids_are_not(self):
         """`phonemes=` takes both spellings a caller actually holds: the STRING every G2P returns, and

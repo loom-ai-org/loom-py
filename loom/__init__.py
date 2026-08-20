@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import os
 import sys
+import warnings
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence
@@ -394,6 +395,14 @@ class Model:
         if task is not None:
             options["task"] = str(task)
         raw = self._handle.transcribe([float(x) for x in waveform], options)
+        # An argument this file has nothing to select with was IGNORED rather than refused -- `language`
+        # on a monolingual checkpoint names exactly what it was always going to do. A warning rather
+        # than an exception, because the call is correct and its result is what was asked for; a
+        # warning rather than silence, because the caller clearly believed the argument did something.
+        # A request the model cannot SERVE (a language a multilingual file lacks, `translate` on a file
+        # with no task tokens) still raises from the engine.
+        for message in raw.get("warnings", ()):
+            warnings.warn(message, RuntimeWarning, stacklevel=2)
         return Transcription(
             text=raw["text"],
             segments=[Segment(**s) for s in raw["segments"]],
