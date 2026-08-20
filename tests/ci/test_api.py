@@ -12,6 +12,7 @@ import sys
 import tempfile
 import types
 import warnings
+from unittest import mock
 
 import pytest
 
@@ -209,6 +210,15 @@ class _FakeHandle:
         self.calls.append({"waveform": waveform, **options})
         return {"segments": [{"start": 0.0, "end": 1.0, "text": "hello", "closed": True}],
                 "text": "hello", "windows": 1, "timestamped": True}
+
+
+def tmp_lexicon():
+    """A two-entry `word<TAB>ipa` TSV on disk. Never read here -- orthography2ipa resolves a lexicon
+    lazily, on the first transcription for that language -- but a real path is what a caller passes."""
+    fd, path = tempfile.mkstemp(suffix=".tsv")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write("time\ttˈaɪm\nfriend\tfɹˈɛnd\n")
+    return path
 
 
 def _model(handle):
@@ -429,6 +439,36 @@ class TestText2Speech:
             loom.phonemizers._PROVIDERS.pop("ipa", None)
         assert seen == [("hello", "en")], "the raw text reaches the phonemizer, not ids"
         assert handle.calls[0]["tokens"] == [10.0, 11.0, 12.0], "its output is encoded by the model"
+
+    def test_a_lexicon_is_named_once_and_stored_under_the_resolved_language(self):
+        """`set_lexicon` exists because orthography2ipa cannot reach English by rule -- "time" is `tɪm`
+        without one -- and because no PARAMETER fixes that: `search="beam"` returns the greedy string
+        unchanged at every width. It is stored rather than passed per call because registration in that
+        library is process-global and lazily resolved.
+
+        The resolution is the part worth pinning. A lexicon registered under an unresolved tag is
+        SILENT when it is wrong -- nothing raises, the overlay simply never loads -- so `"en"` and the
+        `"en-GB"` it resolves to must land in the same slot.
+        """
+        o2i = pytest.importorskip("orthography2ipa")
+        tsv = tmp_lexicon()
+        try:
+            loom.phonemizers.set_lexicon(tsv, language="en")
+            assert loom.phonemizers.lexicons() == {o2i.resolve("en"): str(tsv)}
+            loom.phonemizers.set_lexicon(tsv, language="en-GB")
+            assert len(loom.phonemizers.lexicons()) == 1, "one slot, not one per spelling"
+            loom.phonemizers.set_lexicon(None)
+            assert loom.phonemizers.lexicons() == {}, "None clears rather than registering 'None'"
+        finally:
+            loom.phonemizers._LEXICONS.clear()
+
+    def test_a_lexicon_without_the_default_provider_installed_is_refused(self):
+        """Accepting it would be worse than refusing: a lexicon set on a provider that does not exist
+        is stored, never applied, and the caller hears unchanged audio with nothing to explain it."""
+        with mock.patch.dict(sys.modules, {"orthography2ipa": None}):
+            with pytest.raises(LookupError) as excinfo:
+                loom.phonemizers.set_lexicon("/does/not/matter.tsv")
+        assert "phonemes" in str(excinfo.value)
 
     def test_a_phoneme_string_is_encoded_by_the_model_and_ids_are_not(self):
         """`phonemes=` takes both spellings a caller actually holds: the STRING every G2P returns, and
