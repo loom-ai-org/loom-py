@@ -249,7 +249,8 @@ Pi 5's V3D exposes Vulkan through Mesa, but no measurement here says that is wor
 path is the supported one.
 
 **macOS and Windows have no wheels**, and a source install does not currently work on either. Tracked
-as `BACKLOG.md` P4.10, which scopes what Apple Silicon and Apple Intel would take.
+as **P4.10** ([Epic-08](https://github.com/loom-ai-org/loom.cpp/blob/main/docs/epics/epic-08-packaging-and-release.md)), which scopes what Apple Silicon
+and Apple Intel would take.
 
 From a checkout — note `--recursive`, since the engine is a submodule:
 
@@ -295,7 +296,7 @@ built that way: **one arch-tagged base wheel, plus small backend packages that d
 looks for it**, so `pip install "loom-py-rt[cuda]"` means "also fetch that backend", `device="auto"`
 finds it, and a Raspberry Pi installs nothing extra. `packaging/rt-vulkan/` is the worked example; a
 CUDA package is that directory with two strings changed, waiting only on a machine with an NVIDIA GPU
-to build and test against. Tracked as `BACKLOG.md` P4.8, along with which backends are
+to build and test against. Tracked in [Epic-04](https://github.com/loom-ai-org/loom.cpp/blob/main/docs/epics/epic-04-backends-and-accelerators.md), along with which backends are
 reachable at all (CUDA, OpenVINO and Qualcomm's are already in the pinned ggml; CoreML and RKNPU2 are
 not).
 
@@ -304,15 +305,15 @@ which is what `pip install loom-py-rt` resolves to. What remains is Apple: **mac
 (`arm64`, and the only one of the two where a `[metal]` package would ever apply) and **macOS on Apple
 Intel** (`x86_64`, a target Apple has said is ending). Neither is a missing CI row — `$ORIGIN` RPATH,
 a `*.so`-only install rule and LuaJIT's `MACOSX_DEPLOYMENT_TARGET` all have to be dealt with first,
-which `BACKLOG.md` P4.10 scopes. Windows is behind that again.
+which **P4.10** ([Epic-08](https://github.com/loom-ai-org/loom.cpp/blob/main/docs/epics/epic-08-packaging-and-release.md)) scopes. Windows is behind that again.
 
-**3. More models — P5 in the ledger**, ordered by coverage per unit of effort: BERT token classifiers
+**3. More models — [Epic-03](https://github.com/loom-ai-org/loom.cpp/blob/main/docs/epics/epic-03-model-coverage.md)**, ordered by coverage per unit of effort: BERT token classifiers
 (the smallest possible template, and the first non-audio task) → codec decoders → CNN+CTC and SANM
 encoders → the remaining TTS families → text encoder-decoders → small classifiers → music. Each lands
 here for free: a model this package has never heard of works the day the exporter can produce it.
 
 **4. The follow-ups the docs already name** —
-[`BACKLOG.md`](https://github.com/loom-ai-org/loom.cpp/blob/main/BACKLOG.md) is the ledger for all three
+[`docs/backlog/active-index.md`](https://github.com/loom-ai-org/loom.cpp/blob/main/docs/backlog/active-index.md) is the ledger for all three
 repos and the authority. The ones that would show up in this API: a permissively-licensed phonemiser,
 which is what would give the four phoneme-input TTS models a `tokenize`; and the `KvCache` memory
 redesign and quantized KV cache, which decide how large a model this can run on a given machine.
