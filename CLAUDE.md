@@ -5,7 +5,7 @@ side by side under one parent directory:
 
 | | |
 |---|---|
-| `loom.cpp` | the engine — **vendored here as a submodule at `vendor/loom.cpp`**; holds `BACKLOG.md` |
+| `loom.cpp` | the engine — **vendored here as a submodule at `vendor/loom.cpp`**; holds `docs/`, the shared knowledge base |
 | `loom-exporter` | produces the GGUFs this runs |
 | `loom-py` | this repo |
 
@@ -73,3 +73,19 @@ dispatches every family by name and returns null for a tag it does not know. It 
 `else` handing the tag to `Vocab::load`, which throws on anything but `llama`/`t5` — from inside the
 `Model` constructor, so a GGUF from a newer exporter did not load at all. A tag it *does* know with the
 data missing still throws, on purpose: that file is malformed, not merely new.
+
+## The knowledge base
+
+**Documentation for all three repos lives in `loom.cpp/docs/`**, in four tiers: the open-work hub
+([`docs/backlog/active-index.md`](https://github.com/loom-ai-org/loom.cpp/blob/main/docs/backlog/active-index.md)),
+domain epics (`docs/epics/`), decisions (`docs/adrs/`) and lessons (`docs/retros/`). The submodule at
+`vendor/loom.cpp` has all of it on disk.
+
+This repo's domain is **Epic-06** (the high-level API and its hosts) and **Epic-08** (packaging and
+release). Its governing decisions are **ADR-013** (one door per task, declared by the file),
+**ADR-009** (backends as dynamic libraries and separate packages) and **ADR-011** (three repos).
+
+Code cites items by `P`-number (`P4.10`, `P4.8g`). The numbers did not change when the old 9,000-line
+`BACKLOG.md` was split; that file is now a redirect carrying a map to every section's new home. When
+you finish something, put its decision in an ADR, its lesson in a retro, and remove it from the hub —
+the routing rules are in `loom.cpp/CLAUDE.md`.
