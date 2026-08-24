@@ -6,7 +6,7 @@ build-backend = "scikit_build_core.build"
 name = "loom-py-rt-vulkan"
 # Deliberately the same version as the base package, and see `dependencies` for why it is not merely
 # a convention.
-version = "1.0.0-rc5"
+version = "1.0.0-rc6"
 description = "Vulkan backend for loom-py-rt"
 # Two entries, not one table with both keys, and that is the difference between `pip show` printing
 # an author and printing a blank line. PEP 621 maps {name, email} TOGETHER onto a single
@@ -33,7 +33,7 @@ classifiers = [
 #
 # The cost of this is real and accepted: a base release requires re-releasing every backend package.
 # That is the trade for a base wheel that does not have to be republished per accelerator.
-dependencies = ["loom-py-rt == 1.0.0rc5"]
+dependencies = ["loom-py-rt == 1.0.0rc6"]
 
 [tool.scikit-build]
 wheel.packages = ["loom_rt_vulkan"]
