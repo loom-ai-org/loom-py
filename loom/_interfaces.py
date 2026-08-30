@@ -146,6 +146,17 @@ class Text2Text(Interface):
         return self._model.generate(prompt, max_new_tokens=max_new_tokens, eos_token=eos_token,
                                     **driver_inputs)
 
+    def chat(self, messages, max_new_tokens: int = 256, **options) -> str:
+        """The same door, asked in the format an instruction-tuned checkpoint was trained on.
+
+        Beside `infer` rather than replacing it, because the two are different questions: `infer`
+        CONTINUES a prompt, which is what a base model does and a legitimate thing to ask of any model;
+        `chat` puts the prompt inside a turn and asks for a reply. A model whose file carries no chat
+        template answers the first and raises on the second, which is the honest split -- `chat_roles`
+        on the model says which it is.
+        """
+        return self._model.chat(messages, max_new_tokens=max_new_tokens, **options)
+
     def ids(self, tokens: Sequence[int], max_new_tokens: int = 64,
             eos_token: int | None = None, **driver_inputs) -> list[int]:
         """The generated ids, without the encode/decode either side -- sometimes the ids are the answer.

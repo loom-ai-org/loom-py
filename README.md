@@ -9,9 +9,10 @@
 ```python
 import loom
 
-model = loom.Model.from_pretrained("loom-ai-org/lfm2-350m-monolithic-loom")
-print(model.text2text.infer("The capital of France is", max_new_tokens=14))
-# ':\nA) Paris\nB) Lyon\nC) Marseille\nD'
+model = loom.Model.from_pretrained("loom-ai-org/gemma-3-270m-it-loom")
+print(model.text2text.chat("Who discovered Brazil?"))
+# 'The discovery of Brazil was made by **Hernán Cortés**.'   (one sample: this
+# checkpoint declares do_sample, so pass temperature=0.0 for the same answer twice)
 ```
 
 ## Two APIs, and which one you want
@@ -20,7 +21,8 @@ print(model.text2text.infer("The capital of France is", max_new_tokens=14))
 carries all of them; the ones it does not answer to say so when called, naming what it actually is.
 
 ```python
-model.text2text.infer("The capital of France is")        # -> str
+model.text2text.infer("The capital of France is")        # -> str, a raw completion
+model.text2text.chat("Who discovered Brazil?")           # -> str, asked inside a turn
 model.speech2text.infer(waveform, language="en")         # -> Transcription
 model.text2speech.infer("hello world")                   # -> Audio
 ```
@@ -168,8 +170,20 @@ anything here.
 | [`loom-ai-org/smollm2-360m-instruct-loom`](https://huggingface.co/loom-ai-org/smollm2-360m-instruct-loom) | [`HuggingFaceTB/SmolLM2-360M-Instruct`](https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct) |
 | [`loom-ai-org/gemma-3-270m-it-loom`](https://huggingface.co/loom-ai-org/gemma-3-270m-it-loom) | [`google/gemma-3-270m-it`](https://huggingface.co/google/gemma-3-270m-it) |
 
-These are the models `text2text` answers to; `model.generate(...)` is the same call under the name
-it shipped with.
+These are the models `text2text` answers to; `model.generate(...)` is the same call under the name it
+shipped with.
+
+**`infer` and `chat` are different questions.** `infer` CONTINUES a prompt, which is what a base model
+does; `chat` puts the prompt inside a turn using the checkpoint's own chat template and asks for a
+reply. An instruction-tuned model handed a raw prompt behaves like a base model and continues in the
+prompt's own format, which reads exactly like it is repeating you back — so use `chat` for the
+instruction-tuned rows above, and `infer` for the base ones. `model.chat_roles` says which a file is:
+empty means it carries no template, and Gemma 3's is `['user', 'assistant']` because its template folds
+a system message into the first user turn rather than emitting a block for it.
+
+Decoding follows the checkpoint's own `generation_config.json` — Gemma 3 ships `top_k 64, top_p 0.95`
+and is sampled; everything else here is greedy. Name `temperature`, `top_k`, `top_p` or `seed` to
+override it.
 
 ### Speech recognition
 

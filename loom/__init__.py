@@ -291,11 +291,71 @@ class Model:
         """Token ids back to text. Floats are accepted because floats are what `infer` returns."""
         return self._handle.decode([int(i) for i in ids])
 
+    @property
+    def chat_roles(self) -> list[str]:
+        """The message roles this checkpoint's chat template can express, or [] if it has none.
+
+        Empty for a base model, and for any GGUF exported before 1.0.0-rc7. **Not always all three**:
+        Gemma 3's template folds a system message into the text of the first user turn rather than
+        emitting a block for it, so it declares `["user", "assistant"]` and passing it a system message
+        is an error rather than a silently dropped argument.
+        """
+        return list(self._handle.chat_roles())
+
+    def apply_chat_template(
+        self,
+        messages: Sequence[tuple[str, str]] | Sequence[dict],
+        add_generation_prompt: bool = True,
+    ) -> str:
+        """A conversation as the prompt text this checkpoint was trained on.
+
+        `messages` is `[("user", "..."), ("assistant", "...")]`, or the `{"role": ..., "content": ...}`
+        dicts `transformers` uses -- both, because a caller moving code across should not have to
+        rewrite the data.
+
+        `add_generation_prompt` appends the opening of the reply the model is being ASKED for, which is
+        what turns a transcript into a question. Leave it on unless you are building a training-shaped
+        transcript.
+
+        The template itself is data in the GGUF, reduced from the checkpoint's own Jinja at export time
+        and verified there against `apply_chat_template`; this package renders no Jinja and carries no
+        per-model strings.
+        """
+        pairs = [(m["role"], m["content"]) if isinstance(m, dict) else (m[0], m[1]) for m in messages]
+        return self._handle.apply_chat_template(pairs, bool(add_generation_prompt))
+
+    def chat(
+        self,
+        messages: str | Sequence[tuple[str, str]] | Sequence[dict],
+        max_new_tokens: int = 256,
+        **options,
+    ) -> str:
+        """Ask the model something, in the format it was instruction-tuned on.
+
+        A bare string is the user's turn. Anything else is the whole conversation.
+
+        This is `generate` with the template applied, and applying it is not optional cosmetics: an
+        instruction-tuned model given an un-templated prompt behaves like a base model and continues in
+        the prompt's own format, which reads exactly like it is repeating you back.
+
+        Sampling and stopping follow the same rules as `generate` -- the checkpoint's own
+        `generation_config.json` unless you name something else.
+        """
+        if isinstance(messages, str):
+            messages = [("user", messages)]
+        return self.generate(self.apply_chat_template(messages, add_generation_prompt=True),
+                             max_new_tokens=max_new_tokens, **options)
+
     def generate(
         self,
         prompt: str,
         max_new_tokens: int = 64,
         eos_token: int | None = None,
+        *,
+        temperature: float | None = None,
+        top_k: int | None = None,
+        top_p: float | None = None,
+        seed: int | None = None,
         **inputs: float | int | Sequence[float],
     ) -> str:
         """Text in, text out: tokenize, run the driver, detokenize.
@@ -311,18 +371,31 @@ class Model:
         list return where the new token is the last, and silently rewrote any id >= 65536 to 0. Nothing
         but coincidence kept the two in step, and nothing would have caught them diverging further.
 
-        `eos_token` defaults to the model's own `tokenizer.ggml.eos_token_id`, so generation stops where
-        the checkpoint says it should. Extra keyword arguments are forwarded to the driver verbatim, for
-        a model whose `infer` takes more than tokens.
+        `eos_token` defaults to the model's own stop SET -- `tokenizer.ggml.eos_token_ids`, which for an
+        instruction-tuned checkpoint holds both its base end-of-text and the id a chat turn ends on --
+        so generation stops where the checkpoint says it should. Naming one replaces the set rather than
+        joining it: "stop here" is an instruction.
+
+        `temperature`/`top_k`/`top_p` default to what the checkpoint's own `generation_config.json`
+        declared, which for most models is greedy. `seed` makes a sampled generation reproducible.
+
+        Extra keyword arguments are forwarded to the driver verbatim, for a model whose `infer` takes
+        more than tokens.
         """
         return self.detokenize(self.generate_ids(
-            self.tokenize(prompt), max_new_tokens=max_new_tokens, eos_token=eos_token, **inputs))
+            self.tokenize(prompt), max_new_tokens=max_new_tokens, eos_token=eos_token,
+            temperature=temperature, top_k=top_k, top_p=top_p, seed=seed, **inputs))
 
     def generate_ids(
         self,
         tokens: Sequence[int],
         max_new_tokens: int = 64,
         eos_token: int | None = None,
+        *,
+        temperature: float | None = None,
+        top_k: int | None = None,
+        top_p: float | None = None,
+        seed: int | None = None,
         **inputs: float | int | Sequence[float],
     ) -> list[int]:
         """The token ids `generate` produces, without the encode/decode either side.
@@ -336,7 +409,14 @@ class Model:
         return list(self._handle.generate(
             [int(t) for t in tokens], int(max_new_tokens),
             -2 if eos_token is None else int(eos_token),
-            {k: _as_value(k, v) for k, v in inputs.items()}))
+            {k: _as_value(k, v) for k, v in inputs.items()},
+            # None all the way down: unset means "decode the way this checkpoint says to", and a
+            # checkpoint that says nothing decodes greedily. A default filled in here would silently
+            # overrule every file for every caller who named nothing.
+            None if temperature is None else float(temperature),
+            None if top_k is None else int(top_k),
+            None if top_p is None else float(top_p),
+            None if seed is None else int(seed)))
 
     # -- running it ----------------------------------------------------------------------------
 

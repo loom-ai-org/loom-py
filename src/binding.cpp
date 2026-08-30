@@ -18,6 +18,7 @@
 
 #include "loom/loom.h"
 #include "loom/core/model_contract.h"
+#include "loom/core/chat_template.h"
 #include "loom/core/text_generate.h"
 #include "loom/core/transcribe.h"
 
@@ -25,9 +26,11 @@
 
 #include <cstdio>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace py = pybind11;
@@ -201,6 +204,7 @@ public:
         if (!driver_.empty()) bridge_->load_script(driver_);
 
         tokenizer_ = Tokenizer::load(*model_);
+        chat_ = loom::ChatTemplate::load(*model_);
     }
 
     // What this session actually resolved to -- the ggml device name and its human-readable
@@ -258,7 +262,11 @@ public:
     // was still a second copy: loom_cli's differed in three ways, and nothing but coincidence kept this
     // one in step. Both hosts call the same function now.
     std::vector<int32_t> generate(const std::vector<int32_t>& tokens, uint32_t max_new_tokens,
-                                  int32_t eos_token, const py::dict& extra_inputs) {
+                                  int32_t eos_token, const py::dict& extra_inputs,
+                                  const std::optional<float>& temperature,
+                                  const std::optional<int32_t>& top_k,
+                                  const std::optional<float>& top_p,
+                                  const std::optional<uint32_t>& seed) {
         if (driver_.empty()) {
             throw std::runtime_error(
                 "this GGUF carries no driver script, so there is nothing to generate with.");
@@ -266,6 +274,14 @@ public:
         loom::text::GenerateOptions options;
         options.max_new_tokens = max_new_tokens;
         options.eos_token = eos_token;
+        // Optional all the way down (P4.24): unset means "use what the file declared", and a file
+        // declaring nothing means greedy. Filling in a Python-side default here would silently overrule
+        // the checkpoint for every caller who named nothing, which is the thing `GenerateOptions`'
+        // sentinels exist to prevent.
+        options.temperature = temperature;
+        options.top_k = top_k;
+        options.top_p = top_p;
+        options.seed = seed;
         // Anything else the caller named, forwarded verbatim to the driver -- a model whose `infer`
         // takes more than tokens (a style vector, a speaker id) is driven through the same loop.
         for (auto item : extra_inputs) {
@@ -274,6 +290,32 @@ public:
         }
         return loom::text::generate(*bridge_, *model_, tokens, options);
     }
+    // -- the chat door (P4.23) --------------------------------------------------------------------
+    //
+    // The template is DATA in the file (`tokenizer.chat_template.*`), reduced from the checkpoint's own
+    // Jinja by the exporter and verified there against `apply_chat_template`. Assembling it is the
+    // engine's `loom::ChatTemplate`, not a Python reimplementation -- the same reason the decode loop
+    // is `loom::text::generate`: a second renderer is a second thing to disagree with.
+    bool has_chat_template() const { return chat_ != nullptr; }
+    std::vector<std::string> chat_roles() const {
+        return chat_ ? chat_->roles() : std::vector<std::string>{};
+    }
+    std::string apply_chat_template(const std::vector<std::pair<std::string, std::string>>& messages,
+                                     bool add_generation_prompt) const {
+        if (chat_ == nullptr) {
+            throw std::runtime_error(
+                "this GGUF carries no chat template. A base model has none, and an instruction-tuned "
+                "one exported before P4.23 -- or whose template could not be reduced to role tags -- "
+                "has none either. `model.generate(...)` still completes a raw prompt.");
+        }
+        std::vector<loom::ChatMessage> converted;
+        converted.reserve(messages.size());
+        for (const auto& m : messages) converted.push_back({m.first, m.second});
+        return chat_->apply(converted, add_generation_prompt);
+    }
+    // Every id that ends generation, which for an instruction-tuned checkpoint is more than one.
+    std::vector<int32_t> eos_token_ids() const { return loom::text::eos_token_ids(*model_); }
+
     bool has_driver() const { return !driver_.empty(); }
     std::string driver_source() const { return driver_; }
 
@@ -369,6 +411,9 @@ private:
     std::unique_ptr<loom::ConvStateCache> conv_state_;
     std::unique_ptr<loom::LoomLuaBridge> bridge_;
     std::unique_ptr<Tokenizer> tokenizer_;
+    // Null for a base model, and for any GGUF exported before P4.23. Absence is the honest answer
+    // rather than an error at load: a file with no template still completes a raw prompt.
+    std::unique_ptr<loom::ChatTemplate> chat_;
     std::vector<std::string> names_;
     std::string driver_;
 
@@ -478,6 +523,12 @@ PYBIND11_MODULE(_loom, m) {
         .def("call", &Model::call, py::arg("fn_name"), py::arg("inputs"))
         .def("transcribe", &Model::transcribe, py::arg("waveform"), py::arg("options"))
         .def("contract", &Model::contract)
+        .def("has_chat_template", &Model::has_chat_template)
+        .def("chat_roles", &Model::chat_roles)
+        .def("apply_chat_template", &Model::apply_chat_template, py::arg("messages"),
+             py::arg("add_generation_prompt"))
+        .def("eos_token_ids", &Model::eos_token_ids)
         .def("generate", &Model::generate, py::arg("tokens"), py::arg("max_new_tokens"),
-             py::arg("eos_token"), py::arg("extra_inputs"));
+             py::arg("eos_token"), py::arg("extra_inputs"), py::arg("temperature"),
+             py::arg("top_k"), py::arg("top_p"), py::arg("seed"));
 }
