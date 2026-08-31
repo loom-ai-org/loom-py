@@ -8,7 +8,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "loom-py-rt"
-version = "1.0.0-rc6"
+version = "1.0.0-rc7"
 description = "Python bindings for loom.cpp, a data-driven ggml inference engine"
 # Two entries, not one table with both keys, and that is the difference between `pip show` printing
 # an author and printing a blank line. PEP 621 maps {name, email} TOGETHER onto a single
@@ -60,12 +60,12 @@ phonemes = ["orthography2ipa>=7.30"]
 # There is deliberately NO `[all]` extra. That is the per-accelerator wheel matrix wearing a hat -- it
 # cannot resolve on any single platform, since these are mutually exclusive by architecture.
 # `[vulkan,cuda]` together is legitimate: with GGML_BACKEND_DL the registry picks at run time.
-vulkan = ["loom-py-rt-vulkan == 1.0.0rc6"]
-cuda = ["loom-py-rt-cuda == 1.0.0rc6"]
+vulkan = ["loom-py-rt-vulkan == 1.0.0rc7"]
+cuda = ["loom-py-rt-cuda == 1.0.0rc7"]
 # Apple Silicon macOS ONLY -- there is no arm64-Linux or Intel-Mac Metal wheel to resolve to, so this
 # is the extra the paragraph above is describing when it says one may not exist for the platform at
 # all. On anything but an Apple Silicon Mac this FAILS, by design.
-metal = ["loom-py-rt-metal == 1.0.0rc6"]
+metal = ["loom-py-rt-metal == 1.0.0rc7"]
 # `gguf` writes the handful of tiny synthetic GGUFs tests/ci builds to check what the binding does with
 # a file it has never seen -- an unrecognized `tokenizer.ggml.model` tag, most importantly. Those cases
 # are unreachable with a fake handle (they are decisions the C++ makes at load time), and mocking them
