@@ -23,6 +23,18 @@ on:
         description: "Also run the GPU smoke test (needs a self-hosted runner online)"
         type: boolean
         default: false
+      only:
+        # A FULL DISPATCH IS FOUR BASE-WHEEL JOBS, FOUR BACKEND JOBS, AN SDIST AND A QEMU CHECK, and
+        # the CUDA rows alone compile hundreds of kernels. That is the right shape for a release and
+        # the wrong one for "I need the Metal wheel to create its PyPI project", which is a 0.18 MB
+        # artifact behind an hour of unrelated compilation.
+        #
+        # Release runs ignore this entirely -- the guards below are written so that a `release` event
+        # always builds everything, and this input only narrows a MANUAL run.
+        description: "Which artifacts to build (manual runs only; a release always builds all)"
+        type: choice
+        default: all
+        options: [all, base, backends, metal, sdist]
 
 concurrency:
   group: wheels-${{ github.workflow }}-${{ github.ref }}
@@ -30,6 +42,7 @@ concurrency:
 
 jobs:
   build-wheels:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.only == 'all' || inputs.only == 'base' }}
     # NATIVE ARM RUNNERS, not QEMU. cibuildwheel can emulate aarch64 and it is the wrong tool here:
     # the base wheel compiles the whole engine, and the accelerator wheels below compile hundreds of
     # CUDA kernels, which under emulation is an overnight job rather than a slow one.
@@ -86,6 +99,7 @@ jobs:
   # backend wheel being built against a ggml its base wheel never saw. Staging assembles a complete
   # tree from the submodule instead of duplicating the pin (BACKLOG.md P4.8i).
   build-backends:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.only == 'all' || inputs.only == 'backends' }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -162,6 +176,7 @@ jobs:
   # `xcrun metal`, and the full-Xcode install that utility would need is not a requirement here. The
   # runner's Command Line Tools are enough.
   build-metal:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.only == 'all' || inputs.only == 'metal' }}
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -340,6 +355,7 @@ jobs:
           EOF
 
   build-sdist:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.only == 'all' || inputs.only == 'sdist' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -381,7 +397,10 @@ jobs:
   # Neither is silent, so this is about which half is fixed sooner rather than about safety.
   publish-pypi:
     needs: [build-wheels, build-backends, build-metal, build-sdist, raspberry-pi-check]
-    if: ${{ github.event_name == 'release' || inputs.publish }}
+    # `inputs.only == 'all'` as well as `inputs.publish`: a narrowed dispatch has skipped jobs, and
+    # `needs` would skip this one anyway -- but silently. Saying it here means a run that asked to
+    # publish a partial set is refused for a reason somebody can read, rather than just not happening.
+    if: ${{ github.event_name == 'release' || (inputs.publish && inputs.only == 'all') }}
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
