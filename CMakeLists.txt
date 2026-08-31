@@ -1,4 +1,34 @@
 cmake_minimum_required(VERSION 3.24)  # $<LINK_LIBRARY:WHOLE_ARCHIVE,...> below needs 3.24
+
+# THE DEPLOYMENT FLOOR, BEFORE project() BECAUSE THAT IS WHEN CMAKE READS IT. Left unset, clang
+# targets the macOS of the machine doing the building, so a wheel built on 15.6 carries
+# `LC_BUILD_VERSION minos 15.6` and refuses to load on 12 or 14 -- while still being TAGGED
+# `macosx_11_0_arm64` by the packaging side, which reads this same number. A wheel whose filename
+# promises more than its Mach-O headers deliver is the AVX2 defect's shape once more: it installs,
+# and then does not run, on precisely the machines nobody building it owns.
+#
+# cibuildwheel exports `MACOSX_DEPLOYMENT_TARGET` (11.0 on arm64, 10.13 on x86_64) and CMake reads
+# that into this variable, so CI never reaches the defaults below -- they exist so that a wheel
+# built by hand on a Mac is the same artifact as the one CI publishes. `uname` rather than `APPLE`
+# because `APPLE` is not defined until project(), which is already too late to set this.
+execute_process(COMMAND uname -s OUTPUT_VARIABLE LOOM_HOST_OS
+                OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+if(LOOM_HOST_OS STREQUAL "Darwin"
+   AND NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET
+   AND NOT DEFINED ENV{MACOSX_DEPLOYMENT_TARGET})
+    execute_process(COMMAND uname -m OUTPUT_VARIABLE LOOM_HOST_ARCH
+                    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    if(CMAKE_OSX_ARCHITECTURES)
+        set(LOOM_HOST_ARCH "${CMAKE_OSX_ARCHITECTURES}")
+    endif()
+    if(LOOM_HOST_ARCH STREQUAL "arm64")
+        set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "macOS deployment floor")
+    else()
+        set(CMAKE_OSX_DEPLOYMENT_TARGET "10.13" CACHE STRING "macOS deployment floor")
+    endif()
+    message(STATUS "macOS deployment floor defaulted to ${CMAKE_OSX_DEPLOYMENT_TARGET}")
+endif()
+
 project(py_loom LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -40,6 +70,29 @@ set(GGML_BACKEND_DL ON CACHE BOOL "" FORCE)
 set(GGML_CPU_ALL_VARIANTS ON CACHE BOOL "" FORCE)
 set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
 
+# METAL OFF, AND ONLY ON THE BASE WHEEL -- it ships in `loom-py-rt-metal` instead (P4.11). This line
+# is required rather than tidy: ggml defaults `GGML_METAL` to ON whenever APPLE, so without it a
+# macOS base wheel carries `libggml-metal.so` AND the backend package carries a second copy, which
+# puts two of them on one sys.path with no rule about which loads -- the arrangement
+# packaging/README.md forbids for exactly this reason.
+#
+# THE SIZE ARGUMENT DOES NOT DECIDE THIS ONE, and it is worth saying so because it decides every
+# other backend. `libggml-metal.so` is 0.88 MB, not Vulkan's 46.5 MB -- it embeds the `.metal`
+# SOURCE via .incbin and the Metal framework compiles it at run time -- so on size alone it could
+# simply ship here.
+#
+# What decides it is DEVICE SELECTION. Metal registers as a GPU-kind device, so it outranks the CPU
+# in the hierarchy (ADR-009 / P4.8e) and `device=""` -- "decide for me" -- resolves to it the moment
+# it is present. Measured on an M1 Pro, that is a 2.69x WIN on whisper-small and a 5.2x LOSS on
+# VITS, whose graph takes 27 CPU round trips because ggml-metal declines a PAD with a nonzero
+# leading pad. Shipping it in the base wheel would apply that trade to everyone who typed
+# `pip install loom-py-rt`; shipping it as an extra applies it to someone who asked for a GPU.
+#
+# That is a statement about today's hierarchy on a unified-memory part, not about Metal, and it is
+# tracked as its own item -- if the default stops preferring a GPU whose memory is the CPU's, this
+# line is worth revisiting, because 0.88 MB is otherwise a very cheap accelerator to have by default.
+set(GGML_METAL OFF CACHE BOOL "" FORCE)
+
 # Every shared library this build produces goes to one directory, so the install rule below is a
 # directory copy rather than a list of target names -- GGML_CPU_ALL_VARIANTS creates its per-variant
 # targets in a loop, and there is no fixed set of names to enumerate.
@@ -51,8 +104,20 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${LOOM_RUNTIME_DIR})
 # beside it, wherever site-packages happens to be. BUILD_WITH_INSTALL_RPATH so the libraries in the
 # build tree carry the same RPATH -- otherwise a wheel built by scikit-build-core (which installs from
 # the build tree) would need a relink step to acquire it.
-set(CMAKE_INSTALL_RPATH "$ORIGIN")
-set(CMAKE_BUILD_RPATH "$ORIGIN")
+#
+# `$ORIGIN` IS AN ELF TOKEN AND MACH-O DOES NOT EXPAND IT. macOS spells the same idea
+# `@loader_path` -- "the directory of the binary doing the loading" -- and a dyld that meets a
+# literal `$ORIGIN` does not error, it simply fails to find the library and reports it as missing.
+# That is the same import-time `cannot open shared object file` the paragraph above records as
+# fixed, arriving through a third door. `MACOSX_RPATH` is on by default (CMP0042), so each .dylib
+# here gets an `@rpath/lib....dylib` install name for this to resolve against.
+if(APPLE)
+    set(LOOM_LOADER_RELATIVE "@loader_path")
+else()
+    set(LOOM_LOADER_RELATIVE "$ORIGIN")
+endif()
+set(CMAKE_INSTALL_RPATH "${LOOM_LOADER_RELATIVE}")
+set(CMAKE_BUILD_RPATH "${LOOM_LOADER_RELATIVE}")
 set(CMAKE_BUILD_WITH_INSTALL_RPATH ON)
 
 add_subdirectory(vendor/loom.cpp EXCLUDE_FROM_ALL)
@@ -121,9 +186,21 @@ set_target_properties(_loom PROPERTIES
 # what `$ORIGIN` resolves to and where ggml is told to look for backends (loom/__init__.py). A
 # directory install rather than install(TARGETS): GGML_CPU_ALL_VARIANTS generates its per-variant
 # targets in a loop, so the set of names is not knowable here.
+#
+# BOTH SUFFIXES, and the pair is not symmetric. On macOS the linked libraries -- libloom_engine,
+# libggml-base, libggml -- are SHARED targets and come out `.dylib`, so a `*.so*`-only rule shipped
+# `_loom.so` alone and the wheel failed at import. The BACKENDS are not `.dylib` there: ggml builds
+# each one as a CMake MODULE (`add_library(${backend} MODULE ...)` in its src/CMakeLists.txt), and
+# Darwin's `CMAKE_SHARED_MODULE_SUFFIX` is `.so`, which is why ggml's loader looking for `.so`
+# unconditionally is correct rather than a bug -- see Epic-08 §4, blocker 4.
+#
+# Listing both patterns unconditionally rather than under `if(APPLE)`: a Linux build produces no
+# `.dylib` for the second pattern to match, so it costs nothing and there is one rule to read.
 install(DIRECTORY ${LOOM_RUNTIME_DIR}/
     DESTINATION loom
-    FILES_MATCHING PATTERN "*.so*"
+    FILES_MATCHING
+        PATTERN "*.so*"
+        PATTERN "*.dylib"
 )
 
 # The same libraries into the source tree, so a development build (`cmake --build build`) leaves a

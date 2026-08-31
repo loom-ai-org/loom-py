@@ -13,7 +13,21 @@ concurrency:
 
 jobs:
   build-and-test:
-    runs-on: ubuntu-latest
+    # BOTH PLATFORMS ON EVERY PUSH, and the macOS row earns its minutes rather than decorating the
+    # matrix. P4.10 fixed three things that are invisible on Linux for structural reasons -- a
+    # sub-make inheriting a jobserver, exception typeinfo not coalescing under Mach-O's two-level
+    # namespace, and `/tmp` being a symlink -- and every one of them would otherwise have come back
+    # at RELEASE time, in `wheels.yml`, which runs on a tag. This is where a macOS regression should
+    # be found. (Retro-024 in the engine's docs/retros.)
+    #
+    # Apple Silicon only: `macos-15-intel` is built by the release workflow, and Apple Intel is a
+    # deliberately CI-only, best-effort row -- doubling this job for it would double the cost of
+    # every push to cover the platform that is ending.
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, macos-15]
     steps:
       # `submodules: recursive` is load-bearing: the engine IS a submodule, and without it the build
       # fails at `add_subdirectory(vendor/loom.cpp)` with a directory that exists and is empty.
@@ -26,7 +40,14 @@ jobs:
           python-version: "3.11"
 
       - name: Install ccache
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y ccache
+
+      # Homebrew rather than apt, and `|| true` because the macOS images may already carry it --
+      # `brew install` on an installed formula is a non-zero exit, not a no-op.
+      - name: Install ccache (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ccache || true
 
       - name: Cache ccache
         uses: actions/cache@v4

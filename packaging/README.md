@@ -19,6 +19,7 @@ loaded at run time. The sizes decide it. Measured, release, stripped:
 | a CPU-only install | **≈ 3 MB** |
 | `libggml-vulkan.so` | **46.5 MB** — 44 MB of it compiled SPIR-V shaders |
 | the same install with Vulkan | ≈ 50 MB |
+| `libggml-metal.so` | **0.87 MB** — shader SOURCE, embedded via `.incbin`, compiled by the Metal framework at run time |
 
 50 MB sits against PyPI's 100 MB per-file ceiling before anything else is added, and CUDA — whose fat
 binaries carry cubins per SM architecture — clears it outright. Multiply by five interpreters and
@@ -57,15 +58,16 @@ Copy `rt-vulkan/`, change four things, and build it next to the base wheel:
 3. `loom_rt_<backend>/__init__.py` — the docstring; there is no code in it.
 4. `pyproject.toml` in the repo root — a `<backend> = ["loom-py-rt-<backend> == <version>"]` extra.
 
-**A version bump is SEVEN strings across three files, and they are a circular exact-pin set.** The base
+**A version bump is TEN strings across four files, and they are a circular exact-pin set.** The base
 package and both backends pin each other by exact version, in two spellings — `version = "1.0.0-rc4"`
 and the normalised `== 1.0.0rc4` — so bumping any subset publishes a package that resolves against a
 version nobody released:
 
 ```
-pyproject.toml                     version, + the vulkan and cuda extras' pins   (3)
+pyproject.toml                     version, + the vulkan/cuda/metal extras' pins (4)
 packaging/rt-cuda/pyproject.toml   version, + its loom-py-rt pin                 (2)
 packaging/rt-vulkan/pyproject.toml version, + its loom-py-rt pin                 (2)
+packaging/rt-metal/pyproject.toml  version, + its loom-py-rt pin                 (2)
 ```
 
 Nothing in `.github/workflows/` carries a version — it flows from these files through scikit-build and
@@ -79,7 +81,7 @@ the cross product — roughly nine wheels, not backends times platforms:
 |---|---|
 | Vulkan | x86-64, aarch64 — the broadest |
 | CUDA | x86-64, aarch64 (Jetson/Grace) |
-| Metal | arm64 macOS only |
+| Metal | arm64 macOS only — **shipped**, `rt-metal/` |
 | Hexagon / QNN, RKNPU2 | aarch64 |
 | OpenVINO | x86-64 |
 
@@ -87,6 +89,25 @@ the cross product — roughly nine wheels, not backends times platforms:
 means CoreML, which no ggml backend targets. CoreML, RKNPU2 and `ggml-qnn` are all out of tree and
 would mean vendoring a backend or carrying a ggml fork — check the licence before any of them, since
 this project is MIT and has already turned a dependency down over exactly that.
+
+### Metal is the exception to the size argument, and ships as a package anyway
+
+At 0.87 MB, Metal does not need a separate package for the reason every other backend does, and every
+Apple Silicon Mac has it — so on size and availability it could simply live in the base macOS wheel.
+It does not, for a reason that only showed up once it ran: **it registers as a GPU-kind device, so
+`device=""` — "decide for me" — resolves to it.** On an M1 Pro that is 2.69x faster on whisper-small
+and **5.24x slower on VITS**, whose graph takes 27 CPU round trips because `ggml-metal` declines a
+`PAD` with a nonzero leading pad. Shipping it in the base wheel would apply that trade to everyone
+who typed `pip install loom-py-rt`; shipping it as an extra applies it to someone who asked for a GPU.
+
+Two consequences worth knowing when copying this package:
+
+* `loom-py/CMakeLists.txt` has to set **`GGML_METAL OFF`** explicitly for the base wheel, because ggml
+  defaults it ON whenever `APPLE`. Without that line both wheels carry a copy.
+* `packaging/common/BackendPackage.cmake` sets **`INSTALL_RPATH "@loader_path/../loom"`** under
+  `if(APPLE)`. A backend records `@rpath/libggml-base.dylib`, and `@rpath` expands against the
+  LC_RPATH of the library doing the loading — unlike ELF, where the same reference resolves against
+  what is already loaded in the process. That is why Vulkan and CUDA need no rpath and Metal does.
 
 ## Two things that are not negotiable
 
