@@ -148,10 +148,36 @@ def test_the_mapped_variant_is_exactly_one_the_cpu_supports():
     if not shipped_variants():
         pytest.skip("single-variant build: nothing to choose between")
 
-    assert len(mapped) == 1, (
-        f"expected exactly one CPU variant mapped after selection, got {mapped}. Zero means no "
-        f"variant scored above 0 on this CPU -- shipped: {shipped_variants()}"
+    # THE FLOOR, AND IT IS THE PART THIS TEST EXISTS FOR. Zero resident variants means no variant
+    # scored above 0 on this CPU, which with GGML_BACKEND_DL is not a slow package but an empty one --
+    # the AVX2 defect. This half holds on every platform.
+    assert mapped, (
+        f"no CPU variant is resident after selection: no variant scored above 0 on this CPU, so this "
+        f"wheel cannot run here at all. Shipped: {shipped_variants()}"
     )
-    assert mapped[0] in shipped_variants(), (
-        f"{mapped[0]} was loaded from outside the package directory: {PACKAGE_DIR}"
+    assert set(mapped) <= set(shipped_variants()), (
+        f"a CPU variant was loaded from outside {PACKAGE_DIR}: "
+        f"{sorted(set(mapped) - set(shipped_variants()))}"
     )
+
+    # THE EXACT COUNT IS AN ELF PROPERTY AND IS ASSERTED ONLY THERE. The docstring's reasoning --
+    # ggml dlopens every candidate to score it and dlcloses the losers, so one survives -- depends on
+    # `dlclose` actually unmapping, which POSIX permits an implementation not to do and which macOS
+    # frequently does not.
+    #
+    # Measured, both on real hardware: an M1 Pro leaves exactly ONE (`apple_m1`, of three shipped),
+    # so this looked portable and was extended to macOS on that evidence. A `macos-15-intel` runner
+    # leaves TWO of fourteen -- `haswell` and `sapphirerapids` -- which failed the release build for
+    # 1.0.0-rc7 and is what corrected it.
+    #
+    # Two resident is not two SELECTED: `test_a_cpu_device_is_available` passes there, the registry
+    # holds one CPU device, and `haswell` is the variant a Mac Xeon would win with (no Apple Intel
+    # part has AMX, which is what `sapphirerapids` is built for). The surviving loser is dyld
+    # declining to unmap, not ggml choosing twice -- so the honest assertions are the two above, and
+    # counting is left to the platform whose loader guarantees it.
+    if sys.platform.startswith("linux"):
+        assert len(mapped) == 1, (
+            f"expected exactly one CPU variant mapped after selection on Linux, got {mapped}. More "
+            f"than one means the losing candidates are being kept alive -- ggml dlopens each to "
+            f"score it and dlcloses all but the winner. Shipped: {shipped_variants()}"
+        )
