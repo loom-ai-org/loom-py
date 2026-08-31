@@ -6,7 +6,7 @@ build-backend = "scikit_build_core.build"
 name = "loom-py-rt-metal"
 # Deliberately the same version as the base package, and see `dependencies` for why it is not merely
 # a convention.
-version = "1.0.0-rc6"
+version = "1.0.0-rc7"
 description = "Metal backend for loom-py-rt"
 # Two entries, not one table with both keys: PEP 621 maps {name, email} TOGETHER onto a single
 # `Author-email:` header and leaves `Author:` empty, so a name-only entry is what fills the latter.
@@ -27,7 +27,7 @@ classifiers = [
 # wheel carries a libggml-metal.so that gets dlopened beside the base wheel's libggml-base.dylib, and
 # ggml makes no ABI promise across revisions -- so any loom-py-rt release that bumps its ggml pin
 # invalidates every backend wheel published before it.
-dependencies = ["loom-py-rt == 1.0.0rc6"]
+dependencies = ["loom-py-rt == 1.0.0rc7"]
 
 [tool.scikit-build]
 wheel.packages = ["loom_rt_metal"]
