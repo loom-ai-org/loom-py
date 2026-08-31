@@ -3,29 +3,25 @@ cmake_minimum_required(VERSION 3.24)  # $<LINK_LIBRARY:WHOLE_ARCHIVE,...> below 
 # THE DEPLOYMENT FLOOR, BEFORE project() BECAUSE THAT IS WHEN CMAKE READS IT. Left unset, clang
 # targets the macOS of the machine doing the building, so a wheel built on 15.6 carries
 # `LC_BUILD_VERSION minos 15.6` and refuses to load on 12 or 14 -- while still being TAGGED
-# `macosx_11_0_arm64` by the packaging side, which reads this same number. A wheel whose filename
+# `macosx_13_3_arm64` by the packaging side, which reads this same number. A wheel whose filename
 # promises more than its Mach-O headers deliver is the AVX2 defect's shape once more: it installs,
 # and then does not run, on precisely the machines nobody building it owns.
 #
-# cibuildwheel exports `MACOSX_DEPLOYMENT_TARGET` (11.0 on arm64, 10.13 on x86_64) and CMake reads
-# that into this variable, so CI never reaches the defaults below -- they exist so that a wheel
-# built by hand on a Mac is the same artifact as the one CI publishes. `uname` rather than `APPLE`
-# because `APPLE` is not defined until project(), which is already too late to set this.
+# pyproject.toml's `[tool.cibuildwheel.macos]` exports `MACOSX_DEPLOYMENT_TARGET` and CMake reads it
+# into this variable, so CI never reaches the default below -- it exists so that a wheel built by
+# hand on a Mac is the same artifact as the one CI publishes. `uname` rather than `APPLE` because
+# `APPLE` is not defined until project(), which is already too late to set this.
 execute_process(COMMAND uname -s OUTPUT_VARIABLE LOOM_HOST_OS
                 OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
 if(LOOM_HOST_OS STREQUAL "Darwin"
    AND NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET
    AND NOT DEFINED ENV{MACOSX_DEPLOYMENT_TARGET})
-    execute_process(COMMAND uname -m OUTPUT_VARIABLE LOOM_HOST_ARCH
-                    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-    if(CMAKE_OSX_ARCHITECTURES)
-        set(LOOM_HOST_ARCH "${CMAKE_OSX_ARCHITECTURES}")
-    endif()
-    if(LOOM_HOST_ARCH STREQUAL "arm64")
-        set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "macOS deployment floor")
-    else()
-        set(CMAKE_OSX_DEPLOYMENT_TARGET "10.13" CACHE STRING "macOS deployment floor")
-    endif()
+    # 14.0 on both architectures, matching [tool.cibuildwheel.macos] in pyproject.toml, which explains
+    # both halves: ggml's BLAS backend is built against Accelerate's NEW LAPACK interface, whose
+    # symbols arrive in macOS 13.3 (and BLAS is 1.80x on whisper-small, so dropping it was worse) --
+    # and 13.3 cannot be spelled in a wheel tag, because since macOS 11 a tag carries only the major
+    # version. 14.0 is the lowest floor that is both expressible and true.
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "macOS deployment floor")
     message(STATUS "macOS deployment floor defaulted to ${CMAKE_OSX_DEPLOYMENT_TARGET}")
 endif()
 
@@ -83,10 +79,12 @@ set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
 #
 # What decides it is DEVICE SELECTION. Metal registers as a GPU-kind device, so it outranks the CPU
 # in the hierarchy (ADR-009 / P4.8e) and `device=""` -- "decide for me" -- resolves to it the moment
-# it is present. Measured on an M1 Pro, that is a 2.69x WIN on whisper-small and a 5.2x LOSS on
-# VITS, whose graph takes 27 CPU round trips because ggml-metal declines a PAD with a nonzero
-# leading pad. Shipping it in the base wheel would apply that trade to everyone who typed
-# `pip install loom-py-rt`; shipping it as an extra applies it to someone who asked for a GPU.
+# it is present. Measured on an M1 Pro, that is a 2.69x WIN on whisper-small and a 5.24x LOSS on
+# VITS. (Not because of the fallback, which was the first guess and is wrong: VITS's graph does take
+# 27 CPU round trips where ggml-metal declines a PAD with a nonzero leading pad, but a prototype
+# removing every one of them was worth 1.8%. Metal is simply ~5x more expensive per unit of work on
+# that graph -- Epic-04 §5.4.) Shipping Metal in the base wheel would apply that trade to everyone
+# who typed `pip install loom-py-rt`; shipping it as an extra applies it to someone who asked.
 #
 # That is a statement about today's hierarchy on a unified-memory part, not about Metal, and it is
 # tracked as its own item -- if the default stops preferring a GPU whose memory is the CPU's, this
