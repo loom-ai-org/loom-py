@@ -239,11 +239,24 @@ CPython 3.10–3.13, on:
 |---|---|---|
 | Linux x86-64, glibc ≥ 2.28 | `manylinux_2_28_x86_64` | anything not already EOL |
 | Linux aarch64, glibc ≥ 2.28 | `manylinux_2_28_aarch64` | **Raspberry Pi 4 and 5 on 64-bit Raspberry Pi OS**, Jetson/Grace, Graviton, Ampere |
+| macOS on Apple Silicon, ≥ 11.0 | `macosx_11_0_arm64` | M1 through M4, verified on an M1 Pro |
+| macOS on Apple Intel, ≥ 10.13 | `macosx_10_13_x86_64` | built and imported in CI — see below |
 
 There is no per-CPU choice to make. The wheel ships every `libggml-cpu-*.so` variant ggml builds for
 the architecture and picks one at import by scoring each against the CPU's own feature flags, so the
 same file serves the oldest and newest machine on its architecture. `loom.devices()` is how you check
 it worked.
+
+**Apple Silicon and Apple Intel are not equally supported, and the table means two different things
+by "covers".** The arm64 wheel is built, installed and exercised on a real M1 Pro — the `apple_m1`
+rung, which is the *lowest* of ggml's three Apple rungs and so the one every arm64 wheel has to
+serve. Apple Intel is **CI-only**: it is built and imported by a runner and nobody here owns the
+hardware, so treat it as best-effort rather than as parity.
+
+**Metal is a separate package, not part of the macOS wheel** — `pip install "loom-py-rt[metal]"`.
+It is only 0.87 MB, so that split is not about size: a GPU outranks the CPU when you let the library
+choose a device, and on unified memory that is 2.69x faster for some models and several times slower
+for others. Asking for it is how you opt into that trade. `loom.devices()` shows what you got.
 
 **Raspberry Pi.** A 64-bit OS is the requirement, and the only one: `uname -m` must say `aarch64`. On
 32-bit Raspberry Pi OS pip reports `armv7l`, matches no wheel, and falls back to building the sdist,
@@ -262,9 +275,9 @@ Nothing extra is installed on a Pi: the CPU is the backend. `[vulkan]` does reso
 Pi 5's V3D exposes Vulkan through Mesa, but no measurement here says that is worth doing — the CPU
 path is the supported one.
 
-**macOS and Windows have no wheels**, and a source install does not currently work on either. Tracked
-as **P4.10** ([Epic-08](https://github.com/loom-ai-org/loom.cpp/blob/main/docs/epics/epic-08-packaging-and-release.md)), which scopes what Apple Silicon
-and Apple Intel would take.
+**Windows has no wheels**, and a source install does not currently work there. macOS does: both
+Apple architectures build from a checkout as well as from a wheel — see *Supported platforms* above.
+([Epic-08](https://github.com/loom-ai-org/loom.cpp/blob/main/docs/epics/epic-08-packaging-and-release.md))
 
 From a checkout — note `--recursive`, since the engine is a submodule:
 
@@ -314,12 +327,12 @@ to build and test against. Tracked in [Epic-04](https://github.com/loom-ai-org/l
 reachable at all (CUDA, OpenVINO and Qualcomm's are already in the pinned ggml; CoreML and RKNPU2 are
 not).
 
-**2. Wheels for more platforms.** Linux x86-64 and aarch64 today — see *Supported platforms* above,
-which is what `pip install loom-py-rt` resolves to. What remains is Apple: **macOS on Apple Silicon**
-(`arm64`, and the only one of the two where a `[metal]` package would ever apply) and **macOS on Apple
-Intel** (`x86_64`, a target Apple has said is ending). Neither is a missing CI row — `$ORIGIN` RPATH,
-a `*.so`-only install rule and LuaJIT's `MACOSX_DEPLOYMENT_TARGET` all have to be dealt with first,
-which **P4.10** ([Epic-08](https://github.com/loom-ai-org/loom.cpp/blob/main/docs/epics/epic-08-packaging-and-release.md)) scopes. Windows is behind that again.
+**2. Wheels for more platforms.** Linux x86-64 and aarch64 and both Apple architectures today — see
+*Supported platforms* above, which is what `pip install loom-py-rt` resolves to. **Windows** is what
+remains, and it is behind the same kind of work macOS needed: not a missing CI row, but a
+symbol-visibility rule, a linker-path spelling and a build-system assumption that each differ
+([Epic-08](https://github.com/loom-ai-org/loom.cpp/blob/main/docs/epics/epic-08-packaging-and-release.md),
+[Retro-024](https://github.com/loom-ai-org/loom.cpp/blob/main/docs/retros/retro-024-a-blocker-read-from-one-half-of-an-agreement.md)).
 
 **3. More models — [Epic-03](https://github.com/loom-ai-org/loom.cpp/blob/main/docs/epics/epic-03-model-coverage.md)**, ordered by coverage per unit of effort: BERT token classifiers
 (the smallest possible template, and the first non-audio task) → codec decoders → CNN+CTC and SANM
