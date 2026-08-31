@@ -239,13 +239,21 @@ CPython 3.10–3.13, on:
 |---|---|---|
 | Linux x86-64, glibc ≥ 2.28 | `manylinux_2_28_x86_64` | anything not already EOL |
 | Linux aarch64, glibc ≥ 2.28 | `manylinux_2_28_aarch64` | **Raspberry Pi 4 and 5 on 64-bit Raspberry Pi OS**, Jetson/Grace, Graviton, Ampere |
-| macOS on Apple Silicon, ≥ 11.0 | `macosx_11_0_arm64` | M1 through M4, verified on an M1 Pro |
-| macOS on Apple Intel, ≥ 10.13 | `macosx_10_13_x86_64` | built and imported in CI — see below |
+| macOS on Apple Silicon, ≥ 14.0 | `macosx_14_0_arm64` | M1 through M4, verified on an M1 Pro |
+| macOS on Apple Intel, ≥ 14.0 | `macosx_14_0_x86_64` | built and imported in CI — see below |
 
 There is no per-CPU choice to make. The wheel ships every `libggml-cpu-*.so` variant ggml builds for
 the architecture and picks one at import by scoring each against the CPU's own feature flags, so the
 same file serves the oldest and newest machine on its architecture. `loom.devices()` is how you check
 it worked.
+
+**Why macOS 14 and not 11.** It is not an arbitrary floor and it is not the newest thing that
+happened to build. ggml's BLAS backend is compiled against **Accelerate's new BLAS interface**, whose
+symbols arrive in macOS 13.3 — and that backend is worth **1.80x on whisper-small**, so dropping it
+was the worse trade. An 11.0-tagged wheel would install on macOS 11 or 12 and then quietly have no
+BLAS, because a backend that fails to `dlopen` is skipped silently. The floor is the honest version
+of what the binaries already require — 14 rather than 13.3 only because a wheel tag carries no minor
+version above macOS 11, so 13.3 is not a thing a wheel can say.
 
 **Apple Silicon and Apple Intel are not equally supported, and the table means two different things
 by "covers".** The arm64 wheel is built, installed and exercised on a real M1 Pro — the `apple_m1`

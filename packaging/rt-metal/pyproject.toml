@@ -52,6 +52,12 @@ skip = "pp* *-musllinux_* *_i686"
 archs = "arm64"
 
 [tool.cibuildwheel.macos]
+# The same 14.0 floor the base wheel takes, for a borrowed reason rather than one of its own:
+# nothing in libggml-metal.so needs it, but this package pins `loom-py-rt ==` and that wheel is
+# tagged `macosx_14_0_arm64` (Accelerate's new BLAS -- see the base pyproject). A Metal wheel tagged
+# 11.0 would advertise a platform on which its own dependency cannot be installed.
+environment = { MACOSX_DEPLOYMENT_TARGET = "14.0" }
+
 # THE macOS ANALOGUE OF THE `auditwheel --exclude libggml-base.so` LINE THE OTHER BACKENDS CARRY, and
 # it needs one extra flag rather than one fewer. `libggml-base.dylib` is the BASE wheel's to ship --
 # two copies on one sys.path have no rule about which loads -- so it must not be vendored in here.
