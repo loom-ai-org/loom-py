@@ -134,6 +134,32 @@ function(loom_rt_backend_package)
         endif()
     endforeach()
 
+    # macOS BINDS A BACKEND TO ITS BASE LIBRARY DIFFERENTLY, and the block above does not cover it.
+    # There, the unversioned `libggml-base.dylib` carries the install name `@rpath/libggml-base.dylib`
+    # (MACOSX_RPATH, CMP0042), so this backend records that string as its LC_LOAD_DYLIB -- and
+    # `@rpath` expands against the LC_RPATH entries of THE BINARY DOING THE LOADING, which is this
+    # library. With none set there are no candidate paths at all.
+    #
+    # That is the difference from ELF and it is why this is not the Linux case in another spelling: on
+    # Linux a `NEEDED libggml-base.so` resolves against whatever is already loaded in the process --
+    # and libggml-base.so always is, pulled in by libloom_engine.so long before ggml dlopens any
+    # backend -- so the Vulkan and CUDA packages need no rpath and have none.
+    #
+    # `@loader_path/../loom`: this library lives in `site-packages/loom_rt_metal/` and the base wheel's
+    # libraries in `site-packages/loom/`, siblings, which is a layout pip guarantees for two top-level
+    # packages. Editable and vendored installs are the loose end, and they are covered by the
+    # already-loaded lookup rather than by this path.
+    #
+    # P4.8g is the reason this is set rather than discovered: a backend that cannot bind to its base
+    # library loads without an error anybody sees and registers nothing, so the entire symptom is an
+    # accelerator missing from `loom.devices()`.
+    if(APPLE)
+        set_target_properties(${backend_target} PROPERTIES
+            INSTALL_RPATH "@loader_path/../loom"
+            BUILD_WITH_INSTALL_RPATH ON
+        )
+    endif()
+
     # Only the backend .so travels. libggml-base.so is the base wheel's to ship, and shipping a second
     # copy here would put two of them on the same sys.path with no rule about which loads.
     install(TARGETS ${backend_target} LIBRARY DESTINATION ${ARG_PACKAGE})

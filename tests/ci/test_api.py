@@ -163,13 +163,18 @@ class _FakeHandle:
     """A stand-in for the pybind11 `Model`, so the Python layer's decisions can be tested without a
     GGUF. Only the methods `loom.Model` actually calls are here."""
 
-    def __init__(self, returns, vocab="gpt2", eos=-1, contract=None, transcribe_warnings=()):
+    def __init__(self, returns, vocab="gpt2", eos=-1, contract=None, transcribe_warnings=(),
+                 chat_roles=()):
         self._returns = list(returns)      # what successive infer() calls hand back
         # What the ENGINE reports as ignored -- an argument this file has nothing to select with. The
         # engine returns these instead of printing them (a library has no logger); the Python layer is
         # what turns them into warnings, and that hand-off is what the test below pins.
         self._transcribe_warnings = tuple(transcribe_warnings)
         self._vocab = vocab
+        # Empty by default: most GGUFs on disk carry no chat template, and the layer has to handle that
+        # rather than assume every text model can hold a conversation.
+        self._chat_roles = tuple(chat_roles)
+        self.encode_calls = []
         self._eos = eos
         self.calls = []                    # every inputs dict infer() was given
         self.langs = []                    # every `lang` encode() was given
@@ -181,16 +186,40 @@ class _FakeHandle:
         shape most models on disk still have, and the one the interface layer has to handle."""
         return dict(self._contract)
 
-    def generate(self, tokens, max_new_tokens, eos_token, extra_inputs):
+    def generate(self, tokens, max_new_tokens, eos_token, extra_inputs,
+                 temperature, top_k, top_p, seed):
         """The engine's LM loop, which this double CANNOT stand in for -- and does not try to. It
         records what it was handed and replays a canned answer, so the tests below are about the
         marshalling either side of the call. The loop itself is pinned in loom.cpp
         (tests/ci/test_text_generate.cpp), where it now lives; a Python double asserting on loop
-        behaviour would be asserting about a reimplementation of the thing under test."""
+        behaviour would be asserting about a reimplementation of the thing under test.
+
+        The four sampling arguments are positional and unconditional, matching the binding: `None` is
+        the value that means "use what the file declared" (P4.24), so there is nothing to omit."""
         self.generate_calls.append(
             {"tokens": list(tokens), "max_new_tokens": max_new_tokens, "eos_token": eos_token,
-             "extra_inputs": dict(extra_inputs)})
+             "extra_inputs": dict(extra_inputs), "temperature": temperature, "top_k": top_k,
+             "top_p": top_p, "seed": seed})
         return self._returns.pop(0) if self._returns else []
+
+    # -- the chat door (P4.23) --------------------------------------------------------------------
+    def has_chat_template(self): return bool(self._chat_roles)
+    def chat_roles(self): return list(self._chat_roles)
+
+    def apply_chat_template(self, messages, add_generation_prompt):
+        """A ChatML-shaped stand-in. Same caveat as `generate`: the real assembly is
+        `loom::ChatTemplate` and is pinned in loom.cpp (tests/ci/test_chat_template.cpp); what these
+        tests are about is that this package hands it the right conversation and does not render one
+        itself."""
+        if not self._chat_roles:
+            raise RuntimeError("this GGUF carries no chat template")
+        for role, _ in messages:
+            if role not in self._chat_roles:
+                raise RuntimeError(f"no '{role}' role")
+        body = "".join(f"<|im_start|>{role}\n{content}<|im_end|>\n" for role, content in messages)
+        return body + ("<|im_start|>assistant\n" if add_generation_prompt else "")
+
+    def eos_token_ids(self): return [7]
 
     def has_tokenizer(self): return self._vocab is not None
     def tokenizer_kind(self): return self._vocab or ""
@@ -199,6 +228,7 @@ class _FakeHandle:
 
     def encode(self, text, lang=""):
         self.langs.append(lang)
+        self.encode_calls.append(text)
         return [10, 11, 12]
     def decode(self, ids): return "|".join(str(i) for i in ids)
     def kv_i32(self, key, fallback): return self._eos
@@ -335,6 +365,87 @@ class TestGenerateMarshalsAroundTheEngineLoop:
         extras = handle.generate_calls[0]["extra_inputs"]
         assert extras == {"style": [0.5, 0.25], "speaker": 3.0}
 
+
+
+
+class TestSamplingKnobsAreUnsetUntilNamed:
+    """P4.24. The knobs reach the DRIVER, and the value that means "use what the checkpoint declared"
+    is `None` -- not a number this layer picked.
+
+    That distinction is the whole design: a Python-side default of, say, `temperature=1.0` would
+    silently overrule every file for every caller who named nothing, and every byte-identity baseline
+    with it. What the engine does with the knobs is pinned in loom.cpp (tests/ci/test_sample_row.cpp)."""
+
+    def test_naming_nothing_passes_nothing(self):
+        handle = _FakeHandle([[1]])
+        _model(handle).generate_ids([1])
+        call = handle.generate_calls[0]
+        assert (call["temperature"], call["top_k"], call["top_p"], call["seed"]) == (None,) * 4
+
+    def test_named_knobs_arrive_typed(self):
+        handle = _FakeHandle([[1]])
+        _model(handle).generate_ids([1], temperature=0.7, top_k=40, top_p=0.9, seed=11)
+        call = handle.generate_calls[0]
+        assert call["temperature"] == 0.7 and isinstance(call["temperature"], float)
+        assert call["top_k"] == 40 and isinstance(call["top_k"], int)
+        assert call["top_p"] == 0.9
+        assert call["seed"] == 11
+
+    def test_a_knob_is_not_a_driver_input(self):
+        """`temperature` is a named argument, so it must not also land in the driver's extras -- the
+        driver reads it from its own `inputs.temperature`, which the engine fills in."""
+        handle = _FakeHandle([[1]])
+        _model(handle).generate_ids([1], temperature=0.7, style=[0.5])
+        assert handle.generate_calls[0]["extra_inputs"] == {"style": [0.5]}
+
+
+class TestChatIsGenerateWithTheTemplateApplied:
+    """P4.23. This layer's job is to hand the ENGINE a conversation and the engine's own assembly back
+    to `generate`; the template itself is data in the GGUF and the assembly is `loom::ChatTemplate`
+    (pinned in loom.cpp, tests/ci/test_chat_template.cpp). Nothing here renders Jinja or carries a
+    per-model string, which is the point of the split."""
+
+    def test_a_bare_string_is_the_user_turn(self):
+        handle = _FakeHandle([[7, 8]], chat_roles=("user", "assistant"))
+        assert _model(handle).chat("hi") == "7|8"
+        # The prompt reached `generate` templated, not raw: the fake encodes to a fixed id list, so
+        # what is asserted is that the model asked the handle to template it at all.
+        assert handle.encode_calls[-1].startswith("<|im_start|>user\n")
+        assert handle.encode_calls[-1].endswith("<|im_start|>assistant\n")
+
+    def test_a_conversation_may_be_pairs_or_dicts(self):
+        """Both, because a caller moving code across from `transformers` should not have to rewrite
+        the data."""
+        pairs = _FakeHandle([[1]], chat_roles=("user", "assistant"))
+        dicts = _FakeHandle([[1]], chat_roles=("user", "assistant"))
+        _model(pairs).chat([("user", "a"), ("assistant", "b"), ("user", "c")])
+        _model(dicts).chat([{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"},
+                            {"role": "user", "content": "c"}])
+        assert pairs.encode_calls[-1] == dicts.encode_calls[-1]
+
+    def test_a_model_with_no_template_says_so(self):
+        handle = _FakeHandle([[1]])
+        assert _model(handle).chat_roles == []
+        with pytest.raises(RuntimeError, match="no chat template"):
+            _model(handle).chat("hi")
+
+    def test_a_role_the_checkpoint_does_not_declare_is_an_error(self):
+        """Gemma 3 is the live case: its template folds a system message into the first user turn
+        rather than emitting a block for it, so it declares two roles and a system message must be
+        refused rather than dropped."""
+        handle = _FakeHandle([[1]], chat_roles=("user", "assistant"))
+        assert _model(handle).chat_roles == ["user", "assistant"]
+        with pytest.raises(RuntimeError, match="'system'"):
+            _model(handle).chat([("system", "be terse"), ("user", "hi")])
+
+    def test_text2text_chat_is_the_same_call(self):
+        via_model = _FakeHandle([[7, 8]], chat_roles=("user", "assistant"),
+                                contract=dict(task="text-generation", input_kind="text",
+                                              output_kind="text", interface="text2text"))
+        via_interface = _FakeHandle([[7, 8]], chat_roles=("user", "assistant"),
+                                    contract=dict(task="text-generation", input_kind="text",
+                                                  output_kind="text", interface="text2text"))
+        assert _model(via_model).chat("hi") == _model(via_interface).text2text.chat("hi") == "7|8"
 
 class TestDeviceIsPassedThroughAndReadBack:
     """Where a model runs, at the Python layer. What device spec resolves to WHICH device is the

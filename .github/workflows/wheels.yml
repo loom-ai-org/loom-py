@@ -38,8 +38,22 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { runner: ubuntu-latest,    arch: x86_64 }
-          - { runner: ubuntu-24.04-arm, arch: aarch64 }
+          - { runner: ubuntu-latest,     arch: x86_64,  artifact: x86_64 }
+          - { runner: ubuntu-24.04-arm,  arch: aarch64, artifact: aarch64 }
+          # THE TWO APPLE ROWS (P4.10). `arch` is cibuildwheel's spelling, which on macOS is Apple's:
+          # `arm64` is the same ISA Linux calls `aarch64`, and the wheels tag as `macosx_11_0_arm64`
+          # and `macosx_10_13_x86_64`. Two native builds rather than one `universal2`, because a fat
+          # binary doubles the download for everyone to serve one half -- and that half is ending.
+          #
+          # THE RUNNER LABELS ARE NOT THE ONES THIS ITEM WAS SCOPED WITH. `macos-13`/`macos-14` were
+          # the Intel/arm pair when P4.10 was written; `macos-13` has since been retired and
+          # `macos-14` is deprecated. `macos-15` is the GA Apple Silicon image and `macos-15-intel`
+          # its Intel counterpart -- the label to check when this job one day fails to schedule.
+          #
+          # `artifact` exists because `arch` stopped being unique: Linux x86_64 and Apple Intel are
+          # both `x86_64`, and two upload-artifact steps sharing a name is an error, not a merge.
+          - { runner: macos-15,          arch: arm64,   artifact: macos-arm64 }
+          - { runner: macos-15-intel,    arch: x86_64,  artifact: macos-x86_64 }
     steps:
       # `submodules: recursive` is load-bearing here too -- same reason as ci.yml: the engine is a
       # submodule, and cibuildwheel copies this checkout as-is into its build containers.
@@ -59,7 +73,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels-base-${{ matrix.arch }}
+          name: wheels-base-${{ matrix.artifact }}
           path: wheelhouse/*.whl
 
   # The accelerator packages. One wheel per platform and NOT per interpreter: the payload is a plain
@@ -134,6 +148,52 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.backend }}-${{ matrix.arch }}
+          path: wheelhouse/*.whl
+
+  # METAL, WHICH IS A SEPARATE JOB RATHER THAN A ROW OF THE MATRIX ABOVE (P4.11). Everything that
+  # makes `build-backends` what it is, is Linux: a manylinux container carrying an SDK, a
+  # `docker/login-action` step to pull it, and an `arch` axis with two values. Metal has none of
+  # those -- it builds on a macOS runner with no container at all, and for exactly one architecture.
+  # Folding it in would mean an `if:` on every step of that job.
+  #
+  # NO `before-all` AND NO SDK STEP, which is the part worth stating because it looks like an
+  # omission. `GGML_METAL_EMBED_LIBRARY` defaults on with Metal and embeds the `.metal` SOURCE via
+  # `.incbin`, compiled by the Metal framework at run time -- so the build never invokes
+  # `xcrun metal`, and the full-Xcode install that utility would need is not a requirement here. The
+  # runner's Command Line Tools are enough.
+  build-metal:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Same reason as the Linux backends: cibuildwheel mounts only the package directory, and this
+      # package deliberately reaches outside itself for the shared BackendPackage.cmake and for the
+      # engine submodule's GgmlPin.cmake, which is what stops a backend wheel being built against a
+      # ggml its base wheel never saw.
+      - name: Stage the package
+        run: python packaging/stage.py metal staged
+
+      # The pinned ACTION rather than `pipx run cibuildwheel`, which is what the Linux backend jobs
+      # above use. Two reasons: `pipx` is preinstalled on the Ubuntu images and is not something to
+      # rely on being there on a macOS one, and the action takes `package-dir` directly, so the
+      # staged tree does not need a `working-directory` and a `../` output path. Same version as
+      # `build-wheels` uses, so both macOS paths run one cibuildwheel.
+      - uses: pypa/cibuildwheel@v4.2.0
+        with:
+          package-dir: staged
+          output-dir: wheelhouse
+        env:
+          CIBW_ARCHS: arm64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-metal-arm64
           path: wheelhouse/*.whl
 
   # THE RUNG NO RUNNER OCCUPIES. The aarch64 wheel ships eight `libggml-cpu-armv*.so` and ggml picks
@@ -263,7 +323,11 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m venv /tmp/loom-smoke
-          /tmp/loom-smoke/bin/pip install --quiet dist/*.whl
+          # `*manylinux*` rather than `*`: the glob above is `wheels-*-x86_64`, and since P4.10 that
+          # also matches `wheels-base-macos-x86_64`. This runner is Linux, so an Apple Intel wheel in
+          # the same directory is not a candidate -- and `pip install dist/*.whl` would fail on it
+          # rather than skip it, because an explicit filename is a request, not a preference.
+          /tmp/loom-smoke/bin/pip install --quiet dist/*manylinux*.whl
           cd /tmp   # a neutral cwd, so the venv's package is what gets imported
           /tmp/loom-smoke/bin/python - <<'EOF'
           import loom
@@ -316,7 +380,7 @@ jobs:
   # which is a visible install error; a backend with no base is the same error from the other side.
   # Neither is silent, so this is about which half is fixed sooner rather than about safety.
   publish-pypi:
-    needs: [build-wheels, build-backends, build-sdist, raspberry-pi-check]
+    needs: [build-wheels, build-backends, build-metal, build-sdist, raspberry-pi-check]
     if: ${{ github.event_name == 'release' || inputs.publish }}
     runs-on: ubuntu-latest
     environment: pypi
@@ -344,6 +408,11 @@ jobs:
           pattern: "wheels-vulkan-*"
           path: dist-vulkan
           merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "wheels-metal-*"
+          path: dist-metal
+          merge-multiple: true
 
       - name: Publish loom-py-rt
         uses: pypa/gh-action-pypi-publish@release/v1
@@ -361,4 +430,14 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist-vulkan
+          skip-existing: true
+
+      # A FOURTH PYPI PROJECT NEEDS ITS OWN TRUSTED PUBLISHER before this step can succeed -- owner
+      # `loom-ai-org`, repo `loom-py`, workflow `wheels.yml`, environment `pypi`, project
+      # `loom-py-rt-metal` -- configured on PyPI, not here. Until it exists this step fails while
+      # everything above it still uploads, and the wheel is downloadable from the run.
+      - name: Publish loom-py-rt-metal
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist-metal
           skip-existing: true

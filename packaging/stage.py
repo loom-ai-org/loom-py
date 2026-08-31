@@ -59,7 +59,7 @@ def stage(backend: str, dest: Path) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("backend", help="backend name, e.g. cuda or vulkan")
+    ap.add_argument("backend", help="backend name: cuda, vulkan or metal")
     ap.add_argument("dest", type=Path, help="directory to assemble into (replaced if it exists)")
     args = ap.parse_args()
     stage(args.backend, args.dest.resolve())

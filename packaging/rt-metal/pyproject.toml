@@ -1,0 +1,75 @@
+[build-system]
+requires = ["scikit-build-core>=0.9"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "loom-py-rt-metal"
+# Deliberately the same version as the base package, and see `dependencies` for why it is not merely
+# a convention.
+version = "1.0.0-rc6"
+description = "Metal backend for loom-py-rt"
+# Two entries, not one table with both keys: PEP 621 maps {name, email} TOGETHER onto a single
+# `Author-email:` header and leaves `Author:` empty, so a name-only entry is what fills the latter.
+authors = [
+    { name = "Flávio De Melo" },
+    { email = "flavio.eler@gmail.com" },
+]
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# An EXACT pin, not a compatible-release range (Epic-08 §3, ADR on the accelerator packages). This
+# wheel carries a libggml-metal.so that gets dlopened beside the base wheel's libggml-base.dylib, and
+# ggml makes no ABI promise across revisions -- so any loom-py-rt release that bumps its ggml pin
+# invalidates every backend wheel published before it.
+dependencies = ["loom-py-rt == 1.0.0rc6"]
+
+[tool.scikit-build]
+wheel.packages = ["loom_rt_metal"]
+# `py3-none-macosx_...` rather than `cp310-cp310-macosx_...`. The payload is a plain shared library
+# with no CPython ABI in it -- it is dlopened by ggml, never imported by Python -- so the interpreter
+# dimension the default tag would encode is not real. The architecture half stays, because it is.
+wheel.py-api = "py3"
+cmake.version = ">=3.24"
+cmake.build-type = "Release"
+# No sdist, for the same reason as the other backends: this build reads the engine submodule above
+# the package root for its ggml pin, and a backend sdist that built standalone would be one that
+# could build against the wrong ggml.
+sdist.exclude = ["*"]
+
+[tool.cibuildwheel]
+# One build serves every interpreter -- see wheel.py-api above.
+build = "cp310-*"
+skip = "pp* *-musllinux_* *_i686"
+# ARM64 ALONE, and this is the sparsest row in packaging/README.md's table. Metal on an Intel Mac is
+# a GPU generation ggml does not target, and Apple Intel is already a one-row, CI-only platform for
+# the base wheel (Epic-08 §4) -- so there is no x86_64 build here to fail on a machine nobody tests.
+archs = "arm64"
+
+[tool.cibuildwheel.macos]
+# The same 14.0 floor the base wheel takes, for a borrowed reason rather than one of its own:
+# nothing in libggml-metal.so needs it, but this package pins `loom-py-rt ==` and that wheel is
+# tagged `macosx_14_0_arm64` (Accelerate's new BLAS -- see the base pyproject). A Metal wheel tagged
+# 11.0 would advertise a platform on which its own dependency cannot be installed.
+environment = { MACOSX_DEPLOYMENT_TARGET = "14.0" }
+
+# THE macOS ANALOGUE OF THE `auditwheel --exclude libggml-base.so` LINE THE OTHER BACKENDS CARRY, and
+# it needs one extra flag rather than one fewer. `libggml-base.dylib` is the BASE wheel's to ship --
+# two copies on one sys.path have no rule about which loads -- so it must not be vendored in here.
+#
+# `--exclude` alone is not enough on macOS: this library reaches libggml-base through
+# `@rpath/libggml-base.dylib`, and at repair time that rpath points at a `loom/` package directory
+# that does not exist in the build container, so delocate cannot resolve it at all.
+# `--ignore-missing-dependencies` is what turns "I could not find this" from an error into the
+# intended outcome. The pair is deliberate: the exclude states the intent, and the ignore covers the
+# resolution failure that follows from it.
+repair-wheel-command = "delocate-wheel --require-archs {delocate_archs} --exclude libggml-base --ignore-missing-dependencies -w {dest_dir} -v {wheel}"
+
+[project.urls]
+Homepage = "https://github.com/loom-ai-org/loom-py"
+Engine = "https://github.com/loom-ai-org/loom.cpp"

@@ -62,6 +62,10 @@ phonemes = ["orthography2ipa>=7.30"]
 # `[vulkan,cuda]` together is legitimate: with GGML_BACKEND_DL the registry picks at run time.
 vulkan = ["loom-py-rt-vulkan == 1.0.0rc6"]
 cuda = ["loom-py-rt-cuda == 1.0.0rc6"]
+# Apple Silicon macOS ONLY -- there is no arm64-Linux or Intel-Mac Metal wheel to resolve to, so this
+# is the extra the paragraph above is describing when it says one may not exist for the platform at
+# all. On anything but an Apple Silicon Mac this FAILS, by design.
+metal = ["loom-py-rt-metal == 1.0.0rc6"]
 # `gguf` writes the handful of tiny synthetic GGUFs tests/ci builds to check what the binding does with
 # a file it has never seen -- an unrecognized `tokenizer.ggml.model` tag, most importantly. Those cases
 # are unreachable with a fake handle (they are decisions the C++ makes at load time), and mocking them
@@ -108,10 +112,11 @@ manylinux-x86_64-image = "manylinux_2_28"
 # Raspberry Pi need" should not be answered by a default that a cibuildwheel bump may move. 2.28 is
 # below every 64-bit Raspberry Pi OS in service: Bullseye is 2.31 and Bookworm is 2.36.
 manylinux-aarch64-image = "manylinux_2_28"
-# macOS/Windows aren't wired up yet -- CI (.github/workflows/ci.yml) only ever exercises ubuntu-latest,
-# and LuaJIT's vendored build drives its own Makefile directly (cmake/Dependencies.cmake), which is
-# untested off Linux/macOS make semantics. Add `macos-*`/`windows-*` to the workflow's build matrix once
-# that path has actually been run somewhere, rather than declaring it here first.
+# macOS IS WIRED UP AS OF P4.10, in both workflows: `wheels.yml`'s build matrix has a `macos-15`
+# (arm64) and a `macos-15-intel` (x86_64) row, and `ci.yml` builds and runs `pytest tests/ci` on
+# `macos-15` on every push -- which is where a macOS regression should be caught, rather than at a
+# release. The arm64 wheel has also been built, installed and run on a real M1 Pro, which is a
+# stronger statement than either. Windows is still out of scope and stays behind this.
 
 # The `[test]` extra, rather than a second copy of its contents. This was `test-requires =
 # ["pytest>=7"]`, which was that copy -- and it drifted: `tests/ci/test_vocab_dispatch.py` writes a
@@ -127,3 +132,43 @@ test-extras = ["test"]
 # installed package" step guards against, just automatic here since cibuildwheel doesn't cwd into
 # {project} for the test step.
 test-command = "python -c \"import loom; print(loom.__version__)\" && pytest {project}/tests/ci -q"
+
+[tool.cibuildwheel.macos]
+# THE DEPLOYMENT FLOOR, DECLARED RATHER THAN INHERITED, and it has to be set HERE rather than only in
+# CMake because the two halves of the promise are made in different places. CMakeLists.txt sets
+# `CMAKE_OSX_DEPLOYMENT_TARGET`, which decides what the Mach-O binaries actually require
+# (`LC_BUILD_VERSION minos`); scikit-build-core decides the wheel's FILENAME tag, and it reads this
+# environment variable -- it does not read CMake. Leave it unset and the two disagree: a hand build
+# produced binaries good for 11.0 inside a wheel named `macosx_15_0_arm64`, which pip then refuses to
+# install on the macOS 12 it would have run on perfectly.
+#
+# 13.3 AND NOT cibuildwheel's 11.0/10.13 DEFAULTS, and the reason is Accelerate. ggml's BLAS backend
+# is compiled with `ACCELERATE_NEW_LAPACK` and `ACCELERATE_LAPACK_ILP64`
+# (`src/ggml-blas/CMakeLists.txt`, unconditional for Apple, with no deployment-target gating), which
+# selects Accelerate's NEW BLAS interface -- `cblas_sgemm$NEWLAPACK$ILP64`, a symbol that exists only
+# on **macOS 13.3+**. At an 11.0 floor the first macOS CI run said so out loud:
+#
+#     ggml-blas.cpp:142:13: warning: 'cblas_sgemm' is only available on macOS 13.3 or newer
+#
+# and the resulting wheel would install happily on macOS 11 or 12 and then quietly not have a BLAS
+# backend -- `dlopen` fails on the missing symbol and ggml skips it, which is the SILENT failure mode
+# P4.8a already cost a build cycle to find. BLAS is not optional-in-practice either: it is **1.80x on
+# whisper-small** (990 ms against the CPU's 1778 ms) on an M1 Pro, and neutral on VITS.
+#
+# So the choice was between a tag that overpromises, a ggml patch, and a floor that tells the truth.
+# This is the floor telling the truth. It costs macOS 11-13.2, which in 2026 is a small and shrinking
+# slice of Apple Silicon -- and the alternative was a platform that looks supported and silently
+# isn't, which is the pattern this project rejects everywhere else (`[metal]` failing to resolve off
+# macOS, `device="gpu"` raising rather than falling back).
+#
+# ONE NUMBER FOR BOTH ARCHITECTURES, so there is no `overrides` block any more: Accelerate's new BLAS
+# lands on 13.3 for Intel too, and every Intel Mac that reached macOS 13 can reach 14.#
+# AND THE NUMBER IS 14.0, NOT THE 13.3 THE REQUIREMENT ACTUALLY IS, because 13.3 is not expressible
+# as a wheel tag. Since macOS 11 the platform tag carries only the MAJOR version -- `packaging`
+# generates `macosx_15_0`, `macosx_14_0`, `macosx_13_0`, ... and nothing with a non-zero minor, so
+# `macosx_13_3_arm64` matches nothing pip offers. scikit-build-core knows this and zeroes the minor,
+# which means `MACOSX_DEPLOYMENT_TARGET=13.3` would ship binaries needing 13.3 inside a wheel tagged
+# `macosx_13_0` -- installable on 13.0, 13.1 and 13.2, and silently BLAS-less there. That is the
+# same defect one major version smaller. 14.0 is the lowest floor that is both expressible and true.
+# Verified rather than reasoned: `normalize_macos_version("13.3", arm=True)` returns `13.0`.
+environment = { MACOSX_DEPLOYMENT_TARGET = "14.0" }

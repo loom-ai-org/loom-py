@@ -11,6 +11,7 @@ So the first test here is the wheel's smoke test, and the rest pin the discovery
 accelerator installable as a separate package.
 """
 import os
+import pathlib
 import sys
 
 import pytest
@@ -59,8 +60,18 @@ def _recorded_paths(monkeypatch, extra_sys_path=(), env=None):
 
 
 def test_the_package_directory_is_always_searched(monkeypatch):
-    """Where the base wheel's own libggml-base.so and libggml-cpu-*.so live."""
-    package_dir = os.path.dirname(os.path.abspath(loom.__file__))
+    """Where the base wheel's own libggml-base.so and libggml-cpu-*.so live.
+
+    `resolve()` rather than `abspath()`, and the difference is not pedantry -- it is the difference
+    between this test passing and failing on macOS. `_register_backend_paths` resolves, because ggml
+    is handed a real path rather than one it has to interpret; `abspath` does not follow symlinks.
+    On Linux the two agree and the distinction never showed. On macOS BOTH standard temporary roots
+    are symlinks -- `/tmp` -> `/private/tmp` and `/var` -> `/private/var` -- so a package installed
+    into a venv under either (which is every wheel test step, cibuildwheel's included) compares
+    `/tmp/.../loom` against the recorded `/private/tmp/.../loom` and fails on a path that is the
+    same directory.
+    """
+    package_dir = str(pathlib.Path(loom.__file__).resolve().parent)
     assert package_dir in _recorded_paths(monkeypatch)
 
 
