@@ -66,7 +66,7 @@ TTS_WORDS = "hello world"
 # a broken oracle would fail its own row first, which is the ordering you want.
 ORACLE = "whisper-small"
 
-# PER-MODEL BASELINES, MEASURED, because one global ceiling cannot serve this family. Five of the
+# PER-MODEL BASELINES, MEASURED, because one global ceiling cannot serve this family. Six of the
 # seven transcribe jfk.wav PERFECTLY; GigaAM scores 0.50 and is not broken. A ceiling loose enough
 # for GigaAM (0.6) would let Whisper rot from 0.00 to 0.30 unnoticed, and a tight one fails a model
 # that works. What this gate is for is BREAKAGE, not quality -- a broken model scores about 1.0
@@ -83,12 +83,13 @@ ASR_BASELINE = {
     # right utterance -- "my fellow americans ... your country can do for you" -- spelled through a
     # recogniser trained elsewhere. Not a defect, and not something to tighten.
     "gigaam-v3-rnnt":         0.50,
-    # ENTIRELY THE CONTROL MARKERS, and this number is a to-do rather than a property of the model.
-    # Its speech transcription is perfect; the 0.18 is `language English<asr_text>` being counted as
-    # four spurious words against a 21-word reference. Granite, the other family-3 model, comes back
-    # clean, so this is one model's prompt scaffolding leaking into its output. When that is fixed
-    # this baseline should drop to 0.00 -- and this gate will say so by passing with room to spare.
-    "qwen3-asr-0.6b":         0.18,
+    # WAS 0.18, AND THAT 0.18 WAS ENTIRELY THE CONTROL MARKERS -- `language English<asr_text>` counted
+    # as four spurious words against a 21-word reference, while the speech itself was already perfect.
+    # They no longer leak (re-measured 2026-09-01: the card returns the utterance and nothing else),
+    # so the to-do is closed and the baseline follows it down. Tightening it is the POINT, not
+    # bookkeeping: left at 0.18 the ceiling stays 0.33, the markers cost about 0.18 to reinstate, and
+    # the one regression this row exists to catch could come back and still pass.
+    "qwen3-asr-0.6b":         0.00,
 }
 
 # How far past its own baseline a model may drift. Wide enough to absorb the punctuation and casing
