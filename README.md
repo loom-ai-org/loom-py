@@ -263,8 +263,10 @@ hardware, so treat it as best-effort rather than as parity.
 
 **Metal is a separate package, not part of the macOS wheel** — `pip install "loom-py-rt[metal]"`.
 It is only 0.87 MB, so that split is not about size: a GPU outranks the CPU when you let the library
-choose a device, and on unified memory that is 2.69x faster for some models and several times slower
-for others. Asking for it is how you opt into that trade. `loom.devices()` shows what you got.
+choose a device, and on unified memory that ranking is not reliably right. Measured on an M1 Pro,
+whisper-small is **1.76x faster** on Metal and VITS is **1.79x slower** — so which way it goes still
+depends on the model, and asking for the package is how you opt into that trade. `loom.devices()`
+shows what you got.
 
 **Raspberry Pi.** A 64-bit OS is the requirement, and the only one: `uname -m` must say `aarch64`. On
 32-bit Raspberry Pi OS pip reports `armv7l`, matches no wheel, and falls back to building the sdist,
