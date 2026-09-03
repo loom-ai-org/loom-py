@@ -32,7 +32,8 @@ no longer takes, fails here.
   compared with the words the card asked for. All five TTS cards say "hello world", which also makes
   them comparable with each other. A token classifier gets the same treatment one modality over: its
   card labels a fixed sentence and the entities are reconstructed from the labels and checked, because
-  "the block ran" is equally satisfied by a model that answers `O` to everything.
+  "the block ran" is equally satisfied by a model that answers `O` to everything. A codec decoder is
+  graded on its output LENGTH, which is what silently broke on the first one.
 
 **Running it:**
 
@@ -432,6 +433,49 @@ def test_token_classification_finds_the_entities(name, jfk, tmp_path, monkeypatc
         f"  found:             {sorted(found)}\n"
         f"  labelling:         {[(t.piece, t.label) for t in result]}"
     )
+
+
+@pytest.mark.gate
+@pytest.mark.parametrize("name", NAMES)
+def test_codec_output_length_follows_the_input(name, jfk, tmp_path, monkeypatch):
+    """A codec decoder returns `frames * hop` samples, for the frames its own card asked for.
+
+    THE *IS IT RIGHT* QUESTION FOR THIS FAMILY IS THE LENGTH, and that is not a guess about what might
+    break -- it is what DID break. The first working DAC export produced correct audio and returned one
+    frame's worth of it for every input, because the exporter's shape walk gave up on the RVQ's
+    rank-reducing slice and every transposed convolution was cropped to a literal. Nothing raised: the
+    export succeeded, the file loaded, the driver returned floats. A gate that only asked "did the
+    block run" would have shipped it.
+
+    Derived from what the FILE declares -- `sample_rate / frame_rate` is the hop -- so this is one
+    check for every codec rather than a table of per-model constants.
+    """
+    _cards_dir()
+    gguf, readme = _entry(name)
+    model = loom.Model.from_file(str(gguf))
+    if model.contract.get("interface") != "codes2speech":
+        pytest.skip(f"{name} is not codes2speech")
+
+    ns, unmet = run_card(name, gguf, readme, jfk, tmp_path, monkeypatch)
+    audio = produced(ns, "samples", "sample_rate")
+    if audio is None:
+        pytest.skip(f"{name}'s card decoded nothing{' -- ' + unmet if unmet else ''}")
+
+    rate = int(model.contract["sample_rate"])
+    frame_rate = float(model.hparam("codec.frame_rate", "f32"))
+    hop = rate / frame_rate
+    frames = round(float(model.hparam("codec.frame_rate", "f32")))   # what the card decodes
+    expected = round(frames * hop)
+    assert len(audio.samples) == expected, (
+        f"{name} decoded {frames} frames to {len(audio.samples)} samples; at {hop:.1f} samples per "
+        f"frame that should be {expected}. A length that does not follow the input is the failure "
+        f"this row exists for -- it produces a plausible file and the wrong duration."
+    )
+    assert audio.sample_rate == rate, "the waveform must carry the rate the file declares"
+    # Not silence and not clipped. All-zero codes are a valid input and decode to a real (if dull)
+    # signal; a decoder that returned zeros would pass the length check and be broken.
+    peak = max(abs(s) for s in audio.samples)
+    assert peak <= MAX_PEAK, f"{name} peak {peak:.4f} is clipped"
 
 
 @pytest.mark.gate
