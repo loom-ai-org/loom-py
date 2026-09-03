@@ -30,7 +30,9 @@ no longer takes, fails here.
   not the test. Kokoro once matched PyTorch at cosine 0.996 and shipped unintelligible
   (loom.cpp Retro-006), so synthesised audio is TRANSCRIBED BACK by a standard ASR model and
   compared with the words the card asked for. All five TTS cards say "hello world", which also makes
-  them comparable with each other.
+  them comparable with each other. A token classifier gets the same treatment one modality over: its
+  card labels a fixed sentence and the entities are reconstructed from the labels and checked, because
+  "the block ran" is equally satisfied by a model that answers `O` to everything.
 
 **Running it:**
 
@@ -60,6 +62,16 @@ JFK_WORDS = (
 
 # What every TTS card asks for, which is what makes the ASR oracle's expectation a constant.
 TTS_WORDS = "hello world"
+
+# The sentence every token-classification card labels, and the entities that have to come back out of
+# it. Same device as TTS_WORDS one task over: fixing the input in the CARD is what lets the expectation
+# here be a constant rather than a second model run grading the first.
+#
+# THE SPANS, NOT THE LABEL SEQUENCE, and that is the point of writing it this way. A per-token
+# expectation would have to know how this checkpoint's vocabulary splits "Wolfgang" -- which differs
+# between a cased and an uncased card and is not what anyone wants to assert. Reconstructing B-/I-
+# runs into spans asks the question a user actually has: did it find the right entities.
+CLASSIFY_ENTITIES = {("wolfgang", "PER"), ("berlin", "LOC")}
 
 # The model that reads TTS output back. Whisper rather than a NeMo model because it is the one every
 # card set already depends on for the ASR examples, and because its own card is checked here too --
@@ -338,6 +350,87 @@ def test_tts_output_is_intelligible(name, oracle, jfk, tmp_path, monkeypatch):
     rate_wer = wer(TTS_WORDS, heard)
     assert rate_wer <= MAX_WER_TTS, (
         f"{name} said {TTS_WORDS!r}, oracle heard {heard!r} (WER {rate_wer:.2f})"
+    )
+
+
+def entity_spans(result):
+    """`{(text, type)}` from a per-token BIO labelling, pieces glued back into words.
+
+    The IOB2 convention the CoNLL family uses: `B-X` opens a span, `I-X` continues the open one, `O`
+    closes it. A stray `I-X` with nothing open opens a span anyway rather than being dropped -- a
+    model that emits one is doing something worth seeing in the failure message, not something to
+    quietly normalise away.
+
+    Pieces are joined bare because that is how the export writes them: `wordpiece_tokenizer_export`
+    applies llama.cpp's `phantom()` transform, so a continuation piece has lost its "##" and a
+    word-initial one carries the word boundary. Lowercased on the way out, since whether a checkpoint
+    is cased is not what this is asking.
+    """
+    spans, current, current_type = set(), [], None
+
+    def close():
+        if current:
+            spans.add(("".join(current).strip().lower(), current_type))
+
+    for token in result:
+        label = token.label or ""
+        tag, _, kind = label.partition("-")
+        if tag == "B" or (tag == "I" and kind != current_type):
+            close()
+            current, current_type = [token.piece], kind
+        elif tag == "I":
+            current.append(token.piece)
+        else:
+            close()
+            current, current_type = [], None
+    close()
+    return spans
+
+
+@pytest.mark.gate
+@pytest.mark.parametrize("name", NAMES)
+def test_token_classification_finds_the_entities(name, jfk, tmp_path, monkeypatch):
+    """A token classifier labels its own card's sentence with the entities that are in it.
+
+    The *is it right* question for this family, and it needs its own answer for the reason the TTS row
+    needed one: "the block ran" is satisfied by a model that returns `O` for every token, which is
+    exactly what a broken export does -- a randomly-initialised head, a baked sequence length reached
+    at the wrong length, a vocabulary whose ids do not match what the graph was trained on. All three
+    produce a `Classification` of the right shape and the wrong contents.
+
+    Graded on the card's OWN result, for the same reason the ASR row is: a call invented here would be
+    a second, unpublished spelling of the thing under test. `produced` takes the LAST one the card
+    bound, which for a card that demonstrates `strip_special=False` last is the unstripped labelling --
+    which is fine and slightly stronger: the framing rows are graded too, so a model that invented an
+    entity out of `[CLS]` would fail here. The strip itself is pinned hermetically, in loom.cpp's
+    `tests/ci/test_text_classify.cpp`, where it does not need a real checkpoint.
+    """
+    _cards_dir()
+    gguf, readme = _entry(name)
+    if loom.Model.from_file(str(gguf)).contract.get("interface") != "text2class":
+        pytest.skip(f"{name} is not text2class")
+
+    ns, unmet = run_card(name, gguf, readme, jfk, tmp_path, monkeypatch)
+    result = produced(ns, "tokens", "labels")
+    if result is None:
+        pytest.skip(f"{name}'s card labelled nothing{' -- ' + unmet if unmet else ''}")
+
+    assert len(result), f"{name} labelled a sentence and produced no tokens"
+    # The label SET is the file's, and a card that prints it is printing what the model can choose
+    # between -- so an export that lost `loom.labels` shows up here rather than as bare integers in
+    # somebody's terminal.
+    assert result.labels, f"{name} declares no label names, so its ids mean nothing to a reader"
+    assert all(t.label for t in result), (
+        f"{name} returned a class id with no name: "
+        f"{[(t.piece, t.label_id) for t in result if not t.label][:5]}"
+    )
+
+    found = entity_spans(result)
+    assert found >= CLASSIFY_ENTITIES, (
+        f"{name} did not find the entities in its own card's sentence.\n"
+        f"  expected at least: {sorted(CLASSIFY_ENTITIES)}\n"
+        f"  found:             {sorted(found)}\n"
+        f"  labelling:         {[(t.piece, t.label) for t in result]}"
     )
 
 
