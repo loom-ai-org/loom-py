@@ -33,12 +33,12 @@ from typing import Any, Iterable, Mapping, Sequence
 from . import _loom
 from . import phonemizers
 from ._hub import download
-from ._interfaces import (ALL_INTERFACES, Audio, Interface, Speech2Text, Text2Speech, Text2Text,
-                          UnsupportedTask)
+from ._interfaces import (ALL_INTERFACES, Audio, Classification, Interface, Speech2Text, Text2Class,
+                          Text2Speech, Text2Text, TokenClass, UnsupportedTask)
 
-__all__ = ["Model", "Tokenizer", "Transcription", "Segment", "Audio", "Interface",
-           "UnsupportedTask", "Text2Text", "Speech2Text", "Text2Speech", "phonemizers",
-           "LoomError", "devices", "download", "__version__"]
+__all__ = ["Model", "Tokenizer", "Transcription", "Segment", "Audio", "Classification", "TokenClass",
+           "Interface", "UnsupportedTask", "Text2Text", "Speech2Text", "Text2Speech", "Text2Class",
+           "phonemizers", "LoomError", "devices", "download", "__version__"]
 
 
 def _register_backend_paths() -> None:
@@ -488,6 +488,27 @@ class Model:
             segments=[Segment(**s) for s in raw["segments"]],
             windows=int(raw["windows"]),
             timestamped=bool(raw["timestamped"]),
+        )
+
+    def classify(self, tokens: Sequence[int], *, strip_special: bool = True,
+                 **driver_inputs: Any) -> "Classification":
+        """Label already-encoded tokens, one declared class each.
+
+        The ids door, matching `generate_ids` beside `generate`: `model.text2class.infer("...")`
+        encodes for you and lands here. What this adds over `infer` is the file's own label NAMES and
+        the decision about the framing tokens -- both of which are the engine's
+        (`loom::text::classify`), so the two front ends cannot disagree about either.
+
+        Returns a `Classification`: the labelled tokens, and the label set they were chosen from.
+        """
+        ids = [int(t) for t in tokens]
+        raw = self._handle.classify(ids, bool(strip_special),
+                                    {k: _as_value(k, v) for k, v in driver_inputs.items()})
+        return Classification(
+            tokens=[TokenClass(token=int(entry["token"]), label_id=int(entry["label_id"]),
+                                label=entry["label"], piece=self.detokenize([entry["token"]]))
+                    for entry in raw],
+            labels=list(self._contract.get("labels") or []),
         )
 
     def call(self, fn_name: str, inputs: Mapping[str, Any]) -> list[float] | float:
