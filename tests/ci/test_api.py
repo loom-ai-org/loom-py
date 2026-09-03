@@ -26,8 +26,8 @@ class TestPackage:
             "Tokenizer",
             "Transcription",
             "Segment",
-            # The end-to-end layer. The result types and the four implemented interfaces are exported
-            # because a caller annotates against them; the twelve not-yet-implemented ones are reached
+            # The end-to-end layer. The result types and the five implemented interfaces are exported
+            # because a caller annotates against them; the eleven not-yet-implemented ones are reached
             # as `model.<name>` and are deliberately not names to import.
             "Audio",
             "Classification",
@@ -38,6 +38,7 @@ class TestPackage:
             "Speech2Text",
             "Text2Speech",
             "Text2Class",
+            "Codes2Speech",
             # The G2P frontend: a module rather than a class, because a caller registers into it.
             "phonemizers",
             "LoomError",
@@ -167,7 +168,7 @@ class _FakeHandle:
     GGUF. Only the methods `loom.Model` actually calls are here."""
 
     def __init__(self, returns, vocab="gpt2", eos=-1, contract=None, transcribe_warnings=(),
-                 chat_roles=()):
+                 chat_roles=(), hparams=None):
         self._returns = list(returns)      # what successive infer() calls hand back
         # What the ENGINE reports as ignored -- an argument this file has nothing to select with. The
         # engine returns these instead of printing them (a library has no logger); the Python layer is
@@ -184,6 +185,21 @@ class _FakeHandle:
         self.generate_calls = []           # every argument set generate() was given
         self.classify_calls = []           # every argument set classify() was given
         self._contract = dict(contract or {})
+        self._hparams = dict(hparams or {})
+
+    # The binding exposes one reader PER GGUF TYPE (`hparam_u32`/`hparam_f32`/`hparam_str`), because
+    # GGUF's own types are explicit and a key written as u32 and read as f32 is an error the engine
+    # raises. `Model.hparam` picks the reader from its `kind` argument, so a double defining a single
+    # `hparam` is never called at all -- which is how this fake first "passed" by raising the absent-key
+    # error for a key it had been given.
+    def _hparam(self, key):
+        if key not in self._hparams:
+            raise RuntimeError(f"no such hparam: {key}")
+        return self._hparams[key]
+
+    def hparam_u32(self, key): return self._hparam(key)
+    def hparam_f32(self, key): return self._hparam(key)
+    def hparam_str(self, key): return self._hparam(key)
 
     def contract(self):
         """What the file declares. Empty-but-present by default, which is a pre-contract GGUF -- the
@@ -512,6 +528,9 @@ _TTS_TEXT_CONTRACT = dict(_TTS_PHONEME_CONTRACT, input_kind="text", text_fronten
 _TOKEN_CLASS_CONTRACT = dict(_ASR_CONTRACT, task="token-classification", input_kind="text",
                              output_kind="class", interface="text2class", sample_rate=0,
                              clip_samples=0, labels=["O", "B-PER"])
+_CODEC_CONTRACT = dict(_ASR_CONTRACT, task="audio-codec", input_kind="audio_codes",
+                       output_kind="audio", interface="codes2speech", sample_rate=44100,
+                       clip_samples=0, text_frontend="")
 
 
 class TestInterfacesAreTheModalityPair:
@@ -596,6 +615,43 @@ class TestInterfacesAreTheModalityPair:
         handle = _FakeHandle([], vocab=None, contract=_TOKEN_CLASS_CONTRACT)
         with pytest.raises(loom.UnsupportedTask, match="embeds no vocabulary"):
             _model(handle).text2class.infer("hello")
+
+    def test_a_declared_codec_answers_codes2speech(self):
+        """`audio_codes` does NOT fold onto "text" -- ADR-020. A codec declaring `token_ids` would
+        land on `text2speech` and be offered a text door it has no vocabulary for, which is the
+        failure this interface exists to make impossible."""
+        model = _model(_FakeHandle([[0.1, 0.2]], contract=_CODEC_CONTRACT,
+                                    hparams={"codec.n_codebooks": 2}))
+        assert model.task == "audio-codec"
+        assert model.capabilities == ("codes2speech",)
+        assert not model.text2speech.supported
+
+    def test_codes_are_accepted_as_rows_or_flat(self):
+        """Two spellings of one input, because both are what a caller actually holds: a driver that
+        emitted them hands over a flat run, and a person writing them out writes rows."""
+        rows = _FakeHandle([[0.1]], contract=_CODEC_CONTRACT, hparams={"codec.n_codebooks": 2})
+        flat = _FakeHandle([[0.1]], contract=_CODEC_CONTRACT, hparams={"codec.n_codebooks": 2})
+        _model(rows).codes2speech.infer([[1, 2], [3, 4]])
+        _model(flat).codes2speech.infer([1, 2, 3, 4])
+        assert rows.calls[0]["codes"] == flat.calls[0]["codes"] == [1.0, 2.0, 3.0, 4.0]
+
+    def test_a_flat_run_that_is_not_whole_frames_is_refused(self):
+        """Silently reinterpreting it as a different frame count produces audio of the wrong duration
+        and no error anywhere, which is the one failure mode a codec caller cannot see."""
+        handle = _FakeHandle([[0.1]], contract=_CODEC_CONTRACT, hparams={"codec.n_codebooks": 2})
+        with pytest.raises(ValueError, match="whole number of frames"):
+            _model(handle).codes2speech.infer([1, 2, 3])
+
+    def test_a_row_of_the_wrong_width_names_the_rows(self):
+        handle = _FakeHandle([[0.1]], contract=_CODEC_CONTRACT, hparams={"codec.n_codebooks": 2})
+        with pytest.raises(ValueError, match="2 codebooks per frame"):
+            _model(handle).codes2speech.infer([[1, 2], [3, 4, 5]])
+
+    def test_the_declared_rate_travels_with_the_samples(self):
+        handle = _FakeHandle([[0.1, 0.2]], contract=_CODEC_CONTRACT,
+                             hparams={"codec.n_codebooks": 2})
+        audio = _model(handle).codes2speech.infer([[1, 2]])
+        assert audio.sample_rate == 44100, "the file's own rate, not the fallback"
 
     def test_text2text_is_the_same_call_as_generate(self):
         handle = _FakeHandle([[7, 8], [7, 8]],

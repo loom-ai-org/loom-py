@@ -33,11 +33,13 @@ from typing import Any, Iterable, Mapping, Sequence
 from . import _loom
 from . import phonemizers
 from ._hub import download
-from ._interfaces import (ALL_INTERFACES, Audio, Classification, Interface, Speech2Text, Text2Class,
-                          Text2Speech, Text2Text, TokenClass, UnsupportedTask)
+from ._interfaces import (ALL_INTERFACES, Audio, Classification, Codes2Speech, Interface,
+                          Speech2Text, Text2Class, Text2Speech, Text2Text, TokenClass,
+                          UnsupportedTask)
 
 __all__ = ["Model", "Tokenizer", "Transcription", "Segment", "Audio", "Classification", "TokenClass",
            "Interface", "UnsupportedTask", "Text2Text", "Speech2Text", "Text2Speech", "Text2Class",
+           "Codes2Speech",
            "phonemizers", "LoomError", "devices", "download", "__version__"]
 
 

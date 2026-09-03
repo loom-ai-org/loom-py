@@ -375,6 +375,77 @@ class Text2Class(Interface):
         return self._model.classify(ids, strip_special=strip_special, **driver_inputs)
 
 
+class Codes2Speech(Interface):
+    name = "codes2speech"
+    summary = "neural-codec tokens in, a waveform out"
+
+    def _infer(self, codes, *, sample_rate: int = 0, **driver_inputs) -> Audio:
+        """Decode codec tokens to audio.
+
+        `codes` is frame-major -- one row per frame, `n_codebooks` wide -- which is the order an
+        AR codec-token LM emits in and the layout the export declares. A flat sequence is accepted too
+        and is taken to be that same matrix already flattened, because that is what a driver that
+        produced it hands over.
+
+        **What this door does NOT do is undo a delay pattern.** An AR LM offsets codebook *k* by *k*
+        steps; realigning them is a property of that LM, not of the codec, and a codec asked to guess
+        would be guessing about a model it has never seen. Feed it aligned codes.
+        """
+        rows = self._as_matrix(codes)
+        declared = int(self._model.contract.get("sample_rate") or 0)
+        if not declared and not sample_rate:
+            warnings.warn(
+                f"{self._model.path.name} declares no sample rate, so 24000 Hz is assumed. A wrong "
+                f"rate does not fail, it plays the audio at the wrong speed -- pass sample_rate= if "
+                f"you know it.", RuntimeWarning, stacklevel=3,
+            )
+        samples = self._model.infer(codes=[float(c) for row in rows for c in row], **driver_inputs)
+        if not isinstance(samples, list):
+            raise TypeError(
+                f"this model's driver returned {type(samples).__name__} rather than a waveform. Its "
+                f"declared output kind is audio, so either the export or the driver is wrong."
+            )
+        return Audio(samples=[float(s) for s in samples],
+                     sample_rate=declared or int(sample_rate) or 24000)
+
+    def _as_matrix(self, codes) -> list:
+        """`codes` as a list of per-frame rows, whichever of the two shapes the caller holds.
+
+        The width is checked against what the FILE declares rather than inferred: a flat list of the
+        wrong length would otherwise be silently reinterpreted as a different number of frames, which
+        produces audio of the wrong duration and no error anywhere.
+        """
+        # An HPARAM, not a contract field: ADR-020 puts it there because it is a number the HOST needs
+        # in order to build an input, which is the split `hparams()` already draws. `hparam` raises
+        # when the key is absent, and absent means an export too old to state it -- which is a
+        # different thing from a model with no codebooks, so it is caught rather than defaulted.
+        try:
+            width = int(self._model.hparam("codec.n_codebooks", "u32"))
+        except Exception:
+            width = 0
+        rows = list(codes)
+        if rows and isinstance(rows[0], (list, tuple)):
+            rows = [list(r) for r in rows]
+            bad = [i for i, r in enumerate(rows) if width and len(r) != width]
+            if bad:
+                raise ValueError(
+                    f"this model takes {width} codebooks per frame; rows {bad[:5]} have "
+                    f"{[len(rows[i]) for i in bad[:5]]}."
+                )
+            return rows
+        if not width:
+            raise ValueError(
+                "this model declares no `loom.codec.n_codebooks`, so a flat list cannot be split into "
+                "frames. Pass a list of per-frame rows, or re-export it with a current loom-exporter."
+            )
+        if len(rows) % width:
+            raise ValueError(
+                f"{len(rows)} codes is not a whole number of frames at {width} codebooks per frame. "
+                f"Codes are frame-major: all {width} codes for frame 0, then frame 1, and so on."
+            )
+        return [rows[i:i + width] for i in range(0, len(rows), width)]
+
+
 class _Planned(Interface):
     """An interface named by the taxonomy with no family exporting to it yet.
 
@@ -413,10 +484,10 @@ Image2Boundingbox = _planned("image2boundingbox", "object detection")
 Image2Segmentationmask = _planned("image2segmentationmask", "segmentation")
 
 
-#: Every interface a `Model` carries, in the order `capabilities` and `repr` report them. The four
+#: Every interface a `Model` carries, in the order `capabilities` and `repr` report them. The five
 #: implemented ones first, because that is the order a reader cares about.
 ALL_INTERFACES = (
-    Text2Text, Speech2Text, Text2Speech, Text2Class,
+    Text2Text, Speech2Text, Text2Speech, Text2Class, Codes2Speech,
     Speech2Speech, Text2Image, Image2Text, Speech2Image, Image2Speech,
     Speech2Class, Image2Class,
     Text2Embeddings, Speech2Embeddings, Image2Embeddings,
