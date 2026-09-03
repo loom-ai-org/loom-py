@@ -26,15 +26,18 @@ class TestPackage:
             "Tokenizer",
             "Transcription",
             "Segment",
-            # The end-to-end layer. `Audio` and the three implemented interfaces are exported because
-            # a caller annotates against them; the thirteen not-yet-implemented ones are reached as
-            # `model.<name>` and are deliberately not names to import.
+            # The end-to-end layer. The result types and the four implemented interfaces are exported
+            # because a caller annotates against them; the twelve not-yet-implemented ones are reached
+            # as `model.<name>` and are deliberately not names to import.
             "Audio",
+            "Classification",
+            "TokenClass",
             "Interface",
             "UnsupportedTask",
             "Text2Text",
             "Speech2Text",
             "Text2Speech",
+            "Text2Class",
             # The G2P frontend: a module rather than a class, because a caller registers into it.
             "phonemizers",
             "LoomError",
@@ -179,6 +182,7 @@ class _FakeHandle:
         self.calls = []                    # every inputs dict infer() was given
         self.langs = []                    # every `lang` encode() was given
         self.generate_calls = []           # every argument set generate() was given
+        self.classify_calls = []           # every argument set classify() was given
         self._contract = dict(contract or {})
 
     def contract(self):
@@ -245,6 +249,15 @@ class _FakeHandle:
         return {"segments": [{"start": 0.0, "end": 1.0, "text": "hello", "closed": True}],
                 "text": "hello", "windows": 1, "timestamped": True,
                 "warnings": list(self._transcribe_warnings)}
+
+    # Same reasoning as `transcribe`: the framing-token strip and the label lookup are the ENGINE's
+    # (loom/core/text_classify.h), so what a double can pin is the marshalling either side. It records
+    # what it was handed and returns one entry per token it was given.
+    def classify(self, tokens, strip_special, extra_inputs):
+        self.classify_calls.append({"tokens": list(tokens), "strip_special": strip_special,
+                                    "extra_inputs": dict(extra_inputs)})
+        return [{"token": int(t), "label_id": i % 2, "label": ["O", "B-PER"][i % 2]}
+                for i, t in enumerate(tokens)]
 
 
 class TestTranscribeWarnings:
@@ -489,13 +502,16 @@ _ASR_CONTRACT = {
     "output_kind": "token_ids", "interface": "speech2text", "sample_rate": 16000,
     "clip_samples": 480000, "max_input_tokens": 0, "text_frontend": "vocab",
     "phoneme_alphabet": "", "phonemizer_ruleset": "", "languages": ["en"], "entry_points": ["infer"],
-    "default_steps": 0, "voices": [],
+    "default_steps": 0, "voices": [], "labels": [],
 }
 _TTS_PHONEME_CONTRACT = dict(_ASR_CONTRACT, task="text-to-speech", input_kind="phoneme_ids",
                              output_kind="audio", interface="text2speech", text_frontend="",
                              phoneme_alphabet="ipa", sample_rate=22050, clip_samples=0,
                              default_steps=10)
 _TTS_TEXT_CONTRACT = dict(_TTS_PHONEME_CONTRACT, input_kind="text", text_frontend="vocab")
+_TOKEN_CLASS_CONTRACT = dict(_ASR_CONTRACT, task="token-classification", input_kind="text",
+                             output_kind="class", interface="text2class", sample_rate=0,
+                             clip_samples=0, labels=["O", "B-PER"])
 
 
 class TestInterfacesAreTheModalityPair:
@@ -531,6 +547,55 @@ class TestInterfacesAreTheModalityPair:
             model.text2text.infer("hello")
         assert "declares no task" in str(excinfo.value)
         assert "model.infer" in str(excinfo.value), "it must point at the door that does work"
+
+    def test_a_declared_classifier_answers_text2class(self):
+        """The first non-audio pair any family declares, and the reason `Text2Class` stopped being a
+        planned interface: nothing here learned an architecture, the file simply said `class`."""
+        model = _model(_FakeHandle([], contract=_TOKEN_CLASS_CONTRACT))
+        assert model.task == "token-classification"
+        assert model.capabilities == ("text2class",)
+        assert not model.text2text.supported
+
+    def test_text2class_encodes_and_labels(self):
+        handle = _FakeHandle([], contract=_TOKEN_CLASS_CONTRACT)
+        result = _model(handle).text2class.infer("hello there")
+        # Encoded through the model's own vocabulary -- the fake returns [10, 11, 12] for any text.
+        assert handle.encode_calls == ["hello there"]
+        assert handle.classify_calls[0]["tokens"] == [10, 11, 12]
+        assert [t.label for t in result] == ["O", "B-PER", "O"]
+        # The label SET travels with the labels, because a caller checking which classes existed
+        # cannot recover it from the ones that happened to be chosen.
+        assert result.labels == ["O", "B-PER"]
+        # And the pieces, which are not recoverable afterwards: a WordPiece encode splits words, so
+        # joining them back into words is a rule this layer has no basis to make for the caller.
+        assert [t.piece for t in result] == ["10", "11", "12"]
+
+    def test_ids_may_be_passed_instead_of_text(self):
+        handle = _FakeHandle([], contract=_TOKEN_CLASS_CONTRACT)
+        _model(handle).text2class.infer(tokens=[5, 6])
+        assert handle.encode_calls == [], "ids must not be re-encoded"
+        assert handle.classify_calls[0]["tokens"] == [5, 6]
+
+    def test_text_and_tokens_are_two_depths_of_one_input_not_two_arguments(self):
+        model = _model(_FakeHandle([], contract=_TOKEN_CLASS_CONTRACT))
+        with pytest.raises(TypeError):
+            model.text2class.infer("hello", tokens=[1])
+        with pytest.raises(TypeError):
+            model.text2class.infer()
+
+    def test_strip_special_reaches_the_engine_as_the_engines_decision(self):
+        """The knob is a switch on a decision the ENGINE makes, so what this layer owes is to pass it
+        through -- and to default it the same way the engine's own default reads."""
+        handle = _FakeHandle([], contract=_TOKEN_CLASS_CONTRACT)
+        model = _model(handle)
+        model.text2class.infer(tokens=[1])
+        model.text2class.infer(tokens=[1], strip_special=False)
+        assert [c["strip_special"] for c in handle.classify_calls] == [True, False]
+
+    def test_a_classifier_with_no_vocabulary_says_so_rather_than_guessing(self):
+        handle = _FakeHandle([], vocab=None, contract=_TOKEN_CLASS_CONTRACT)
+        with pytest.raises(loom.UnsupportedTask, match="embeds no vocabulary"):
+            _model(handle).text2class.infer("hello")
 
     def test_text2text_is_the_same_call_as_generate(self):
         handle = _FakeHandle([[7, 8], [7, 8]],

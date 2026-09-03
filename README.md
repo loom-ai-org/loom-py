@@ -25,6 +25,7 @@ model.text2text.infer("The capital of France is")        # -> str, a raw complet
 model.text2text.chat("Who discovered Brazil?")           # -> str, asked inside a turn
 model.speech2text.infer(waveform, language="en")         # -> Transcription
 model.text2speech.infer("hello world")                   # -> Audio
+model.text2class.infer("Wolfgang lives in Berlin")       # -> Classification, a label per token
 ```
 
 Which door a model answers is read off the file, not guessed from its name:
@@ -56,6 +57,20 @@ audio = model.text2speech.infer("hello world", steps=8, seed=1)
 audio.sample_rate             # 22050
 audio.save("out.wav")
 ```
+
+`text2class` returns the labelled pieces beside the label set they came from, because neither is
+recoverable from the other — a WordPiece encode splits words, so joining the pieces back up is a rule
+only you can make:
+
+```python
+r = model.text2class.infer("Wolfgang lives in Berlin")
+r.labels                      # ['O', 'B-MISC', 'I-MISC', 'B-PER', ...] — every class the model has
+[(t.piece, t.label) for t in r]
+# [('Wolfgang', 'B-PER'), ('lives', 'O'), ('in', 'O'), ('Berlin', 'B-LOC')]
+```
+
+The framing tokens the encode added ([CLS]/[SEP]) are dropped for you, on the ids the file declares
+rather than on their spelling; `strip_special=False` keeps them if you want the raw alignment.
 
 **The low-level API is the driver's own entry point, and stays raw.** `infer` passes your arguments
 straight through, so which ones a model takes is a property of the model rather than of this package:

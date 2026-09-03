@@ -20,6 +20,7 @@
 #include "loom/core/model_contract.h"
 #include "loom/core/chat_template.h"
 #include "loom/core/text_generate.h"
+#include "loom/core/text_classify.h"
 #include "loom/core/transcribe.h"
 
 #include <ggml.h>
@@ -254,6 +255,7 @@ public:
         out["entry_points"] = c.entry_points;
         out["default_steps"] = c.default_steps;
         out["voices"] = c.voices;
+        out["labels"] = c.labels;
         return out;
     }
 
@@ -329,6 +331,36 @@ public:
     // `inputs` is {name: float | sequence[float]}, which is exactly the bridge's own Value variant --
     // a driver's world is numbers and arrays of numbers, and nothing here needs to know that one
     // model's array is a waveform and another's is a run of token ids.
+    // TOKEN CLASSIFICATION, the engine's `loom::text::classify` (see loom/core/text_classify.h). Thin
+    // for the same reason `transcribe` is not: what the engine owns here is the one POLICY decision --
+    // whether the framing tokens the encode added come back labelled -- and this side owns only the
+    // marshalling. Returned as a list of dicts, matching `transcribe`'s segments, so the token id
+    // travels with its label and a caller can detokenize a labelled span without re-encoding.
+    py::object classify(const std::vector<int32_t>& tokens, bool strip_special,
+                        const py::dict& extra_inputs) {
+        if (driver_.empty()) {
+            throw std::runtime_error(
+                "this GGUF carries no driver script, so there is nothing to classify.");
+        }
+        loom::text::ClassifyOptions opts;
+        opts.strip_special = strip_special;
+        for (auto item : extra_inputs) {
+            const std::string name = item.first.cast<std::string>();
+            opts.extra_inputs.emplace(name, to_value(name, item.second));
+        }
+        const std::vector<loom::text::TokenLabel> labelled =
+            loom::text::classify(*bridge_, *model_, tokens, opts);
+        py::list out;
+        for (const loom::text::TokenLabel& entry : labelled) {
+            py::dict d;
+            d["token"] = entry.token;
+            d["label_id"] = entry.label_id;
+            d["label"] = entry.label;
+            out.append(d);
+        }
+        return out;
+    }
+
     // TRANSCRIPTION, which is the engine's `loom::audio::transcribe` and nothing else (see
     // loom/core/transcribe.h). An earlier draft of this method reimplemented the windowing here and
     // accepted that Python would transcribe long audio worse than the CLI, because the timestamp-aware
@@ -522,6 +554,8 @@ PYBIND11_MODULE(_loom, m) {
         .def("decode", &Model::decode, py::arg("ids"))
         .def("call", &Model::call, py::arg("fn_name"), py::arg("inputs"))
         .def("transcribe", &Model::transcribe, py::arg("waveform"), py::arg("options"))
+        .def("classify", &Model::classify, py::arg("tokens"), py::arg("strip_special"),
+             py::arg("extra_inputs"))
         .def("contract", &Model::contract)
         .def("has_chat_template", &Model::has_chat_template)
         .def("chat_roles", &Model::chat_roles)

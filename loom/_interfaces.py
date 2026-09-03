@@ -84,6 +84,46 @@ class Audio:
         return array
 
 
+@dataclass(frozen=True)
+class TokenClass:
+    """One input token and the class the model gave it."""
+    token: int
+    label_id: int
+    label: str
+    piece: str
+
+    def __repr__(self) -> str:
+        return f"<{self.piece!r} {self.label or self.label_id}>"
+
+
+@dataclass(frozen=True)
+class Classification:
+    """What `Text2Class.infer` returns: a label per token, and the label set they came from.
+
+    A result object rather than a bare list, by the same rule `Transcription` and `Audio` follow: the
+    pieces the model actually labelled are not recoverable from the labels afterwards, because a
+    WordPiece encode splits words and the alignment is between LABELS and PIECES, not words. A caller
+    who joins them back into words is making a rule (which of two pieces' labels wins) that this layer
+    has no basis to make for them -- so it hands over both halves.
+    """
+    tokens: list
+    labels: list
+
+    def __len__(self) -> int:
+        return len(self.tokens)
+
+    def __iter__(self):
+        return iter(self.tokens)
+
+    def __getitem__(self, index):
+        return self.tokens[index]
+
+    @property
+    def text(self) -> str:
+        """The labelled pieces joined back into a string, for reading a result at a glance."""
+        return " ".join(f"{t.piece}/{t.label or t.label_id}" for t in self.tokens)
+
+
 class Interface:
     """Base for every X2Y door. Subclasses declare the modality pair they serve and implement `infer`.
 
@@ -301,6 +341,40 @@ class Text2Speech(Interface):
         return self._model.tokenize(text, lang=language)
 
 
+class Text2Class(Interface):
+    name = "text2class"
+    summary = "text in, one declared class per token out"
+
+    def _infer(self, text: str | None = None, *, tokens: Sequence[int] | None = None,
+               strip_special: bool = True, **driver_inputs) -> Classification:
+        """Label a sentence, one class per token.
+
+        Two ways in, the same ladder every other door offers: `text` is encoded through the model's own
+        vocabulary, `tokens` are ids a caller already holds. There is no third rung here because there
+        is no intermediate representation -- a token classifier's input is the tokenizer's output and
+        nothing sits between them.
+
+        `strip_special` drops the rows belonging to the framing tokens the encode adds ([CLS]/[SEP] for
+        a WordPiece model). It is the ENGINE's decision, made on the ids the file declares rather than
+        on their spelling; this parameter is how a caller who wants the raw alignment turns it off.
+        """
+        if (text is None) == (tokens is None):
+            raise TypeError(
+                "give exactly one of text= or tokens=. They are two depths of the same input, not "
+                "alternatives to combine."
+            )
+        if text is not None:
+            if self._model.tokenizer is None:
+                raise UnsupportedTask(
+                    "this model embeds no vocabulary, so it cannot encode text. Pass tokens=[ids] "
+                    "from your own tokenizer."
+                )
+            ids = self._model.tokenize(text)
+        else:
+            ids = [int(t) for t in tokens]
+        return self._model.classify(ids, strip_special=strip_special, **driver_inputs)
+
+
 class _Planned(Interface):
     """An interface named by the taxonomy with no family exporting to it yet.
 
@@ -330,7 +404,6 @@ Text2Image = _planned("text2image", "image synthesis")
 Image2Text = _planned("image2text", "captioning, OCR, VLM prompting")
 Speech2Image = _planned("speech2image", "speech-conditioned image synthesis")
 Image2Speech = _planned("image2speech", "image-conditioned speech")
-Text2Class = _planned("text2class", "text classification")
 Speech2Class = _planned("speech2class", "audio classification, language id, keyword spotting")
 Image2Class = _planned("image2class", "image classification")
 Text2Embeddings = _planned("text2embeddings", "text embedding")
@@ -340,12 +413,12 @@ Image2Boundingbox = _planned("image2boundingbox", "object detection")
 Image2Segmentationmask = _planned("image2segmentationmask", "segmentation")
 
 
-#: Every interface a `Model` carries, in the order `capabilities` and `repr` report them. The three
+#: Every interface a `Model` carries, in the order `capabilities` and `repr` report them. The four
 #: implemented ones first, because that is the order a reader cares about.
 ALL_INTERFACES = (
-    Text2Text, Speech2Text, Text2Speech,
+    Text2Text, Speech2Text, Text2Speech, Text2Class,
     Speech2Speech, Text2Image, Image2Text, Speech2Image, Image2Speech,
-    Text2Class, Speech2Class, Image2Class,
+    Speech2Class, Image2Class,
     Text2Embeddings, Speech2Embeddings, Image2Embeddings,
     Image2Boundingbox, Image2Segmentationmask,
 )
