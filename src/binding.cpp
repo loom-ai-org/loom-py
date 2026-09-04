@@ -175,26 +175,23 @@ public:
         bridge_ = std::make_unique<loom::LoomLuaBridge>(backends);
         names_ = model_->topology_names();
 
-        // A cache is made only if some topology says it wants one, and there are TWO kinds. Attention
-        // blocks want a `KvCache`; a hybrid's ShortConv blocks carry their own history, which the KV
-        // cache does not hold, and want a `ConvStateCache` (BACKLOG.md P4.0.10). LFM2 is the model
-        // that has both, and a binding that made only the first loaded it, tokenized for it, and then
-        // failed inside the driver on the eleventh node.
+        // **`loom::register_topologies`, not a loop here.** A cache is made only if some topology
+        // says it wants one, there are TWO kinds, and one of them now has two SCOPES -- attention
+        // blocks want a `KvCache`, a hybrid's ShortConv blocks want a `ConvStateCache` (BACKLOG.md
+        // P4.0.10), and a module declaring `kv_cache_scope: "private"` wants a KV cache of its own
+        // rather than the shared one, which is what a classifier-free-guidance decode's second
+        // stream is (loom.cpp ADR-023).
         //
-        // Both are sized from the file's own declared geometry, which is why no caller passes a
-        // context length: the model states it, `make_*_cache` reads it.
-        for (const std::string& name : names_) {
-            loom::GraphTopology topo = loom::GraphTopology::parse(model_->topology_json(name));
-            if (topo.uses_kv_cache() && kv_cache_ == nullptr) {
-                kv_cache_ = loom::make_kv_cache(*model_, device_->backends());
-            }
-            if (topo.uses_conv_state() && conv_state_ == nullptr) {
-                conv_state_ = loom::make_conv_state_cache(*model_, device_->backends());
-            }
-            loom::KvCache* kv_for_module = topo.uses_kv_cache() ? kv_cache_.get() : nullptr;
-            loom::ConvStateCache* conv_for_module = topo.uses_conv_state() ? conv_state_.get() : nullptr;
-            bridge_->register_module(name, *model_, std::move(topo), kv_for_module, conv_for_module);
-        }
+        // This used to be that loop, written out, and it is why the engine grew a shared function:
+        // the copy here did not learn the third rule, so a guided generation through this binding
+        // would have run both streams into one cache and returned plausible, wrong tokens. The
+        // engine's `Session` cannot simply be used instead -- it requires a driver script, and this
+        // binding deliberately loads a GGUF without one -- so the part that decides correctness is
+        // shared and the part that differs is not.
+        //
+        // Every cache is sized from the file's own declared geometry, which is why no caller passes
+        // a context length: the model states it, `make_*_cache` reads it.
+        caches_ = loom::register_topologies(*model_, device_->backends(), *bridge_);
 
         // Guarded, not bare: `kv_str` THROWS on a missing key, so an unconditional read here made a
         // GGUF without a driver fail to construct at all -- even though `has_driver()` below is written
@@ -439,8 +436,10 @@ private:
     // has no default constructor and this member is initialized in the constructor's body order.
     std::unique_ptr<loom::Device> device_;
     std::unique_ptr<loom::GgufModel> model_;
-    std::unique_ptr<loom::KvCache> kv_cache_;
-    std::unique_ptr<loom::ConvStateCache> conv_state_;
+    // Declared before `bridge_`: the bridge holds non-owning pointers into these for its whole life,
+    // so they must be destroyed after it. `loom::ModuleCaches` is one object rather than three so
+    // that ordering is a single thing to get right -- see its declaration in session.h.
+    loom::ModuleCaches caches_;
     std::unique_ptr<loom::LoomLuaBridge> bridge_;
     std::unique_ptr<Tokenizer> tokenizer_;
     // Null for a base model, and for any GGUF exported before P4.23. Absence is the honest answer
