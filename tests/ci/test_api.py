@@ -306,12 +306,12 @@ class TestTranscribeWarnings:
             _model(handle).transcribe([0.0, 1.0], language="en")
 
 
-def tmp_lexicon():
-    """A two-entry `word<TAB>ipa` TSV on disk. Never read here -- orthography2ipa resolves a lexicon
-    lazily, on the first transcription for that language -- but a real path is what a caller passes."""
+def tmp_lexicon(text="time\ttˈaɪm\nfriend\tfɹˈɛnd\n"):
+    """A `word<TAB>ipa` TSV on disk. A real file, because `set_lexicon` reads it: it is loaded at
+    registration so that a source yielding no entries is reported at the line that named it."""
     fd, path = tempfile.mkstemp(suffix=".tsv")
     with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write("time\ttˈaɪm\nfriend\tfɹˈɛnd\n")
+        f.write(text)
     return path
 
 
@@ -797,6 +797,32 @@ class TestText2Speech:
             assert loom.phonemizers.lexicons() == {}, "None clears rather than registering 'None'"
         finally:
             loom.phonemizers._LEXICONS.clear()
+
+    def test_a_lexicon_that_parses_to_nothing_warns_instead_of_registering_silently(self):
+        """Every line that is not exactly `word<TAB>ipa` is skipped without complaint, so a file of the
+        wrong SHAPE loads as an empty overlay -- and an empty overlay is byte-identical to no overlay:
+        registration succeeds, the rules answer, and the audio is unstressed with nothing to explain it.
+
+        The file that produced this was the GitHub *blob* page for ipa-dict rather than the raw one.
+        The documented `sed` ran over 700 lines of HTML happily, wrote a plausible-looking `.tsv`, and
+        the only symptom was that `set_lexicon` appeared not to be taken into account at all.
+        """
+        o2i = pytest.importorskip("orthography2ipa")
+        junk = tmp_lexicon('<!DOCTYPE html>\n<html lang="en">\n  <body>hello</body>\n')
+        good = tmp_lexicon()
+        try:
+            with pytest.warns(RuntimeWarning, match="no entries"):
+                loom.phonemizers.set_lexicon(junk, language="en")
+            assert loom.phonemizers.lexicons() == {o2i.resolve("en"): junk}, (
+                "the warning reports, it does not refuse -- the source is still registered")
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")      # a lexicon with entries says nothing at all
+                loom.phonemizers.set_lexicon(good, language="en")
+        finally:
+            loom.phonemizers._LEXICONS.clear()
+            o2i.clear_lexicons()
+            os.unlink(junk)
+            os.unlink(good)
 
     def test_a_lexicon_without_the_default_provider_installed_is_refused(self):
         """Accepting it would be worse than refusing: a lexicon set on a provider that does not exist
