@@ -40,7 +40,7 @@ from ._interfaces import (ALL_INTERFACES, Audio, Classification, Codes2Speech, I
 __all__ = ["Model", "Tokenizer", "Transcription", "Segment", "Audio", "Classification", "TokenClass",
            "Interface", "UnsupportedTask", "Text2Text", "Speech2Text", "Text2Speech", "Text2Class",
            "Text2Codes", "Codes2Speech",
-           "phonemizers", "LoomError", "devices", "download", "__version__"]
+           "phonemizers", "LoomError", "devices", "contract_of", "download", "__version__"]
 
 
 def _register_backend_paths() -> None:
@@ -94,6 +94,29 @@ def _register_backend_paths() -> None:
 
 
 _register_backend_paths()
+
+
+def contract_of(path: str | Path) -> dict:
+    """What a loom GGUF declares itself to be, read from the file's metadata alone.
+
+    The same dict as :attr:`Model.contract`, and the same code builds it -- but without loading the
+    weights. `Model(path).contract` allocates every tensor on a backend and streams the file into it
+    first, which for a large model is gigabytes and seconds spent to read a handful of strings that
+    sit in the GGUF header, ahead of the tensor data.
+
+    Use it for the question "is this the file I want" -- which task, which modality pair, which door --
+    before committing to loading it::
+
+        if loom.contract_of(path)["interface"] == "text2speech":
+            model = loom.Model.from_file(path)
+
+    Everything metadata-shaped is there; nothing that needs a weight is, because no weight was read.
+    """
+    resolved = Path(path).expanduser()
+    if not resolved.is_file():
+        raise FileNotFoundError(f"no such model file: {resolved}")
+    return _loom.contract_of(str(resolved))
+
 
 
 def devices() -> list[dict]:

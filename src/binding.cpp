@@ -234,8 +234,12 @@ public:
     // meaningful, and a dict says "this key was not declared" in the one way Python already reads
     // without a sentinel per field. `declared` is separate because a host must be able to tell a file
     // that states its contract from one it has to be told about.
-    py::dict contract() const {
-        const loom::ModelContract c = loom::ModelContract::read(*model_);
+    py::dict contract() const { return contract_dict(loom::ModelContract::read(*model_)); }
+
+    // One builder, used by `Model.contract` and by the module-level `contract_of` below. A second
+    // spelling of this dict is a second answer to "what is this file", which is the one question the
+    // declared contract exists to have exactly one of.
+    static py::dict contract_dict(const loom::ModelContract& c) {
         py::dict out;
         out["declared"] = c.declared();
         out["task"] = c.task;
@@ -514,6 +518,27 @@ PYBIND11_MODULE(_loom, m) {
     // package, which is why that discovery lives in Python where it can use importlib.
     m.def("add_backend_search_path", &loom::add_backend_search_path, py::arg("directory"),
           "Add a directory to search for dynamically loaded ggml backends.");
+
+    // **What a file IS, without loading what it holds.** `Model(path).contract` answers the same
+    // question and pays for every tensor to be allocated on a backend and streamed off disk first --
+    // for the largest model here that is 6.4 GB and several seconds to read a handful of strings that
+    // sit in the GGUF header, ahead of the tensor data. This reads the KV table and stops.
+    //
+    // It exists because that cost is paid by exactly the callers who should not: anything deciding
+    // *whether* a file is the one it wants. loom-py's own model-card gate is the case that forced it
+    // -- six of its rows opened a whole model to read one `interface` string and threw it away, which
+    // on a 6.4 GB card was half the row's memory and got the run OOM-killed.
+    //
+    // The dict is built by the same function `Model.contract` uses, so the cheap answer and the
+    // expensive one cannot drift.
+    // The missing-file check stays in `loom/__init__.py`, where `Model.from_file`'s already is: a
+    // FileNotFoundError naming the path is a better answer than a LoadError from the parser, and
+    // `test_a_missing_file_says_so_before_the_engine_sees_it` pins that for the other door.
+    m.def("contract_of", [](const std::string& path) {
+        return Model::contract_dict(loom::ModelContract::read(*loom::GgufModel::load_metadata(path)));
+    }, py::arg("path"),
+       "What a loom GGUF declares itself to be -- the same dict as `Model.contract`, read from the "
+       "file's metadata without loading its weights.");
 
     // What actually got loaded. The point of exposing it is that a wheel's accelerator is now an
     // install-time question: `loom.devices()` is how a caller checks whether `loom-py-rt-vulkan` did
