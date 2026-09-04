@@ -44,6 +44,10 @@ class TestPackage:
             "phonemizers",
             "LoomError",
             "devices",
+            # Reading a file's declared contract WITHOUT loading its weights -- a module function
+            # rather than a Model method, necessarily: the whole point is to answer "is this the file
+            # I want" before there is a Model.
+            "contract_of",
             "download",
             "__version__",
         ]
