@@ -44,6 +44,14 @@ here.
     export LOOM_MODEL_CARDS=~/Dev/loom/hf-models      # the staging tree, cards beside GGUFs
     pytest tests/gate/test_model_cards.py -q
 
+**Which rows apply is decided by `loom.contract_of`, not by opening the model.** Every row here is
+parametrised over every model and skips the ones it is not for, so a suite of N models asks that
+question N times per row -- and answering it by loading the model costs the model. On the 6.4 GB
+family-10 card that was half the row's memory and got a run OOM-killed (exit 137, peak 28.9 GB
+against 1.9 GB free); `contract_of` reads the GGUF's KV table and stops. The two rows that go on to
+need a real model now load it *after* the check rather than before, so a model this row is not for is
+never opened at all.
+
 It skips cleanly without that variable, like every gate test. `pip install "loom-py-rt[phonemes]"`
 additionally covers the text-in door; without it the cards' G2P lines are reported as skipped
 preconditions rather than failures, because a missing optional extra is not a broken card.
@@ -310,7 +318,7 @@ def test_asr_transcribes_the_reference(name, jfk, tmp_path, monkeypatch):
     """An ASR model gets the words right, against a recording checked into the repo."""
     _cards_dir()
     gguf, readme = _entry(name)
-    if loom.Model.from_file(str(gguf)).contract.get("interface") != "speech2text":
+    if loom.contract_of(gguf).get("interface") != "speech2text":
         pytest.skip(f"{name} is not speech2text")
 
     # THE CARD'S OWN CALL, not one this file invents -- and the first version of this DID invent one,
@@ -346,7 +354,7 @@ def test_tts_output_is_intelligible(name, oracle, jfk, tmp_path, monkeypatch):
     """
     _cards_dir()
     gguf, readme = _entry(name)
-    if loom.Model.from_file(str(gguf)).contract.get("interface") != "text2speech":
+    if loom.contract_of(gguf).get("interface") != "text2speech":
         pytest.skip(f"{name} is not text2speech")
 
     ns, unmet = run_card(name, gguf, readme, jfk, tmp_path, monkeypatch)
@@ -396,7 +404,7 @@ def test_a_codec_lm_says_the_words(name, oracle, jfk, tmp_path, monkeypatch):
     """
     _cards_dir()
     gguf, readme = _entry(name)
-    if loom.Model.from_file(str(gguf)).contract.get("interface") != "text2codes":
+    if loom.contract_of(gguf).get("interface") != "text2codes":
         pytest.skip(f"{name} is not text2codes")
 
     ns, unmet = run_card(name, gguf, readme, jfk, tmp_path, monkeypatch)
@@ -490,7 +498,7 @@ def test_token_classification_finds_the_entities(name, jfk, tmp_path, monkeypatc
     """
     _cards_dir()
     gguf, readme = _entry(name)
-    if loom.Model.from_file(str(gguf)).contract.get("interface") != "text2class":
+    if loom.contract_of(gguf).get("interface") != "text2class":
         pytest.skip(f"{name} is not text2class")
 
     ns, unmet = run_card(name, gguf, readme, jfk, tmp_path, monkeypatch)
@@ -534,9 +542,9 @@ def test_codec_output_length_follows_the_input(name, jfk, tmp_path, monkeypatch)
     """
     _cards_dir()
     gguf, readme = _entry(name)
-    model = loom.Model.from_file(str(gguf))
-    if model.contract.get("interface") != "codes2speech":
+    if loom.contract_of(gguf).get("interface") != "codes2speech":
         pytest.skip(f"{name} is not codes2speech")
+    model = loom.Model.from_file(str(gguf))
 
     ns, unmet = run_card(name, gguf, readme, jfk, tmp_path, monkeypatch)
     audio = produced(ns, "samples", "sample_rate")
@@ -571,9 +579,9 @@ def test_declared_greedy_decoding_is_reproducible(name):
     """
     _cards_dir()
     gguf, _ = _entry(name)
-    model = loom.Model.from_file(str(gguf))
-    if model.contract.get("interface") != "text2text":
+    if loom.contract_of(gguf).get("interface") != "text2text":
         pytest.skip(f"{name} is not text2text")
+    model = loom.Model.from_file(str(gguf))
     # `hparam` raises when the key is absent, and absent means the export declared no sampling
     # defaults at all -- which is greedy. There is no `has_hparam`, so this is the probe.
     try:
