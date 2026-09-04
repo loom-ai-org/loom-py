@@ -375,6 +375,94 @@ class Text2Class(Interface):
         return self._model.classify(ids, strip_special=strip_special, **driver_inputs)
 
 
+class Text2Codes(Interface):
+    name = "text2codes"
+    summary = "text in, neural-codec tokens out -- an AR LM that speaks through a codec"
+
+    def _infer(self, text: str | None = None, *, tokens: Sequence[int] | None = None,
+               max_new_tokens: int | None = None, **driver_inputs) -> list[list[int]]:
+        """Generate codec tokens for a sentence.
+
+        **The other half of the pair is a second model**, and that is the whole shape of this door:
+        what comes back is not audio, it is what a codec turns into audio. Chaining them is two calls
+        and the array between them --
+
+            codes = dia.text2codes.infer("[S1] Hello world.")
+            audio = dac.codes2speech.infer(codes)
+
+        -- which is what ADR-022 decided and why the codes are the return value rather than an
+        implementation detail. A caller who wants to cache them, stream them, or decode them through a
+        different codec has them; a caller who wants audio makes the second call.
+
+        `max_new_tokens` counts **audio frames**, not decoder rows. Those differ by the model's delay
+        pattern -- an AR codec LM offsets codebook *k* by *k* steps, so N frames takes N + max(delay)
+        rows -- and rows are an artefact of that pattern rather than anything a caller asked for. It is
+        passed on only when named, so a model's own declared ceiling applies by default.
+
+        Two ways in, the same ladder every other door offers: `text` goes through the model's own
+        vocabulary, `tokens` are ids a caller already holds.
+        """
+        if (text is None) == (tokens is None):
+            raise TypeError(
+                "give exactly one of text= or tokens=. They are two depths of the same input, not "
+                "alternatives to combine."
+            )
+        if text is not None:
+            if self._model.tokenizer is None:
+                raise UnsupportedTask(
+                    "this model embeds no vocabulary, so it cannot encode text. Pass tokens=[ids] "
+                    "from your own tokenizer."
+                )
+            ids = self._model.tokenize(text)
+        else:
+            ids = [int(t) for t in tokens]
+
+        inputs: dict[str, Any] = dict(driver_inputs)
+        inputs["tokens"] = [float(i) for i in ids]
+        if max_new_tokens is not None:
+            inputs["max_new_tokens"] = float(max_new_tokens)
+        flat = self._model.infer(**inputs)
+        if not isinstance(flat, list):
+            raise TypeError(
+                f"this model's driver returned {type(flat).__name__} rather than a run of codes. Its "
+                f"declared output kind is audio_codes, so either the export or the driver is wrong -- "
+                f"`model.driver_source` documents what `infer` actually returns."
+            )
+        return self._as_frames(flat)
+
+    def _as_frames(self, flat: Sequence[float]) -> list[list[int]]:
+        """The driver's flat, frame-major run, cut into per-frame rows of the declared width.
+
+        **Rows rather than the flat run, because the width is the one thing the next model checks.**
+        `Codes2Speech` takes either, but a flat list of the wrong length is the one input it cannot
+        recognise as wrong -- it reinterprets as a different frame count and produces audio of the
+        wrong duration with nothing raised. Handing over rows moves that check to where the codes were
+        produced, which is the side that knows the answer.
+
+        An HPARAM rather than a contract field, for the reason ADR-020 gives: it is a number the HOST
+        needs to build an input with. `hparam` raises when the key is absent, and absent means an
+        export too old to state it -- which is not the same as a model with no codebooks, so it is
+        caught here rather than defaulted.
+        """
+        try:
+            width = int(self._model.hparam("codec.n_codebooks", "u32"))
+        except Exception:
+            width = 0
+        if not width:
+            raise UnsupportedTask(
+                "this model declares no `loom.codec.n_codebooks`, so its output cannot be cut into "
+                "frames. Re-export it with a current loom-exporter, or call `model.infer(...)` and "
+                "reshape with the width you know its codec to have."
+            )
+        if len(flat) % width:
+            raise ValueError(
+                f"this model's driver returned {len(flat)} codes, which is not a whole number of "
+                f"frames at the {width} codebooks per frame it declares. That is the export or the "
+                f"driver disagreeing with the file, not a caller error."
+            )
+        return [[int(c) for c in flat[i:i + width]] for i in range(0, len(flat), width)]
+
+
 class Codes2Speech(Interface):
     name = "codes2speech"
     summary = "neural-codec tokens in, a waveform out"
@@ -487,7 +575,7 @@ Image2Segmentationmask = _planned("image2segmentationmask", "segmentation")
 #: Every interface a `Model` carries, in the order `capabilities` and `repr` report them. The five
 #: implemented ones first, because that is the order a reader cares about.
 ALL_INTERFACES = (
-    Text2Text, Speech2Text, Text2Speech, Text2Class, Codes2Speech,
+    Text2Text, Speech2Text, Text2Speech, Text2Class, Text2Codes, Codes2Speech,
     Speech2Speech, Text2Image, Image2Text, Speech2Image, Image2Speech,
     Speech2Class, Image2Class,
     Text2Embeddings, Speech2Embeddings, Image2Embeddings,

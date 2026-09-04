@@ -26,7 +26,7 @@ class TestPackage:
             "Tokenizer",
             "Transcription",
             "Segment",
-            # The end-to-end layer. The result types and the five implemented interfaces are exported
+            # The end-to-end layer. The result types and the six implemented interfaces are exported
             # because a caller annotates against them; the eleven not-yet-implemented ones are reached
             # as `model.<name>` and are deliberately not names to import.
             "Audio",
@@ -38,6 +38,7 @@ class TestPackage:
             "Speech2Text",
             "Text2Speech",
             "Text2Class",
+            "Text2Codes",
             "Codes2Speech",
             # The G2P frontend: a module rather than a class, because a caller registers into it.
             "phonemizers",
@@ -531,6 +532,9 @@ _TOKEN_CLASS_CONTRACT = dict(_ASR_CONTRACT, task="token-classification", input_k
 _CODEC_CONTRACT = dict(_ASR_CONTRACT, task="audio-codec", input_kind="audio_codes",
                        output_kind="audio", interface="codes2speech", sample_rate=44100,
                        clip_samples=0, text_frontend="")
+_CODES_LM_CONTRACT = dict(_ASR_CONTRACT, task="text-to-codes", input_kind="text",
+                          output_kind="audio_codes", interface="text2codes", sample_rate=0,
+                          clip_samples=0, text_frontend="vocab")
 
 
 class TestInterfacesAreTheModalityPair:
@@ -615,6 +619,72 @@ class TestInterfacesAreTheModalityPair:
         handle = _FakeHandle([], vocab=None, contract=_TOKEN_CLASS_CONTRACT)
         with pytest.raises(loom.UnsupportedTask, match="embeds no vocabulary"):
             _model(handle).text2class.infer("hello")
+
+    def test_an_ar_codec_lm_answers_text2codes_and_returns_frames(self):
+        """The first half of the family-10 pair. `audio_codes` as an OUTPUT kind is what makes this a
+        door of its own rather than `text2speech` -- the model produces something a codec turns into
+        audio, and ADR-022 keeps that a second file."""
+        handle = _FakeHandle([[1, 2, 3, 4, 5, 6]], contract=_CODES_LM_CONTRACT,
+                             hparams={"codec.n_codebooks": 3})
+        model = _model(handle)
+        assert model.capabilities == ("text2codes",)
+        assert not model.text2speech.supported
+        # Frame-major rows, which is the layout `Codes2Speech` takes and the one the width can be
+        # checked against on the way in.
+        assert model.text2codes.infer("hello") == [[1, 2, 3], [4, 5, 6]]
+
+    def test_text2codes_output_feeds_codes2speech_unchanged(self):
+        """The composition, spelled as a host writes it: two files, two calls, the array between them.
+
+        This is the assertion ADR-022 costs -- with the codec in a second GGUF, nothing inside either
+        one says the pair fits, so the layouts have to be pinned where they meet. The engine-side
+        version of this against the real checkpoints is loom.cpp's
+        `test_e2e_dia_dac_composition.cpp`."""
+        lm = _FakeHandle([[1, 2, 3, 4, 5, 6]], contract=_CODES_LM_CONTRACT,
+                         hparams={"codec.n_codebooks": 3})
+        codec = _FakeHandle([[0.1, 0.2]], contract=_CODEC_CONTRACT,
+                            hparams={"codec.n_codebooks": 3})
+        codes = _model(lm).text2codes.infer("hello")
+        audio = _model(codec).codes2speech.infer(codes)
+        assert codec.calls[0]["codes"] == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+        assert audio.sample_rate == 44100
+
+    def test_max_new_tokens_reaches_the_driver_only_when_named(self):
+        """It counts AUDIO FRAMES, and the default belongs to the file. A host that always passed one
+        would override a ceiling the export derived from the model's own position budget."""
+        named = _FakeHandle([[1, 2, 3]], contract=_CODES_LM_CONTRACT,
+                            hparams={"codec.n_codebooks": 3})
+        unnamed = _FakeHandle([[1, 2, 3]], contract=_CODES_LM_CONTRACT,
+                              hparams={"codec.n_codebooks": 3})
+        _model(named).text2codes.infer("hello", max_new_tokens=16)
+        _model(unnamed).text2codes.infer("hello")
+        assert named.calls[0]["max_new_tokens"] == 16.0
+        assert "max_new_tokens" not in unnamed.calls[0]
+
+    def test_a_partial_final_frame_is_the_export_disagreeing_with_the_file(self):
+        """Seven codes at three codebooks is not a caller error and must not be silently truncated --
+        it is the driver and the declared width disagreeing, which downstream is audio of the wrong
+        duration and nothing raised."""
+        handle = _FakeHandle([[1, 2, 3, 4, 5, 6, 7]], contract=_CODES_LM_CONTRACT,
+                             hparams={"codec.n_codebooks": 3})
+        with pytest.raises(ValueError, match="whole number of frames"):
+            _model(handle).text2codes.infer("hello")
+
+    def test_a_codes_lm_that_declares_no_width_says_so(self):
+        """Absent is an export too old to state it, which is a different thing from a model with no
+        codebooks -- so it is caught rather than defaulted to a guess about the frame width."""
+        handle = _FakeHandle([[1, 2, 3]], contract=_CODES_LM_CONTRACT)
+        with pytest.raises(loom.UnsupportedTask, match="codec.n_codebooks"):
+            _model(handle).text2codes.infer("hello")
+
+    def test_text2codes_takes_text_or_ids_but_not_both(self):
+        handle = _FakeHandle([[1, 2, 3]], contract=_CODES_LM_CONTRACT,
+                             hparams={"codec.n_codebooks": 3})
+        model = _model(handle)
+        with pytest.raises(TypeError):
+            model.text2codes.infer("hello", tokens=[1])
+        with pytest.raises(TypeError):
+            model.text2codes.infer()
 
     def test_a_declared_codec_answers_codes2speech(self):
         """`audio_codes` does NOT fold onto "text" -- ADR-020. A codec declaring `token_ids` would

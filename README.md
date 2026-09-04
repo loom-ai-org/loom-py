@@ -26,6 +26,8 @@ model.text2text.chat("Who discovered Brazil?")           # -> str, asked inside 
 model.speech2text.infer(waveform, language="en")         # -> Transcription
 model.text2speech.infer("hello world")                   # -> Audio
 model.text2class.infer("Wolfgang lives in Berlin")       # -> Classification, a label per token
+model.text2codes.infer("[S1] Hello world.")              # -> codec tokens, frame-major
+model.codes2speech.infer(codes)                          # -> Audio, the other half of that pair
 ```
 
 Which door a model answers is read off the file, not guessed from its name:
@@ -71,6 +73,27 @@ r.labels                      # ['O', 'B-MISC', 'I-MISC', 'B-PER', ...] — ever
 
 The framing tokens the encode added ([CLS]/[SEP]) are dropped for you, on the ids the file declares
 rather than on their spelling; `strip_special=False` keeps them if you want the raw alignment.
+
+**A model that speaks through a codec is two files, and the codes are what joins them.** An
+autoregressive codec LM emits discrete tokens, not audio; a neural codec turns those tokens into a
+waveform. They stay separate because one codec serves many LMs, and because the codes are worth
+having on their own — cache them, stream them, decode them at a different rate:
+
+```python
+codes = dia.text2codes.infer("[S1] Hello world.")   # -> [[568, 778, ...], ...] frame-major rows
+audio = dac.codes2speech.infer(codes)              # -> Audio
+```
+
+Nothing goes between the two calls. Both files declare `loom.codec.n_codebooks`, so a pair that does
+not fit says so instead of producing audio of the wrong duration:
+
+```python
+dia.hparam("codec.n_codebooks", "u32") == dac.hparam("codec.n_codebooks", "u32")
+```
+
+`text2codes` counts `max_new_tokens` in **audio frames**, not decoder rows — the two differ by the
+model's delay pattern, which is an artefact of how codebooks are written rather than anything you
+asked for.
 
 **The low-level API is the driver's own entry point, and stays raw.** `infer` passes your arguments
 straight through, so which ones a model takes is a property of the model rather than of this package:
