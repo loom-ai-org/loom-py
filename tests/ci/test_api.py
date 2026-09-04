@@ -26,15 +26,20 @@ class TestPackage:
             "Tokenizer",
             "Transcription",
             "Segment",
-            # The end-to-end layer. `Audio` and the three implemented interfaces are exported because
-            # a caller annotates against them; the thirteen not-yet-implemented ones are reached as
-            # `model.<name>` and are deliberately not names to import.
+            # The end-to-end layer. The result types and the six implemented interfaces are exported
+            # because a caller annotates against them; the eleven not-yet-implemented ones are reached
+            # as `model.<name>` and are deliberately not names to import.
             "Audio",
+            "Classification",
+            "TokenClass",
             "Interface",
             "UnsupportedTask",
             "Text2Text",
             "Speech2Text",
             "Text2Speech",
+            "Text2Class",
+            "Text2Codes",
+            "Codes2Speech",
             # The G2P frontend: a module rather than a class, because a caller registers into it.
             "phonemizers",
             "LoomError",
@@ -164,7 +169,7 @@ class _FakeHandle:
     GGUF. Only the methods `loom.Model` actually calls are here."""
 
     def __init__(self, returns, vocab="gpt2", eos=-1, contract=None, transcribe_warnings=(),
-                 chat_roles=()):
+                 chat_roles=(), hparams=None):
         self._returns = list(returns)      # what successive infer() calls hand back
         # What the ENGINE reports as ignored -- an argument this file has nothing to select with. The
         # engine returns these instead of printing them (a library has no logger); the Python layer is
@@ -179,7 +184,23 @@ class _FakeHandle:
         self.calls = []                    # every inputs dict infer() was given
         self.langs = []                    # every `lang` encode() was given
         self.generate_calls = []           # every argument set generate() was given
+        self.classify_calls = []           # every argument set classify() was given
         self._contract = dict(contract or {})
+        self._hparams = dict(hparams or {})
+
+    # The binding exposes one reader PER GGUF TYPE (`hparam_u32`/`hparam_f32`/`hparam_str`), because
+    # GGUF's own types are explicit and a key written as u32 and read as f32 is an error the engine
+    # raises. `Model.hparam` picks the reader from its `kind` argument, so a double defining a single
+    # `hparam` is never called at all -- which is how this fake first "passed" by raising the absent-key
+    # error for a key it had been given.
+    def _hparam(self, key):
+        if key not in self._hparams:
+            raise RuntimeError(f"no such hparam: {key}")
+        return self._hparams[key]
+
+    def hparam_u32(self, key): return self._hparam(key)
+    def hparam_f32(self, key): return self._hparam(key)
+    def hparam_str(self, key): return self._hparam(key)
 
     def contract(self):
         """What the file declares. Empty-but-present by default, which is a pre-contract GGUF -- the
@@ -245,6 +266,15 @@ class _FakeHandle:
         return {"segments": [{"start": 0.0, "end": 1.0, "text": "hello", "closed": True}],
                 "text": "hello", "windows": 1, "timestamped": True,
                 "warnings": list(self._transcribe_warnings)}
+
+    # Same reasoning as `transcribe`: the framing-token strip and the label lookup are the ENGINE's
+    # (loom/core/text_classify.h), so what a double can pin is the marshalling either side. It records
+    # what it was handed and returns one entry per token it was given.
+    def classify(self, tokens, strip_special, extra_inputs):
+        self.classify_calls.append({"tokens": list(tokens), "strip_special": strip_special,
+                                    "extra_inputs": dict(extra_inputs)})
+        return [{"token": int(t), "label_id": i % 2, "label": ["O", "B-PER"][i % 2]}
+                for i, t in enumerate(tokens)]
 
 
 class TestTranscribeWarnings:
@@ -489,13 +519,22 @@ _ASR_CONTRACT = {
     "output_kind": "token_ids", "interface": "speech2text", "sample_rate": 16000,
     "clip_samples": 480000, "max_input_tokens": 0, "text_frontend": "vocab",
     "phoneme_alphabet": "", "phonemizer_ruleset": "", "languages": ["en"], "entry_points": ["infer"],
-    "default_steps": 0, "voices": [],
+    "default_steps": 0, "voices": [], "labels": [],
 }
 _TTS_PHONEME_CONTRACT = dict(_ASR_CONTRACT, task="text-to-speech", input_kind="phoneme_ids",
                              output_kind="audio", interface="text2speech", text_frontend="",
                              phoneme_alphabet="ipa", sample_rate=22050, clip_samples=0,
                              default_steps=10)
 _TTS_TEXT_CONTRACT = dict(_TTS_PHONEME_CONTRACT, input_kind="text", text_frontend="vocab")
+_TOKEN_CLASS_CONTRACT = dict(_ASR_CONTRACT, task="token-classification", input_kind="text",
+                             output_kind="class", interface="text2class", sample_rate=0,
+                             clip_samples=0, labels=["O", "B-PER"])
+_CODEC_CONTRACT = dict(_ASR_CONTRACT, task="audio-codec", input_kind="audio_codes",
+                       output_kind="audio", interface="codes2speech", sample_rate=44100,
+                       clip_samples=0, text_frontend="")
+_CODES_LM_CONTRACT = dict(_ASR_CONTRACT, task="text-to-codes", input_kind="text",
+                          output_kind="audio_codes", interface="text2codes", sample_rate=0,
+                          clip_samples=0, text_frontend="vocab")
 
 
 class TestInterfacesAreTheModalityPair:
@@ -531,6 +570,158 @@ class TestInterfacesAreTheModalityPair:
             model.text2text.infer("hello")
         assert "declares no task" in str(excinfo.value)
         assert "model.infer" in str(excinfo.value), "it must point at the door that does work"
+
+    def test_a_declared_classifier_answers_text2class(self):
+        """The first non-audio pair any family declares, and the reason `Text2Class` stopped being a
+        planned interface: nothing here learned an architecture, the file simply said `class`."""
+        model = _model(_FakeHandle([], contract=_TOKEN_CLASS_CONTRACT))
+        assert model.task == "token-classification"
+        assert model.capabilities == ("text2class",)
+        assert not model.text2text.supported
+
+    def test_text2class_encodes_and_labels(self):
+        handle = _FakeHandle([], contract=_TOKEN_CLASS_CONTRACT)
+        result = _model(handle).text2class.infer("hello there")
+        # Encoded through the model's own vocabulary -- the fake returns [10, 11, 12] for any text.
+        assert handle.encode_calls == ["hello there"]
+        assert handle.classify_calls[0]["tokens"] == [10, 11, 12]
+        assert [t.label for t in result] == ["O", "B-PER", "O"]
+        # The label SET travels with the labels, because a caller checking which classes existed
+        # cannot recover it from the ones that happened to be chosen.
+        assert result.labels == ["O", "B-PER"]
+        # And the pieces, which are not recoverable afterwards: a WordPiece encode splits words, so
+        # joining them back into words is a rule this layer has no basis to make for the caller.
+        assert [t.piece for t in result] == ["10", "11", "12"]
+
+    def test_ids_may_be_passed_instead_of_text(self):
+        handle = _FakeHandle([], contract=_TOKEN_CLASS_CONTRACT)
+        _model(handle).text2class.infer(tokens=[5, 6])
+        assert handle.encode_calls == [], "ids must not be re-encoded"
+        assert handle.classify_calls[0]["tokens"] == [5, 6]
+
+    def test_text_and_tokens_are_two_depths_of_one_input_not_two_arguments(self):
+        model = _model(_FakeHandle([], contract=_TOKEN_CLASS_CONTRACT))
+        with pytest.raises(TypeError):
+            model.text2class.infer("hello", tokens=[1])
+        with pytest.raises(TypeError):
+            model.text2class.infer()
+
+    def test_strip_special_reaches_the_engine_as_the_engines_decision(self):
+        """The knob is a switch on a decision the ENGINE makes, so what this layer owes is to pass it
+        through -- and to default it the same way the engine's own default reads."""
+        handle = _FakeHandle([], contract=_TOKEN_CLASS_CONTRACT)
+        model = _model(handle)
+        model.text2class.infer(tokens=[1])
+        model.text2class.infer(tokens=[1], strip_special=False)
+        assert [c["strip_special"] for c in handle.classify_calls] == [True, False]
+
+    def test_a_classifier_with_no_vocabulary_says_so_rather_than_guessing(self):
+        handle = _FakeHandle([], vocab=None, contract=_TOKEN_CLASS_CONTRACT)
+        with pytest.raises(loom.UnsupportedTask, match="embeds no vocabulary"):
+            _model(handle).text2class.infer("hello")
+
+    def test_an_ar_codec_lm_answers_text2codes_and_returns_frames(self):
+        """The first half of the family-10 pair. `audio_codes` as an OUTPUT kind is what makes this a
+        door of its own rather than `text2speech` -- the model produces something a codec turns into
+        audio, and ADR-022 keeps that a second file."""
+        handle = _FakeHandle([[1, 2, 3, 4, 5, 6]], contract=_CODES_LM_CONTRACT,
+                             hparams={"codec.n_codebooks": 3})
+        model = _model(handle)
+        assert model.capabilities == ("text2codes",)
+        assert not model.text2speech.supported
+        # Frame-major rows, which is the layout `Codes2Speech` takes and the one the width can be
+        # checked against on the way in.
+        assert model.text2codes.infer("hello") == [[1, 2, 3], [4, 5, 6]]
+
+    def test_text2codes_output_feeds_codes2speech_unchanged(self):
+        """The composition, spelled as a host writes it: two files, two calls, the array between them.
+
+        This is the assertion ADR-022 costs -- with the codec in a second GGUF, nothing inside either
+        one says the pair fits, so the layouts have to be pinned where they meet. The engine-side
+        version of this against the real checkpoints is loom.cpp's
+        `test_e2e_dia_dac_composition.cpp`."""
+        lm = _FakeHandle([[1, 2, 3, 4, 5, 6]], contract=_CODES_LM_CONTRACT,
+                         hparams={"codec.n_codebooks": 3})
+        codec = _FakeHandle([[0.1, 0.2]], contract=_CODEC_CONTRACT,
+                            hparams={"codec.n_codebooks": 3})
+        codes = _model(lm).text2codes.infer("hello")
+        audio = _model(codec).codes2speech.infer(codes)
+        assert codec.calls[0]["codes"] == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+        assert audio.sample_rate == 44100
+
+    def test_max_new_tokens_reaches_the_driver_only_when_named(self):
+        """It counts AUDIO FRAMES, and the default belongs to the file. A host that always passed one
+        would override a ceiling the export derived from the model's own position budget."""
+        named = _FakeHandle([[1, 2, 3]], contract=_CODES_LM_CONTRACT,
+                            hparams={"codec.n_codebooks": 3})
+        unnamed = _FakeHandle([[1, 2, 3]], contract=_CODES_LM_CONTRACT,
+                              hparams={"codec.n_codebooks": 3})
+        _model(named).text2codes.infer("hello", max_new_tokens=16)
+        _model(unnamed).text2codes.infer("hello")
+        assert named.calls[0]["max_new_tokens"] == 16.0
+        assert "max_new_tokens" not in unnamed.calls[0]
+
+    def test_a_partial_final_frame_is_the_export_disagreeing_with_the_file(self):
+        """Seven codes at three codebooks is not a caller error and must not be silently truncated --
+        it is the driver and the declared width disagreeing, which downstream is audio of the wrong
+        duration and nothing raised."""
+        handle = _FakeHandle([[1, 2, 3, 4, 5, 6, 7]], contract=_CODES_LM_CONTRACT,
+                             hparams={"codec.n_codebooks": 3})
+        with pytest.raises(ValueError, match="whole number of frames"):
+            _model(handle).text2codes.infer("hello")
+
+    def test_a_codes_lm_that_declares_no_width_says_so(self):
+        """Absent is an export too old to state it, which is a different thing from a model with no
+        codebooks -- so it is caught rather than defaulted to a guess about the frame width."""
+        handle = _FakeHandle([[1, 2, 3]], contract=_CODES_LM_CONTRACT)
+        with pytest.raises(loom.UnsupportedTask, match="codec.n_codebooks"):
+            _model(handle).text2codes.infer("hello")
+
+    def test_text2codes_takes_text_or_ids_but_not_both(self):
+        handle = _FakeHandle([[1, 2, 3]], contract=_CODES_LM_CONTRACT,
+                             hparams={"codec.n_codebooks": 3})
+        model = _model(handle)
+        with pytest.raises(TypeError):
+            model.text2codes.infer("hello", tokens=[1])
+        with pytest.raises(TypeError):
+            model.text2codes.infer()
+
+    def test_a_declared_codec_answers_codes2speech(self):
+        """`audio_codes` does NOT fold onto "text" -- ADR-020. A codec declaring `token_ids` would
+        land on `text2speech` and be offered a text door it has no vocabulary for, which is the
+        failure this interface exists to make impossible."""
+        model = _model(_FakeHandle([[0.1, 0.2]], contract=_CODEC_CONTRACT,
+                                    hparams={"codec.n_codebooks": 2}))
+        assert model.task == "audio-codec"
+        assert model.capabilities == ("codes2speech",)
+        assert not model.text2speech.supported
+
+    def test_codes_are_accepted_as_rows_or_flat(self):
+        """Two spellings of one input, because both are what a caller actually holds: a driver that
+        emitted them hands over a flat run, and a person writing them out writes rows."""
+        rows = _FakeHandle([[0.1]], contract=_CODEC_CONTRACT, hparams={"codec.n_codebooks": 2})
+        flat = _FakeHandle([[0.1]], contract=_CODEC_CONTRACT, hparams={"codec.n_codebooks": 2})
+        _model(rows).codes2speech.infer([[1, 2], [3, 4]])
+        _model(flat).codes2speech.infer([1, 2, 3, 4])
+        assert rows.calls[0]["codes"] == flat.calls[0]["codes"] == [1.0, 2.0, 3.0, 4.0]
+
+    def test_a_flat_run_that_is_not_whole_frames_is_refused(self):
+        """Silently reinterpreting it as a different frame count produces audio of the wrong duration
+        and no error anywhere, which is the one failure mode a codec caller cannot see."""
+        handle = _FakeHandle([[0.1]], contract=_CODEC_CONTRACT, hparams={"codec.n_codebooks": 2})
+        with pytest.raises(ValueError, match="whole number of frames"):
+            _model(handle).codes2speech.infer([1, 2, 3])
+
+    def test_a_row_of_the_wrong_width_names_the_rows(self):
+        handle = _FakeHandle([[0.1]], contract=_CODEC_CONTRACT, hparams={"codec.n_codebooks": 2})
+        with pytest.raises(ValueError, match="2 codebooks per frame"):
+            _model(handle).codes2speech.infer([[1, 2], [3, 4, 5]])
+
+    def test_the_declared_rate_travels_with_the_samples(self):
+        handle = _FakeHandle([[0.1, 0.2]], contract=_CODEC_CONTRACT,
+                             hparams={"codec.n_codebooks": 2})
+        audio = _model(handle).codes2speech.infer([[1, 2]])
+        assert audio.sample_rate == 44100, "the file's own rate, not the fallback"
 
     def test_text2text_is_the_same_call_as_generate(self):
         handle = _FakeHandle([[7, 8], [7, 8]],

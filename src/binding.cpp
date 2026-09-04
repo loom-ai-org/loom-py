@@ -20,6 +20,7 @@
 #include "loom/core/model_contract.h"
 #include "loom/core/chat_template.h"
 #include "loom/core/text_generate.h"
+#include "loom/core/text_classify.h"
 #include "loom/core/transcribe.h"
 
 #include <ggml.h>
@@ -174,26 +175,23 @@ public:
         bridge_ = std::make_unique<loom::LoomLuaBridge>(backends);
         names_ = model_->topology_names();
 
-        // A cache is made only if some topology says it wants one, and there are TWO kinds. Attention
-        // blocks want a `KvCache`; a hybrid's ShortConv blocks carry their own history, which the KV
-        // cache does not hold, and want a `ConvStateCache` (BACKLOG.md P4.0.10). LFM2 is the model
-        // that has both, and a binding that made only the first loaded it, tokenized for it, and then
-        // failed inside the driver on the eleventh node.
+        // **`loom::register_topologies`, not a loop here.** A cache is made only if some topology
+        // says it wants one, there are TWO kinds, and one of them now has two SCOPES -- attention
+        // blocks want a `KvCache`, a hybrid's ShortConv blocks want a `ConvStateCache` (BACKLOG.md
+        // P4.0.10), and a module declaring `kv_cache_scope: "private"` wants a KV cache of its own
+        // rather than the shared one, which is what a classifier-free-guidance decode's second
+        // stream is (loom.cpp ADR-023).
         //
-        // Both are sized from the file's own declared geometry, which is why no caller passes a
-        // context length: the model states it, `make_*_cache` reads it.
-        for (const std::string& name : names_) {
-            loom::GraphTopology topo = loom::GraphTopology::parse(model_->topology_json(name));
-            if (topo.uses_kv_cache() && kv_cache_ == nullptr) {
-                kv_cache_ = loom::make_kv_cache(*model_, device_->backends());
-            }
-            if (topo.uses_conv_state() && conv_state_ == nullptr) {
-                conv_state_ = loom::make_conv_state_cache(*model_, device_->backends());
-            }
-            loom::KvCache* kv_for_module = topo.uses_kv_cache() ? kv_cache_.get() : nullptr;
-            loom::ConvStateCache* conv_for_module = topo.uses_conv_state() ? conv_state_.get() : nullptr;
-            bridge_->register_module(name, *model_, std::move(topo), kv_for_module, conv_for_module);
-        }
+        // This used to be that loop, written out, and it is why the engine grew a shared function:
+        // the copy here did not learn the third rule, so a guided generation through this binding
+        // would have run both streams into one cache and returned plausible, wrong tokens. The
+        // engine's `Session` cannot simply be used instead -- it requires a driver script, and this
+        // binding deliberately loads a GGUF without one -- so the part that decides correctness is
+        // shared and the part that differs is not.
+        //
+        // Every cache is sized from the file's own declared geometry, which is why no caller passes
+        // a context length: the model states it, `make_*_cache` reads it.
+        caches_ = loom::register_topologies(*model_, device_->backends(), *bridge_);
 
         // Guarded, not bare: `kv_str` THROWS on a missing key, so an unconditional read here made a
         // GGUF without a driver fail to construct at all -- even though `has_driver()` below is written
@@ -254,6 +252,7 @@ public:
         out["entry_points"] = c.entry_points;
         out["default_steps"] = c.default_steps;
         out["voices"] = c.voices;
+        out["labels"] = c.labels;
         return out;
     }
 
@@ -329,6 +328,36 @@ public:
     // `inputs` is {name: float | sequence[float]}, which is exactly the bridge's own Value variant --
     // a driver's world is numbers and arrays of numbers, and nothing here needs to know that one
     // model's array is a waveform and another's is a run of token ids.
+    // TOKEN CLASSIFICATION, the engine's `loom::text::classify` (see loom/core/text_classify.h). Thin
+    // for the same reason `transcribe` is not: what the engine owns here is the one POLICY decision --
+    // whether the framing tokens the encode added come back labelled -- and this side owns only the
+    // marshalling. Returned as a list of dicts, matching `transcribe`'s segments, so the token id
+    // travels with its label and a caller can detokenize a labelled span without re-encoding.
+    py::object classify(const std::vector<int32_t>& tokens, bool strip_special,
+                        const py::dict& extra_inputs) {
+        if (driver_.empty()) {
+            throw std::runtime_error(
+                "this GGUF carries no driver script, so there is nothing to classify.");
+        }
+        loom::text::ClassifyOptions opts;
+        opts.strip_special = strip_special;
+        for (auto item : extra_inputs) {
+            const std::string name = item.first.cast<std::string>();
+            opts.extra_inputs.emplace(name, to_value(name, item.second));
+        }
+        const std::vector<loom::text::TokenLabel> labelled =
+            loom::text::classify(*bridge_, *model_, tokens, opts);
+        py::list out;
+        for (const loom::text::TokenLabel& entry : labelled) {
+            py::dict d;
+            d["token"] = entry.token;
+            d["label_id"] = entry.label_id;
+            d["label"] = entry.label;
+            out.append(d);
+        }
+        return out;
+    }
+
     // TRANSCRIPTION, which is the engine's `loom::audio::transcribe` and nothing else (see
     // loom/core/transcribe.h). An earlier draft of this method reimplemented the windowing here and
     // accepted that Python would transcribe long audio worse than the CLI, because the timestamp-aware
@@ -407,8 +436,10 @@ private:
     // has no default constructor and this member is initialized in the constructor's body order.
     std::unique_ptr<loom::Device> device_;
     std::unique_ptr<loom::GgufModel> model_;
-    std::unique_ptr<loom::KvCache> kv_cache_;
-    std::unique_ptr<loom::ConvStateCache> conv_state_;
+    // Declared before `bridge_`: the bridge holds non-owning pointers into these for its whole life,
+    // so they must be destroyed after it. `loom::ModuleCaches` is one object rather than three so
+    // that ordering is a single thing to get right -- see its declaration in session.h.
+    loom::ModuleCaches caches_;
     std::unique_ptr<loom::LoomLuaBridge> bridge_;
     std::unique_ptr<Tokenizer> tokenizer_;
     // Null for a base model, and for any GGUF exported before P4.23. Absence is the honest answer
@@ -522,6 +553,8 @@ PYBIND11_MODULE(_loom, m) {
         .def("decode", &Model::decode, py::arg("ids"))
         .def("call", &Model::call, py::arg("fn_name"), py::arg("inputs"))
         .def("transcribe", &Model::transcribe, py::arg("waveform"), py::arg("options"))
+        .def("classify", &Model::classify, py::arg("tokens"), py::arg("strip_special"),
+             py::arg("extra_inputs"))
         .def("contract", &Model::contract)
         .def("has_chat_template", &Model::has_chat_template)
         .def("chat_roles", &Model::chat_roles)
