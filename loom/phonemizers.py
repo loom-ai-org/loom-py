@@ -26,6 +26,7 @@ being how phonemization is provided and remains how a caller substitutes their o
 from __future__ import annotations
 
 import os
+import warnings
 from typing import Callable, Dict, Optional
 
 #: `{alphabet: callable(text, language) -> str}`. Keyed by alphabet rather than by package, because what
@@ -34,8 +35,8 @@ from typing import Callable, Dict, Optional
 _PROVIDERS: Dict[str, Callable[[str, str], str]] = {}
 
 #: `{language: source}` handed to `orthography2ipa.register_lexicon`, newest wins. Kept here rather than
-#: passed per call because registration is process-global and lazily resolved in that library: it fetches
-#: and caches on the first transcription for a code, so naming a source once is the whole interaction.
+#: passed per call because registration is process-global in that library and the parsed lexicon is
+#: cached there for the process, so naming a source once is the whole interaction.
 _LEXICONS: Dict[str, str] = {}
 
 
@@ -53,8 +54,9 @@ def set_lexicon(source: Optional[str | os.PathLike] = None, *, language: str = "
     """Point the default provider at a pronunciation lexicon for `language`, or `None` to clear one.
 
     `source` is a `word<TAB>ipa` TSV -- a local path, an `http(s)://` URL, or a Hugging Face
-    `hf://<repo>/<path>` id, all three resolved by orthography2ipa itself, lazily, on the first
-    transcription for that language.
+    `hf://<repo>/<path>` id, all three resolved by orthography2ipa itself. It is read here rather than
+    on the first transcription for that language, so that a file which yields nothing is reported at
+    the line that named it -- see WHY IT IS VERIFIED HERE below.
 
     **WHY THIS EXISTS.** orthography2ipa transduces by RULE, and English is one of the deep-orthography
     languages its own documentation names as unreachable that way -- "time" comes out `tɪm` rather than
@@ -72,8 +74,21 @@ def set_lexicon(source: Optional[str | os.PathLike] = None, *, language: str = "
     wrong -- the lexicon simply never loads -- which is why this does the resolution rather than passing
     the caller's string through.
 
+    **WHY IT IS VERIFIED HERE.** The parse skips, without complaint, every line that is not exactly
+    `word<TAB>ipa` -- so a file of the wrong SHAPE loads as an empty overlay, and an empty overlay is
+    byte-identical to no overlay at all: registration succeeds, transcription falls back to the rules,
+    and the audio comes back unstressed with nothing anywhere saying why. That is not hypothetical.
+    Running the documented `sed` over the GitHub *blob* page for ipa-dict instead of the raw file
+    yields 700 lines of HTML, zero of them entries, and the only symptom is that `set_lexicon` appears
+    not to be taken into account. So the lexicon is loaded now and a zero-entry one warns. The parse is
+    not extra work, only earlier -- orthography2ipa caches it, and the first transcription would have
+    paid for it anyway; what does move is the network fetch behind a URL or an `hf://` id.
+
     Raises `LookupError` when orthography2ipa is not installed, because a lexicon set on a provider that
-    does not exist would otherwise be accepted and never applied.
+    does not exist would otherwise be accepted and never applied. A source that cannot be READ raises
+    whatever reading it raises -- `FileNotFoundError` for a path that is not there, a fetch error for a
+    URL or an `hf://` id. Those were always raised; verifying here moves them off the first synthesis
+    call and onto the line holding the wrong path.
     """
     try:
         import orthography2ipa
@@ -90,6 +105,14 @@ def set_lexicon(source: Optional[str | os.PathLike] = None, *, language: str = "
         return
     _LEXICONS[code] = str(source)
     orthography2ipa.register_lexicon(code, str(source))
+    if not orthography2ipa.get_lexicon(code):
+        warnings.warn(
+            f"the lexicon at {source} holds no entries, so it will change nothing -- an empty overlay "
+            f"behaves exactly like no lexicon at all. Every line must be `word<TAB>ipa`; anything else "
+            f"is skipped without complaint, so a file of the wrong shape parses to nothing. "
+            f"`orthography2ipa.validate_lexicon_text(text)` names the lines it rejected.",
+            RuntimeWarning, stacklevel=2,
+        )
 
 
 def lexicons() -> Dict[str, str]:
