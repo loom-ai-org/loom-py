@@ -279,6 +279,7 @@ CPython 3.10–3.13, on:
 | Linux aarch64, glibc ≥ 2.28 | `manylinux_2_28_aarch64` | **Raspberry Pi 4 and 5 on 64-bit Raspberry Pi OS**, Jetson/Grace, Graviton, Ampere |
 | macOS on Apple Silicon, ≥ 14.0 | `macosx_14_0_arm64` | M1 through M4, verified on an M1 Pro |
 | macOS on Apple Intel, ≥ 14.0 | `macosx_14_0_x86_64` | built and imported in CI — see below |
+| Linux ARMv6, glibc ≥ 2.36 | `linux_armv6l` | **Raspberry Pi Zero / Zero W / Pi 1** — a release asset, not a PyPI install; see below |
 
 There is no per-CPU choice to make. The wheel ships every `libggml-cpu-*.so` variant ggml builds for
 the architecture and picks one at import by scoring each against the CPU's own feature flags, so the
@@ -306,10 +307,34 @@ whisper-small is **1.76x faster** on Metal and VITS is **1.79x slower** — so w
 depends on the model, and asking for the package is how you opt into that trade. `loom.devices()`
 shows what you got.
 
-**Raspberry Pi.** A 64-bit OS is the requirement, and the only one: `uname -m` must say `aarch64`. On
-32-bit Raspberry Pi OS pip reports `armv7l`, matches no wheel, and falls back to building the sdist,
-which does not work — the build enables `GGML_CPU_ALL_VARIANTS`, whose Linux-ARM variant list is
-AArch64-only. 32-bit is not a slower configuration here, it is an unsupported one.
+**Raspberry Pi.** Every model in the range is covered, by one of two different routes, and which one
+you are on is `uname -m`.
+
+`aarch64` — a Pi 3, 4, 5 or Zero 2 W on **64-bit** Raspberry Pi OS — is a plain
+`pip install loom-py-rt` and needs nothing else. This is the route to prefer wherever the board can
+take it: a Zero 2 W is ARMv8 hardware, and running it on the 32-bit image gives up NEON and every
+`__aarch64__` optimisation in the engine for nothing.
+
+`armv6l` — a **Pi Zero, Zero W or Pi 1** — has a wheel too, and it is *not* on PyPI:
+
+```sh
+pip install https://github.com/loom-ai-org/loom-py/releases/latest/download/loom_py_rt-1.0.0rc8-cp311-cp311-linux_armv6l.whl
+```
+
+PyPI accepts only `manylinux*` and `musllinux*` platform tags for Linux and the manylinux policy's
+floor is armv7, so `linux_armv6l` is refused at upload — there is nothing to fix and no index to wait
+for. The wheel is a GitHub release asset instead, built on every release in an emulated Raspbian
+(`.github/docker/Dockerfile.armv6`) and checked under `QEMU_CPU=arm1176`, which is the Zero's own
+core. Verified on a real Pi Zero W, not only under emulation.
+
+**It is slow, and the Pi 4 numbers on this page do not transfer.** An ARM1176 is one ~1 GHz core with
+VFPv2 and no SIMD at all, so this rung runs the generic-C kernels: nothing in `libggml-cpu.so` here is
+vectorised, because there is nothing to vectorise with. The 512 MB of RAM is the harder limit — a
+small TTS model at Q4_0 is the shape that fits; the 0.6B ASR and LM models are not.
+
+`armv7l` — a Pi 2/3/4 on **32-bit** Raspberry Pi OS — builds by the same path but has no published
+wheel and no board here to verify one on, so pip finds nothing and falls back to an sdist build.
+Install the 64-bit OS instead; the hardware is ARMv8 either way.
 
 Which variant a board loads, verified under QEMU on every release by `raspberry-pi-check` in
 `.github/workflows/wheels.yml`:

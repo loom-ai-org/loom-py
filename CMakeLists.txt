@@ -63,8 +63,31 @@ set(LOOM_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
 # for the same reason -- a wheel must not be tuned to whatever machine built it.
 set(BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
 set(GGML_BACKEND_DL ON CACHE BOOL "" FORCE)
-set(GGML_CPU_ALL_VARIANTS ON CACHE BOOL "" FORCE)
 set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
+
+# ALL_VARIANTS IS A 64-BIT-ONLY FEATURE, and on a 32-bit target this is a hard configure failure
+# rather than a wheel tuned too high (P7, Epic-08 SS6). ggml's ladders are written per
+# GGML_SYSTEM_ARCH, and `armv6l`/`armv7l` resolve to the same "ARM" arch as `aarch64` -- so a 32-bit
+# build walks into the aarch64 rungs and emits `-march=armv8-a`, `-march=armv8.2-a+dotprod`, ... at a
+# compiler that has no such architecture. It does not build one library too many; it builds none.
+#
+# So a 32-bit wheel is ONE un-split `libggml-cpu.so`, and nothing is lost by it: the eight ARM rungs
+# exist to choose between dotprod/FP16/SVE/i8mm, none of which exists below ARMv8, and with
+# GGML_NATIVE off the single library is compiled at the COMPILER'S OWN default -march. That default
+# is the one number that must be right, and on the target's own userland it is: Raspbian's gcc
+# defaults to `-march=armv6 -mfpu=vfp -mfloat-abi=hard`, which is a Pi Zero exactly, and Debian
+# armhf's to armv7-a+neon. Build the wheel in a container of the userland it is for -- which is what
+# the tag on the file already claims -- and .github/docker/Dockerfile.armv6 is that container.
+#
+# `CMAKE_SIZEOF_VOID_P` rather than a processor-name match because the question really is pointer
+# width: it is what separates every ISA ggml has a variant ladder for from every one it does not,
+# and it needs no list to maintain.
+if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+    set(GGML_CPU_ALL_VARIANTS ON CACHE BOOL "" FORCE)
+else()
+    set(GGML_CPU_ALL_VARIANTS OFF CACHE BOOL "" FORCE)
+    message(STATUS "32-bit target (${CMAKE_SYSTEM_PROCESSOR}): one libggml-cpu.so, no variant ladder")
+endif()
 
 # METAL OFF, AND ONLY ON THE BASE WHEEL -- it ships in `loom-py-rt-metal` instead (P4.11). This line
 # is required rather than tidy: ggml defaults `GGML_METAL` to ON whenever APPLE, so without it a
