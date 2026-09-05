@@ -304,6 +304,95 @@ jobs:
               python /check.py
             '
 
+  # THE RUNG WITH NO RUNNER AND NO WHEEL TAG (P7): Raspberry Pi Zero / Zero W / Pi 1, ARMv6 + VFP.
+  # Everything above this job is a PyPI wheel built on a machine of its own architecture. This one is
+  # neither of those things, and both departures are forced rather than preferred.
+  #
+  # NO RUNNER, EVER. No provider offers a 32-bit ARM machine; the newest part that would need one
+  # shipped in 2016. `build-wheels` rejects QEMU for building and is right to -- for aarch64, where a
+  # native runner exists and the emulated alternative is an overnight CUDA compile. Here emulation is
+  # not the slower of two options, it is the only one, and what it has to emulate is the small end of
+  # this repo: one un-split `libggml-cpu.so`, no accelerator, no variant ladder. Measured on a 4-core
+  # dev box, a cold build (ggml + LuaJIT + the engine + the binding) is ~50 minutes.
+  #
+  # NO PyPI TAG. PyPI accepts only `manylinux*` and `musllinux*` platform tags for Linux, and no
+  # manylinux profile reaches below armv7 -- `linux_armv6l` is rejected at upload. So this wheel is a
+  # RELEASE ASSET, installed by URL, and it must never reach `publish-pypi`, which globs
+  # `wheels-base-*` into one directory and uploads it. THAT is why the artifact below is named
+  # `wheel-armv6l`: one file with a tag PyPI refuses fails the whole `loom-py-rt` upload, including
+  # the wheels that were fine.
+  #
+  # RASPBIAN AND NOT DEBIAN, which is the difference between a wheel that runs on the board and one
+  # that dies on its first instruction -- .github/docker/Dockerfile.armv6 gives the three reasons.
+  #
+  # NOT A RELEASE GATE, unlike `raspberry-pi-check`. That one runs in seconds and gates a wheel this
+  # project publishes; this one takes the better part of an hour and produces an artifact PyPI never
+  # sees, so a failure here should not hold back the aarch64 and x86_64 release. It still runs on
+  # every release, and its result is visible.
+  build-armv6-wheel:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.only == 'all' || inputs.only == 'base' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: write   # `gh release upload` below; the default token is read-only for releases
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: docker/setup-qemu-action@v3
+
+      # Built here rather than pulled: it is two apt layers and a venv over a public base image, and
+      # a registry copy would be one more thing to keep in step with the Dockerfile.
+      - name: Build the ARMv6 image
+        run: |
+          docker build --platform linux/arm/v6 -t loom-armv6:bookworm \
+            -f .github/docker/Dockerfile.armv6 .github/docker
+
+      - name: Build the wheel
+        run: |
+          docker run --rm --platform linux/arm/v6 -v "$PWD:/src" -w /src loom-armv6:bookworm \
+            /opt/wheel/bin/python -m build --wheel --no-isolation -o wheelhouse
+          ls -l wheelhouse
+
+      # `QEMU_CPU=arm1176` IS THE ACTUAL GATE, and without it this step proves much less than it
+      # looks like it does. qemu-user picks a permissive CPU model unless told otherwise, so a wheel
+      # compiled for ARMv7 -- which is what any Debian armhf toolchain produces -- imports and runs
+      # perfectly under emulation and then takes SIGILL on the real board. Verified rather than
+      # assumed: a program containing one `movw`/`movt` pair (ARMv6T2, which an ARM1176 is not)
+      # prints its answer under `QEMU_CPU=cortex-a15` and dies with "Illegal instruction" under
+      # `QEMU_CPU=arm1176`. This names the Pi Zero's own core, so anything above ARMv6 that the
+      # toolchain, libgcc or ggml smuggled in fails here instead of at a user.
+      - name: Install and run it on an ARM1176
+        run: |
+          docker run --rm --platform linux/arm/v6 -e QEMU_CPU=arm1176 \
+            -v "$PWD:/src:ro" loom-armv6:bookworm \
+            bash -euo pipefail -c '
+              # --system-site-packages: pytest, numpy and gguf are in the image (apt, and one
+              # --no-deps pip) because PyPI has no armv6l wheel for any of them. The venv exists
+              # only to hold the wheel under test.
+              python3 -m venv --system-site-packages /tmp/v
+              /tmp/v/bin/pip install --quiet --no-index --find-links /src/wheelhouse loom-py-rt
+              cd /tmp   # a neutral cwd, so the installed package is what gets imported
+              /tmp/v/bin/python -c "import loom; print(loom.__version__, loom.devices())"
+              /tmp/v/bin/python -m pytest /src/tests/ci -q
+            '
+
+      # NOT `wheels-base-*`. See the header: that pattern is what publish-pypi downloads.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-armv6l
+          path: wheelhouse/*.whl
+
+      # The only distribution channel this wheel has. `--clobber` so a re-run of a partly-failed
+      # release replaces the asset rather than failing on it, which is `skip-existing`'s job on the
+      # PyPI side.
+      - name: Attach it to the release
+        if: ${{ github.event_name == 'release' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" wheelhouse/*.whl --clobber
+
   # THE ONE CHECK A HOSTED RUNNER CANNOT DO. Building CUDA needs no GPU, so everything above runs on
   # hosted runners; running a model needs one. This job is why the workstation is registered as a
   # self-hosted runner, and it is not ceremony -- a soname mismatch between the base wheel and a
