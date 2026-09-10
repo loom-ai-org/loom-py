@@ -104,21 +104,29 @@ def test_a_baseline_cpu_variant_is_shipped():
     package is not slow on an older machine, it is empty on one -- `loom.devices()` returns nothing
     and every `device=` spec fails.
     """
-    machine = platform.machine()
-    baseline = BASELINE_VARIANT.get(machine)
-    if baseline is None:
-        pytest.skip(f"no baseline recorded for {machine!r}; add one when this arch is built for")
-
     variants = shipped_variants()
     if not variants:
-        # A single-variant build (`GGML_CPU_ALL_VARIANTS` off) ships `libggml-cpu.so` with no suffix
-        # and is tuned to whatever configured it. Legitimate for a local build; this project's
-        # CMakeLists forces all-variants on, so a wheel never takes this path.
+        # A SINGLE-VARIANT BUILD, WHICH IS A SHIPPED SHAPE AND NOT ONLY A LOCAL ONE. With
+        # `GGML_CPU_ALL_VARIANTS` off ggml emits `libggml-cpu.so` with no suffix, compiled at the
+        # compiler's own default `-march`. That is every 32-bit build: ggml's variant ladders are
+        # per-arch and its ARM one is aarch64-only, so `armv6l`/`armv7l` cannot walk it at all
+        # (CMakeLists.txt gates the FORCE on pointer width -- P7, Epic-08 SS6).
+        #
+        # THE ASSERTION BELOW IS THE WHOLE OF THIS TEST ON THOSE WHEELS, so it runs BEFORE the
+        # baseline lookup rather than after it. It used to sit downstream of a
+        # `pytest.skip("no baseline recorded for ...")`, which meant an architecture absent from
+        # BASELINE_VARIANT -- exactly the 32-bit ones -- skipped out before anything was checked and
+        # a wheel with no CPU backend in it at all would have passed.
         assert (PACKAGE_DIR / "libggml-cpu.so").exists(), (
             f"no CPU backend library at all in {PACKAGE_DIR} -- with GGML_BACKEND_DL that is a "
             "package with no devices, not one without an accelerator"
         )
         pytest.skip("single-variant build: nothing to choose between")
+
+    machine = platform.machine()
+    baseline = BASELINE_VARIANT.get(machine)
+    if baseline is None:
+        pytest.skip(f"no baseline recorded for {machine!r}; add one when this arch is built for")
 
     assert baseline in variants, (
         f"{baseline} is missing from {PACKAGE_DIR}, so this wheel silently requires whatever the "

@@ -94,7 +94,14 @@ markers = [
 
 [tool.cibuildwheel]
 # CPython only, matching requires-python -- no PyPy (an untested build target for a pybind11 extension
-# this small a user base doesn't need yet) and no 32-bit (irrelevant for the models this ships).
+# this small a user base doesn't need yet).
+#
+# THE 32-BIT WHEEL IS NOT ABSENT, IT IS NOT CIBUILDWHEEL'S. `linux_armv6l` (Raspberry Pi Zero / Zero W
+# / Pi 1) is built and shipped as of P7 -- by `build-armv6-wheel` in .github/workflows/wheels.yml,
+# natively inside an emulated Raspbian, and attached to the GitHub release rather than uploaded here.
+# cibuildwheel is the wrong tool for it twice over: it builds manylinux images, and there is no
+# manylinux profile below armv7; and PyPI refuses the tag at upload, so there would be nowhere to put
+# the result. See Epic-08 SS6 and ADR-025. `*_i686` below is a genuine skip -- nobody has asked.
 build = "cp310-* cp311-* cp312-* cp313-*"
 # musllinux skipped for now: LuaJIT's Makefile build (cmake/Dependencies.cmake in the vendored engine)
 # is untested against musl's libc, and nothing here has verified it works. Lift this once someone has.
