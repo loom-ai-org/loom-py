@@ -340,7 +340,7 @@ take it: a Zero 2 W is ARMv8 hardware, and running it on the 32-bit image gives 
 `armv6l` — a **Pi Zero, Zero W or Pi 1** — has a wheel too, and it is *not* on PyPI:
 
 ```sh
-pip install https://github.com/loom-ai-org/loom-py/releases/latest/download/loom_py_rt-1.0.0rc8-cp311-cp311-linux_armv6l.whl
+pip install https://github.com/loom-ai-org/loom-py/releases/latest/download/loom_py_rt-1.0.0rc9-cp311-cp311-linux_armv6l.whl
 ```
 
 PyPI accepts only `manylinux*` and `musllinux*` platform tags for Linux and the manylinux policy's
