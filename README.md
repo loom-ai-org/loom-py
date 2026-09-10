@@ -193,7 +193,7 @@ print(model.driver_source)  # what infer() will run, and what it accepts
 
 ## Supported models
 
-Twenty, published at [huggingface.co/loom-ai-org](https://huggingface.co/loom-ai-org) and loadable
+Twenty-two, published at [huggingface.co/loom-ai-org](https://huggingface.co/loom-ai-org) and loadable
 by id with `from_pretrained` (needs the `[hub]` extra). This package has no per-architecture code, so
 the list is a property of [loom-exporter](https://github.com/loom-ai-org/loom-exporter), not of
 anything here.
@@ -222,6 +222,18 @@ a system message into the first user turn rather than emitting a block for it.
 Decoding follows the checkpoint's own `generation_config.json` — Gemma 3 ships `top_k 64, top_p 0.95`
 and is sampled; everything else here is greedy. Name `temperature`, `top_k`, `top_p` or `seed` to
 override it.
+
+### Text to text, through an encoder-decoder
+
+| Model | Exported from |
+|---|---|
+| [`loom-ai-org/flan-t5-small-loom`](https://huggingface.co/loom-ai-org/flan-t5-small-loom) | [`google/flan-t5-small`](https://huggingface.co/google/flan-t5-small) |
+
+The same `model.text2text.infer(...)` door as the models above — a host asking for text and getting
+text back should not have to know whether one stack or two produced it — but the advice about `chat`
+does not apply. This one is instruction-tuned and carries no chat template: the instruction is part of
+the text, as in `"translate English to German: ..."` or `"Answer the following question. ..."`.
+`model.chat_roles` is empty, which is the file saying so.
 
 ### Speech recognition
 
@@ -258,10 +270,17 @@ without it. Kokoro and Supertonic ship a default voice, so a published file spea
 | Model | Exported from |
 |---|---|
 | [`loom-ai-org/distilbert-ner-loom`](https://huggingface.co/loom-ai-org/distilbert-ner-loom) | [`dslim/distilbert-NER`](https://huggingface.co/dslim/distilbert-NER) |
+| [`loom-ai-org/punctuate-all-loom`](https://huggingface.co/loom-ai-org/punctuate-all-loom) | [`kredor/punctuate-all`](https://huggingface.co/kredor/punctuate-all) |
 
 `model.text2class.infer("My name is Wolfgang and I live in Berlin")` — one label per token, and the
 labels come back beside the PIECES the tokenizer produced rather than beside your words, since a
 vocabulary splits some of them. `result.labels` is every class the checkpoint can choose between.
+
+Both answer through that one door and what differs is entirely what a label MEANS. The NER row's
+classes are entity tags, so the labels are read as SPANS (`B-PER I-PER` is one person). The
+punctuation row's are the mark that follows the token across twelve languages, so they are read back
+into a SENTENCE — feed it text with the punctuation already removed, and take each word's mark from
+its LAST piece.
 
 ### Text to codec tokens, and the codec that decodes them
 
