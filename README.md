@@ -193,7 +193,7 @@ print(model.driver_source)  # what infer() will run, and what it accepts
 
 ## Supported models
 
-Seventeen, published at [huggingface.co/loom-ai-org](https://huggingface.co/loom-ai-org) and loadable
+Twenty, published at [huggingface.co/loom-ai-org](https://huggingface.co/loom-ai-org) and loadable
 by id with `from_pretrained` (needs the `[hub]` extra). This package has no per-architecture code, so
 the list is a property of [loom-exporter](https://github.com/loom-ai-org/loom-exporter), not of
 anything here.
@@ -252,6 +252,28 @@ All five take text through `model.text2speech.infer(...)`; the four phoneme-inpu
 `[phonemes]` extra for the G2P step (see above), and every one of them accepts `phonemes=` or `tokens=`
 without it. Kokoro and Supertonic ship a default voice, so a published file speaks on its own.
 `model.driver_source` is the authority on what each driver accepts.
+
+### Token classification
+
+| Model | Exported from |
+|---|---|
+| [`loom-ai-org/distilbert-ner-loom`](https://huggingface.co/loom-ai-org/distilbert-ner-loom) | [`dslim/distilbert-NER`](https://huggingface.co/dslim/distilbert-NER) |
+
+`model.text2class.infer("My name is Wolfgang and I live in Berlin")` — one label per token, and the
+labels come back beside the PIECES the tokenizer produced rather than beside your words, since a
+vocabulary splits some of them. `result.labels` is every class the checkpoint can choose between.
+
+### Text to codec tokens, and the codec that decodes them
+
+| Model | Exported from |
+|---|---|
+| [`loom-ai-org/dia-1.6b-loom`](https://huggingface.co/loom-ai-org/dia-1.6b-loom) | [`nari-labs/Dia-1.6B-0626`](https://huggingface.co/nari-labs/Dia-1.6B-0626) |
+| [`loom-ai-org/dac-44khz-loom`](https://huggingface.co/loom-ai-org/dac-44khz-loom) | [`descript/dac_44khz`](https://huggingface.co/descript/dac_44khz) |
+
+These two **compose**, and that is the point of the pair: `model.text2codes.infer(...)` turns a
+sentence into codec tokens, and `model.codes2speech.infer(...)` on the codec file turns those into a
+waveform. Neither is a speech model on its own — the first emits integers and the second takes them —
+which is why they declare `audio_codes` rather than `audio` on the side where they meet.
 
 ## The three repos
 

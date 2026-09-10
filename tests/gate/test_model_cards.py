@@ -86,6 +86,16 @@ TTS_WORDS = "hello world"
 # runs into spans asks the question a user actually has: did it find the right entities.
 CLASSIFY_ENTITIES = {("wolfgang", "PER"), ("berlin", "LOC")}
 
+# The same device for the other reading of family 12's door. A punctuation checkpoint's classes are
+# MARKS rather than span tags, so there are no spans to reconstruct and the question is simply whether
+# the right marks landed on the right words: `berlin.` ends a sentence and `it?` ends a question. Its
+# card labels the SAME sentence the NER card does, which is what makes these two constants comparable.
+#
+# THE PIECE, NOT THE WORD, and deliberately: a SentencePiece vocabulary splits `wolfgang` into three
+# and the mark belongs to a word's LAST piece, so a word-final piece is exactly what a mark attaches
+# to. Reconstructing words here would be re-implementing the loop the card publishes.
+CLASSIFY_MARKS = {("berlin", "."), ("it", "?")}
+
 # The model that reads TTS output back. Whisper rather than a NeMo model because it is the one every
 # card set already depends on for the ASR examples, and because its own card is checked here too --
 # a broken oracle would fail its own row first, which is the ordering you want.
@@ -444,6 +454,17 @@ def card_sentence(readme: Path) -> str:
     return re.sub(r"\[S\d\]", " ", match.group(1)).strip()
 
 
+def labels_are_spans(labels) -> bool:
+    """Whether this checkpoint's classes are IOB2 SPAN tags rather than per-token marks.
+
+    Read off the label set THE FILE DECLARES, which is the only authority for it -- both kinds of model
+    reach `text2class` through one door and return the identical shape, and the difference is entirely
+    what a label MEANS. A gate keyed on the model's name instead would have to be edited for every new
+    checkpoint; this one asks each file the question directly.
+    """
+    return any(str(label).startswith(("B-", "I-")) for label in labels)
+
+
 def entity_spans(result):
     """`{(text, type)}` from a per-token BIO labelling, pieces glued back into words.
 
@@ -481,7 +502,13 @@ def entity_spans(result):
 @pytest.mark.gate
 @pytest.mark.parametrize("name", NAMES)
 def test_token_classification_finds_the_entities(name, jfk, tmp_path, monkeypatch):
-    """A token classifier labels its own card's sentence with the entities that are in it.
+    """A token classifier labels its own card's sentence with what is actually in it.
+
+    TWO READINGS OF ONE DOOR, and which one applies is read off the file's own label set rather than
+    off its name (`labels_are_spans`): a CoNLL head returns IOB2 spans and a punctuation head returns
+    the mark that follows each token. Both come back through `text2class` in the identical shape, so a
+    single expectation could only serve one of them -- and the family's third checkpoint (P5,
+    2026-09-04) is the second kind.
 
     The *is it right* question for this family, and it needs its own answer for the reason the TTS row
     needed one: "the block ran" is satisfied by a model that returns `O` for every token, which is
@@ -516,13 +543,25 @@ def test_token_classification_finds_the_entities(name, jfk, tmp_path, monkeypatc
         f"{[(t.piece, t.label_id) for t in result if not t.label][:5]}"
     )
 
-    found = entity_spans(result)
-    assert found >= CLASSIFY_ENTITIES, (
-        f"{name} did not find the entities in its own card's sentence.\n"
-        f"  expected at least: {sorted(CLASSIFY_ENTITIES)}\n"
-        f"  found:             {sorted(found)}\n"
-        f"  labelling:         {[(t.piece, t.label) for t in result]}"
-    )
+    if labels_are_spans(result.labels):
+        found = entity_spans(result)
+        assert found >= CLASSIFY_ENTITIES, (
+            f"{name} did not find the entities in its own card's sentence.\n"
+            f"  expected at least: {sorted(CLASSIFY_ENTITIES)}\n"
+            f"  found:             {sorted(found)}\n"
+            f"  labelling:         {[(t.piece, t.label) for t in result]}"
+        )
+    else:
+        # A punctuation checkpoint. Same question -- did it get the sentence right -- against the
+        # constant that means it here, and an all-`0` labelling (what a broken export produces) fails
+        # this exactly as an all-`O` one fails the arm above.
+        marked = {(t.piece.lower(), t.label) for t in result if t.label and t.label != "0"}
+        assert marked >= CLASSIFY_MARKS, (
+            f"{name} did not punctuate its own card's sentence.\n"
+            f"  expected at least: {sorted(CLASSIFY_MARKS)}\n"
+            f"  marked:            {sorted(marked)}\n"
+            f"  labelling:         {[(t.piece, t.label) for t in result]}"
+        )
 
 
 @pytest.mark.gate
