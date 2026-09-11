@@ -635,6 +635,44 @@ def test_declared_greedy_decoding_is_reproducible(name):
     assert first == second, f"{name} declares greedy decoding but gave two answers:\n  {first!r}\n  {second!r}"
 
 
+@pytest.mark.gate
+@pytest.mark.parametrize("name", NAMES)
+def test_a_codec_that_draws_its_own_noise_still_answers_the_same_twice(name):
+    """A stochastic decoder must be reproducible by default, and must still be stochastic on request.
+
+    SNAC's decoder is the first graph here with a random leaf: its driver draws the noise per call
+    through `loom.gaussian_array`, which is a fresh waveform every call unless the stream is seeded.
+    It IS seeded -- `inputs.seed`, defaulting to a fixed value -- and that default is what lets every
+    other row in this file compare two runs of a codec at all. A build that dropped the seeding would
+    fail nothing else here: the audio stays correct, the length stays right, and only a comparison
+    between two calls can see it.
+
+    The second half matters as much as the first. A file that answered the same twice because the
+    noise was ignored -- the shape this export shipped with once, and had to reverse -- passes the
+    determinism check perfectly.
+    """
+    _cards_dir()
+    gguf, _ = _entry(name)
+    if loom.contract_of(gguf).get("interface") != "codes2speech":
+        pytest.skip(f"{name} is not codes2speech")
+    model = loom.Model.from_file(str(gguf))
+    width = model.hparam("codec.n_codebooks", "u32")
+    frames = round(float(model.hparam("codec.frame_rate", "f32")))
+    codes = [[(i * width + k) % 512 for k in range(width)] for i in range(frames)]
+
+    first = model.codes2speech.infer(codes).samples
+    second = model.codes2speech.infer(codes).samples
+    assert list(first) == list(second), (
+        f"{name} gave two different waveforms for one input -- an unseeded draw somewhere in its "
+        f"driver, which makes every other comparison in this file meaningless"
+    )
+    seeded = model.codes2speech.infer(codes, seed=99).samples
+    if list(seeded) == list(first):
+        pytest.skip(f"{name} has no stochastic leaf -- `seed` changes nothing, which is correct for a "
+                    f"deterministic codec like DAC")
+    assert len(seeded) == len(first), "a seed must change the draw, not the length"
+
+
 def _resample_16k(samples, rate):
     """Linear resample to 16 kHz. An oracle, not a codec -- good enough to recognise words by."""
     if rate == 16000:
