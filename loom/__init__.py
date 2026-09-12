@@ -580,7 +580,7 @@ class Transcription:
 
 
 class Tokenizer:
-    """The vocabulary a GGUF embeds, in whichever of the five families it uses.
+    """The vocabulary a GGUF embeds, in whichever of the six families it uses.
 
     Reached as `model.tokenizer`; `model.tokenize` / `model.detokenize` are the same two calls without
     the intermediate object, which is what most code wants. This exists for the cases where the
@@ -594,8 +594,8 @@ class Tokenizer:
     @property
     def kind(self) -> str:
         """`gpt2` (byte-level BPE), `bert` (WordPiece), `byt5` (byte-level), `supertonic` (grapheme
-        codepoints), or a SentencePiece family name such as `llama` or `t5` -- the GGUF's own
-        `tokenizer.ggml.model`."""
+        codepoints), `ctc` (a CTC head's character table, DECODE-ONLY), `phonemes`, or a SentencePiece
+        family name such as `llama` or `t5` -- the GGUF's own `tokenizer.ggml.model`."""
         return self._handle.tokenizer_kind()
 
     @property
@@ -609,7 +609,10 @@ class Tokenizer:
         return self._handle.tokenizer_default_lang()
 
     def encode(self, text: str, lang: str | None = None) -> list[int]:
-        """See :meth:`Model.tokenize`, which is this call without the intermediate object."""
+        """See :meth:`Model.tokenize`, which is this call without the intermediate object.
+
+        Raises for a `ctc` vocabulary, which decodes only: a CTC model takes audio, so its table names
+        the classes its head emits and there is no segmentation rule to invert."""
         return list(self._handle.encode(text, "" if lang is None else lang))
 
     def decode(self, ids: Sequence[float | int]) -> str:

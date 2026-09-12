@@ -125,6 +125,14 @@ ASR_BASELINE = {
     # bookkeeping: left at 0.18 the ceiling stays 0.33, the markers cost about 0.18 to reinstate, and
     # the one regression this row exists to catch could come back and still pass.
     "qwen3-asr-0.6b":         0.00,
+    # Family 4, and both rows are the checkpoint rather than the export. These are character-level CTC
+    # models with no language model behind them, so what they produce is a phonetic spelling of what was
+    # said, which is right and is not what a decoder would produce. HuBERT-Large gets the utterance
+    # exactly. data2vec-Base inserts one word ("and so A my fellow"), 1 error in 21 -- `transformers`
+    # produces the identical insertion from the identical audio, so tightening this would be measuring
+    # the reference rather than the port.
+    "hubert-large-ls960-ft":      0.00,
+    "data2vec-audio-base-960h":   0.05,
 }
 
 # How far past its own baseline a model may drift. Wide enough to absorb the punctuation and casing
