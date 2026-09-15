@@ -448,10 +448,11 @@ symbol-visibility rule, a linker-path spelling and a build-system assumption tha
 ([Epic-08](https://github.com/loom-ai-org/loom.cpp/blob/main/docs/epics/epic-08-packaging-and-release.md),
 [Retro-024](https://github.com/loom-ai-org/loom.cpp/blob/main/docs/retros/retro-024-a-blocker-read-from-one-half-of-an-agreement.md)).
 
-**3. More models — [Epic-03](https://github.com/loom-ai-org/loom.cpp/blob/main/docs/epics/epic-03-model-coverage.md)**, ordered by coverage per unit of effort: BERT token classifiers
-(the smallest possible template, and the first non-audio task) → codec decoders → CNN+CTC and SANM
-encoders → the remaining TTS families → text encoder-decoders → small classifiers → music. Each lands
-here for free: a model this package has never heard of works the day the exporter can produce it.
+**3. More models — [Epic-03](https://github.com/loom-ai-org/loom.cpp/blob/main/docs/epics/epic-03-model-coverage.md)**, ordered by coverage per unit of effort. BERT token
+classifiers (the smallest possible template, and the first non-audio task), codec decoders, text
+encoder-decoders, CNN+CTC and SANM encoders are all done; what is left is the remaining TTS families →
+small classifiers → music. Each lands here for free: a model this package has never heard of works the
+day the exporter can produce it.
 
 **4. The follow-ups the docs already name** —
 [`docs/backlog/active-index.md`](https://github.com/loom-ai-org/loom.cpp/blob/main/docs/backlog/active-index.md) is the ledger for all three
