@@ -133,6 +133,15 @@ ASR_BASELINE = {
     # the reference rather than the port.
     "hubert-large-ls960-ft":      0.00,
     "data2vec-audio-base-960h":   0.05,
+    # Family 5, and the SenseVoice row is this table's own lesson applied a second time. It first
+    # measured 0.23 -- word-perfect speech behind four spurious "words", because SenseVoice emits its
+    # detected language, emotion, audio event and text-normalization mode as ordinary vocabulary pieces
+    # before the transcript. Recording 0.23 would have set a ceiling of 0.38 on a model that actually
+    # sits at 0.00, which is the failure the qwen3-asr comment above describes. The export declares
+    # those 171 tag ids as `loom.asr.control_ids` instead, so `transcribe` strips them and
+    # `detokenize` still returns them; the baseline follows the fix down rather than absorbing it.
+    "sensevoice-small":           0.00,
+    "paraformer-zh":              0.00,
 }
 
 # How far past its own baseline a model may drift. Wide enough to absorb the punctuation and casing
