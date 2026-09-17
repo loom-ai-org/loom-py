@@ -8,7 +8,11 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "loom-py-rt"
-version = "1.0.0-rc9"
+# DERIVED FROM `VERSION` AT THE REPO ROOT, which is the one place this number lives. Bump it
+# with `python packaging/version.py --set <version>` and never by hand: this is one of eleven
+# copies across five files in two spellings, and `tests/ci/test_version_consistency.py` fails
+# the suite whenever any of them disagrees.
+version = "1.0.0-rc10"
 description = "Python bindings for loom.cpp, a data-driven ggml inference engine"
 # Two entries, not one table with both keys, and that is the difference between `pip show` printing
 # an author and printing a blank line. PEP 621 maps {name, email} TOGETHER onto a single
@@ -60,12 +64,14 @@ phonemes = ["orthography2ipa>=7.30"]
 # There is deliberately NO `[all]` extra. That is the per-accelerator wheel matrix wearing a hat -- it
 # cannot resolve on any single platform, since these are mutually exclusive by architecture.
 # `[vulkan,cuda]` together is legitimate: with GGML_BACKEND_DL the registry picks at run time.
-vulkan = ["loom-py-rt-vulkan == 1.0.0rc9"]
-cuda = ["loom-py-rt-cuda == 1.0.0rc9"]
+# These three pins are `VERSION` in PEP 440's normal form (`1.0.0rc9`, not `1.0.0-rc9`) -- a pin
+# in the readable spelling resolves against nothing. packaging/version.py derives both.
+vulkan = ["loom-py-rt-vulkan == 1.0.0rc10"]
+cuda = ["loom-py-rt-cuda == 1.0.0rc10"]
 # Apple Silicon macOS ONLY -- there is no arm64-Linux or Intel-Mac Metal wheel to resolve to, so this
 # is the extra the paragraph above is describing when it says one may not exist for the platform at
 # all. On anything but an Apple Silicon Mac this FAILS, by design.
-metal = ["loom-py-rt-metal == 1.0.0rc9"]
+metal = ["loom-py-rt-metal == 1.0.0rc10"]
 # `gguf` writes the handful of tiny synthetic GGUFs tests/ci builds to check what the binding does with
 # a file it has never seen -- an unrecognized `tokenizer.ggml.model` tag, most importantly. Those cases
 # are unreachable with a fake handle (they are decisions the C++ makes at load time), and mocking them
