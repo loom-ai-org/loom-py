@@ -484,8 +484,32 @@ jobs:
   # ORDER: the backends last. A base wheel with no backend published leaves `[cuda]` unresolvable,
   # which is a visible install error; a backend with no base is the same error from the other side.
   # Neither is silent, so this is about which half is fixed sooner rather than about safety.
+  # THE TAG IS THE ONLY COPY OF THE VERSION THAT LIVES OUTSIDE THE TREE, and therefore the only one
+  # `tests/ci/test_version_consistency.py` cannot see. That test already runs on every push AND
+  # inside every wheel built here (pyproject's `test-command` runs `pytest {project}/tests/ci`), so
+  # `VERSION` vs the eleven derived copies is covered before this workflow starts; what is not is the
+  # release this run is publishing AS. A tag that disagrees with `version` uploads the pyproject's
+  # number without complaint -- `1.0.0-rc10` tagged on a tree that still says rc9 publishes rc9 a
+  # second time, which `skip-existing: true` then swallows as a success.
+  #
+  # Seconds long, and `publish-pypi` needs it -- the tag does not exist before a release event, and
+  # publishing is the irreversible step. A manual dispatch has no tag and the guard degrades to the
+  # drift check, which is the right behaviour rather than a skip.
+  version-guard:
+    runs-on: ubuntu-latest
+    steps:
+      # No submodules: this reads text files in this repo and nothing else.
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: VERSION, its eleven derived copies and the release tag must all agree
+        run: python packaging/version.py --check --expect-tag "${{ github.event.release.tag_name }}"
+
   publish-pypi:
-    needs: [build-wheels, build-backends, build-metal, build-sdist, raspberry-pi-check]
+    needs: [build-wheels, build-backends, build-metal, build-sdist, raspberry-pi-check, version-guard]
     # `inputs.only == 'all'` as well as `inputs.publish`: a narrowed dispatch has skipped jobs, and
     # `needs` would skip this one anyway -- but silently. Saying it here means a run that asked to
     # publish a partial set is refused for a reason somebody can read, rather than just not happening.

@@ -6,6 +6,10 @@ build-backend = "scikit_build_core.build"
 name = "loom-py-rt-cuda"
 # Deliberately the same version as the base package, and see `dependencies` for why it is not merely
 # a convention.
+# DERIVED FROM `VERSION` AT THE REPO ROOT, which is the one place this number lives. Bump it
+# with `python packaging/version.py --set <version>` and never by hand: this is one of eleven
+# copies across five files in two spellings, and `tests/ci/test_version_consistency.py` fails
+# the suite whenever any of them disagrees.
 version = "1.0.0-rc9"
 description = "CUDA backend for loom-py-rt"
 # Two entries, not one table with both keys, and that is the difference between `pip show` printing
