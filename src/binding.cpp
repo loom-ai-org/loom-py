@@ -40,11 +40,18 @@ namespace {
 
 // The model's own tokenizer, if it carries one.
 //
-// **Five vocabulary families and one dispatch, taken from `tools/loom_cli/main.cpp`** -- the only
+// **Six vocabulary families and one dispatch, taken from `tools/loom_cli/main.cpp`** -- the only
 // other host that does this, and the one that learned the ordering the hard way. A GGUF says which it
 // has in `tokenizer.ggml.model`: "gpt2" is byte-level BPE, "bert" is WordPiece, "byt5" is byte-level,
-// "llama"/"t5" are SentencePiece, and "supertonic" is SupertonicTTS's grapheme codepoint table. The
-// five classes share no base, so this holds one of each and asks whichever is non-null.
+// "llama"/"t5" are SentencePiece, "supertonic" is SupertonicTTS's grapheme codepoint table, and "ctc"
+// is family 4's character table. The six classes share no base, so this holds one of each and asks
+// whichever is non-null.
+//
+// **"ctc" is the one that can only DECODE**, and it is a property of the scheme rather than a gap: a
+// CTC model has no text input, so its ids come out of a head's argmax and there is nothing for an
+// encode to be the inverse of (loom.cpp ADR-033). `encode` on one raises naming that, which is the
+// same shape as the language-argument rejection below -- a method that silently returned nothing
+// would be the failure this dispatch exists to prevent.
 //
 // **Every family is dispatched by NAME, and an unrecognized tag yields no tokenizer rather than an
 // error.** This used to be four `if`s and an `else` that fell through to `Vocab::load`, which throws on
@@ -77,6 +84,8 @@ public:
             // takes IPA and returns model-ready ids, assembly included -- the same shape Supertonic's
             // grapheme table already had, one step further down the pipeline.
             tokenizer->phoneme_ = loom::PhonemeVocab::load(model);
+        } else if (tokenizer->kind_ == "ctc") {
+            tokenizer->ctc_ = loom::CtcVocab::load(model);
         } else if (tokenizer->kind_ == "supertonic") {
             tokenizer->supertonic_ = loom::SupertonicTextVectorizer::load(model);
         } else if (tokenizer->kind_ == "llama" || tokenizer->kind_ == "t5") {
@@ -86,7 +95,7 @@ public:
         return tokenizer;
     }
 
-    bool valid() const { return spm_ || bpe_ || wordpiece_ || byte_ || supertonic_ || phoneme_; }
+    bool valid() const { return spm_ || bpe_ || wordpiece_ || byte_ || supertonic_ || phoneme_ || ctc_; }
     const std::string& kind() const { return kind_; }
 
     size_t size() const {
@@ -95,6 +104,7 @@ public:
         if (wordpiece_) return wordpiece_->size();
         if (byte_) return byte_->size();
         if (phoneme_) return phoneme_->size();
+        if (ctc_) return ctc_->size();
         // n_tokens(), not vocab_size() -- the latter is the 65536-entry BMP lookup table, which is not
         // what any caller reading `tokenizer.size()` means.
         return supertonic_->n_tokens();
@@ -108,6 +118,11 @@ public:
         if (!lang.empty() && !supertonic_) {
             throw loom::SchemaError("tokenizer kind '" + kind_ + "' takes no language argument; only a "
                                     "vocabulary that tags its input by language (supertonic) does");
+        }
+        if (ctc_) {
+            throw loom::SchemaError("tokenizer kind 'ctc' decodes only: a CTC model takes audio, so its "
+                                    "vocabulary is the table its head's classes are named by and there "
+                                    "is no segmentation rule to invert. Use decode().");
         }
         if (spm_) return spm_->encode(text);
         if (bpe_) return bpe_->encode(text);
@@ -123,6 +138,7 @@ public:
         if (wordpiece_) return wordpiece_->decode(ids);
         if (byte_) return byte_->decode(ids);
         if (phoneme_) return phoneme_->decode(ids);
+        if (ctc_) return ctc_->decode(ids);
         return supertonic_->detokenize(ids);
     }
 
@@ -138,6 +154,7 @@ private:
     std::unique_ptr<loom::ByteVocab> byte_;
     std::unique_ptr<loom::SupertonicTextVectorizer> supertonic_;
     std::unique_ptr<loom::PhonemeVocab> phoneme_;
+    std::unique_ptr<loom::CtcVocab> ctc_;
 };
 
 // One driver input, marshalled. A driver's world is numbers and arrays of numbers -- the bridge's own

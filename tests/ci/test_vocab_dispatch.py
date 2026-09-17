@@ -120,6 +120,42 @@ class TestSupertonicGraphemeVocabulary:
         assert model.tokenize("hi") == [ord(c) - 32 for c in "<en>hi.</en>"]
 
 
+class TestADecodeOnlyVocabularySaysSo:
+    """Family 4's CTC character table is the first vocabulary here with no `encode` at all, and the
+    point is that asking for one is an ERROR rather than an empty list: a CTC model takes audio, so
+    there is nothing for an encode to be the inverse of (loom.cpp ADR-033)."""
+
+    @pytest.fixture
+    def ctc_model(self, tmp_path):
+        path = str(tmp_path / "ctc.gguf")
+        w = GGUFWriter(path, "loom-vocab-dispatch-fixture")
+        w.add_string("loom.architecture", "vocab_dispatch_test")
+        w.add_string("model.graph_topology", EMPTY_TOPOLOGY)
+        w.add_tokenizer_model("ctc")
+        w.add_token_list(["<pad>", "<s>", "</s>", "<unk>", "|", "H", "I"])
+        w.add_pad_token_id(0)
+        w.add_unk_token_id(3)
+        w.add_uint32("tokenizer.ggml.word_delimiter_id", 4)
+        w.add_tensor("test.placeholder", np.zeros(4, dtype=np.float32))
+        w.write_header_to_file()
+        w.write_kv_data_to_file()
+        w.write_tensors_to_file()
+        w.close()
+        return loom.Model.from_file(path)
+
+    def test_the_tag_is_recognized_and_the_model_carries_a_tokenizer(self, ctc_model):
+        assert ctc_model.tokenizer is not None
+        assert ctc_model.tokenizer.kind == "ctc"
+        assert ctc_model.tokenizer.size == 7
+
+    def test_it_decodes_with_the_word_delimiter_as_a_space(self, ctc_model):
+        assert ctc_model.detokenize([5, 6, 4, 5, 6]) == "HI HI"
+
+    def test_encoding_raises_rather_than_returning_nothing(self, ctc_model):
+        with pytest.raises(loom.LoomError, match="decodes only"):
+            ctc_model.tokenize("HI")
+
+
 class TestLanguageArgumentIsRejectedWhereItCannotBeHonoured:
     """A dropped argument is the failure this rejection prevents: a caller asking for Korean and
     quietly getting whatever the tokenizer does by default."""
