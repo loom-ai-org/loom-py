@@ -10,7 +10,7 @@ name = "loom-py-rt-metal"
 # with `python packaging/version.py --set <version>` and never by hand: this is one of eleven
 # copies across five files in two spellings, and `tests/ci/test_version_consistency.py` fails
 # the suite whenever any of them disagrees.
-version = "1.0.0-rc9"
+version = "1.0.0-rc10"
 description = "Metal backend for loom-py-rt"
 # Two entries, not one table with both keys: PEP 621 maps {name, email} TOGETHER onto a single
 # `Author-email:` header and leaves `Author:` empty, so a name-only entry is what fills the latter.
@@ -31,7 +31,7 @@ classifiers = [
 # wheel carries a libggml-metal.so that gets dlopened beside the base wheel's libggml-base.dylib, and
 # ggml makes no ABI promise across revisions -- so any loom-py-rt release that bumps its ggml pin
 # invalidates every backend wheel published before it.
-dependencies = ["loom-py-rt == 1.0.0rc9"]
+dependencies = ["loom-py-rt == 1.0.0rc10"]
 
 [tool.scikit-build]
 wheel.packages = ["loom_rt_metal"]

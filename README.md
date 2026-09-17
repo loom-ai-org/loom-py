@@ -362,7 +362,7 @@ take it: a Zero 2 W is ARMv8 hardware, and running it on the 32-bit image gives 
      `python packaging/version.py --set <version>`; tests/ci/test_version_consistency.py fails
      if it drifts. `releases/latest/download/` is stable, the filename is not. -->
 ```sh
-pip install https://github.com/loom-ai-org/loom-py/releases/latest/download/loom_py_rt-1.0.0rc9-cp311-cp311-linux_armv6l.whl
+pip install https://github.com/loom-ai-org/loom-py/releases/latest/download/loom_py_rt-1.0.0rc10-cp311-cp311-linux_armv6l.whl
 ```
 
 PyPI accepts only `manylinux*` and `musllinux*` platform tags for Linux and the manylinux policy's
