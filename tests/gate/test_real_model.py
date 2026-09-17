@@ -108,5 +108,6 @@ def test_the_tokenizer_describes_itself(model):
     if model.tokenizer is None:
         pytest.skip(f"{model.architecture} embeds no vocabulary")
     tokenizer = model.tokenizer
-    assert tokenizer.kind in {"gpt2", "bert", "byt5", "llama", "t5"}, tokenizer.kind
+    assert tokenizer.kind in {"gpt2", "bert", "byt5", "llama", "t5", "ctc", "phonemes",
+                              "supertonic"}, tokenizer.kind
     assert tokenizer.size > 0

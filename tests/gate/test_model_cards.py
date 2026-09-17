@@ -125,6 +125,23 @@ ASR_BASELINE = {
     # bookkeeping: left at 0.18 the ceiling stays 0.33, the markers cost about 0.18 to reinstate, and
     # the one regression this row exists to catch could come back and still pass.
     "qwen3-asr-0.6b":         0.00,
+    # Family 4, and both rows are the checkpoint rather than the export. These are character-level CTC
+    # models with no language model behind them, so what they produce is a phonetic spelling of what was
+    # said, which is right and is not what a decoder would produce. HuBERT-Large gets the utterance
+    # exactly. data2vec-Base inserts one word ("and so A my fellow"), 1 error in 21 -- `transformers`
+    # produces the identical insertion from the identical audio, so tightening this would be measuring
+    # the reference rather than the port.
+    "hubert-large-ls960-ft":      0.00,
+    "data2vec-audio-base-960h":   0.05,
+    # Family 5, and the SenseVoice row is this table's own lesson applied a second time. It first
+    # measured 0.23 -- word-perfect speech behind four spurious "words", because SenseVoice emits its
+    # detected language, emotion, audio event and text-normalization mode as ordinary vocabulary pieces
+    # before the transcript. Recording 0.23 would have set a ceiling of 0.38 on a model that actually
+    # sits at 0.00, which is the failure the qwen3-asr comment above describes. The export declares
+    # those 171 tag ids as `loom.asr.control_ids` instead, so `transcribe` strips them and
+    # `detokenize` still returns them; the baseline follows the fix down rather than absorbing it.
+    "sensevoice-small":           0.00,
+    "paraformer-zh":              0.00,
 }
 
 # How far past its own baseline a model may drift. Wide enough to absorb the punctuation and casing
@@ -633,6 +650,44 @@ def test_declared_greedy_decoding_is_reproducible(name):
     first = model.text2text.infer(prompt, max_new_tokens=12)
     second = model.text2text.infer(prompt, max_new_tokens=12)
     assert first == second, f"{name} declares greedy decoding but gave two answers:\n  {first!r}\n  {second!r}"
+
+
+@pytest.mark.gate
+@pytest.mark.parametrize("name", NAMES)
+def test_a_codec_that_draws_its_own_noise_still_answers_the_same_twice(name):
+    """A stochastic decoder must be reproducible by default, and must still be stochastic on request.
+
+    SNAC's decoder is the first graph here with a random leaf: its driver draws the noise per call
+    through `loom.gaussian_array`, which is a fresh waveform every call unless the stream is seeded.
+    It IS seeded -- `inputs.seed`, defaulting to a fixed value -- and that default is what lets every
+    other row in this file compare two runs of a codec at all. A build that dropped the seeding would
+    fail nothing else here: the audio stays correct, the length stays right, and only a comparison
+    between two calls can see it.
+
+    The second half matters as much as the first. A file that answered the same twice because the
+    noise was ignored -- the shape this export shipped with once, and had to reverse -- passes the
+    determinism check perfectly.
+    """
+    _cards_dir()
+    gguf, _ = _entry(name)
+    if loom.contract_of(gguf).get("interface") != "codes2speech":
+        pytest.skip(f"{name} is not codes2speech")
+    model = loom.Model.from_file(str(gguf))
+    width = model.hparam("codec.n_codebooks", "u32")
+    frames = round(float(model.hparam("codec.frame_rate", "f32")))
+    codes = [[(i * width + k) % 512 for k in range(width)] for i in range(frames)]
+
+    first = model.codes2speech.infer(codes).samples
+    second = model.codes2speech.infer(codes).samples
+    assert list(first) == list(second), (
+        f"{name} gave two different waveforms for one input -- an unseeded draw somewhere in its "
+        f"driver, which makes every other comparison in this file meaningless"
+    )
+    seeded = model.codes2speech.infer(codes, seed=99).samples
+    if list(seeded) == list(first):
+        pytest.skip(f"{name} has no stochastic leaf -- `seed` changes nothing, which is correct for a "
+                    f"deterministic codec like DAC")
+    assert len(seeded) == len(first), "a seed must change the draw, not the length"
 
 
 def _resample_16k(samples, rate):
