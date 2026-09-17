@@ -57,22 +57,50 @@ Copy `rt-vulkan/`, change four things, and build it next to the base wheel:
    below).
 3. `loom_rt_<backend>/__init__.py` — the docstring; there is no code in it.
 4. `pyproject.toml` in the repo root — a `<backend> = ["loom-py-rt-<backend> == <version>"]` extra.
+5. `packaging/version.py` — two `Site` rows for the new file (its `version` and its pin) and one
+   for the extra, so the version keeps being one number rather than thirteen. The test in
+   `tests/ci/test_version_consistency.py` needs no change; it is driven by that table.
 
-**A version bump is TEN strings across four files, and they are a circular exact-pin set.** The base
-package and both backends pin each other by exact version, in two spellings — `version = "1.0.0-rc4"`
-and the normalised `== 1.0.0rc4` — so bumping any subset publishes a package that resolves against a
-version nobody released:
+**A version bump is ONE file: `VERSION` at the repo root.**
+
+```sh
+python packaging/version.py --set 1.0.0-rc11   # writes VERSION and every derived copy
+python packaging/version.py                    # the check: is every copy in step?
+```
+
+The reason it needs a tool at all is that this is a **circular exact-pin set**. The base package and
+the three backends pin each other by exact version, in two spellings — `version = "1.0.0-rc11"` and
+the normalised `== 1.0.0rc11` — so bumping any subset publishes a package that resolves against a
+version nobody released. That is **eleven copies of one number across five files**:
 
 ```
 pyproject.toml                     version, + the vulkan/cuda/metal extras' pins (4)
 packaging/rt-cuda/pyproject.toml   version, + its loom-py-rt pin                 (2)
 packaging/rt-vulkan/pyproject.toml version, + its loom-py-rt pin                 (2)
 packaging/rt-metal/pyproject.toml  version, + its loom-py-rt pin                 (2)
+README.md                          the ARMv6 wheel's install URL                 (1)
 ```
 
+They stay literal text on purpose. scikit-build-core can read a version out of a file at build time,
+but the pins live in `dependencies`/`optional-dependencies`, and the three backend wheels are built
+from a **staged tree** (`packaging/stage.py`) holding only the package directory — so a build-time
+read of a repo-root file is unavailable to exactly the builds that need it most. Static text that a
+test proves correct beats dynamic text that resolves in only some of the builds.
+
+**The test is the half that makes `VERSION` authoritative.**
+`tests/ci/test_version_consistency.py` asserts every copy against `VERSION`, one assertion per site,
+and it runs both in `ci.yml` on every push and *inside every wheel cibuildwheel builds* (the
+`test-command` runs `pytest {project}/tests/ci`). It also fails when a pattern stops matching at all,
+because a table that matches nothing would pass while checking nothing. `README.md` is in that table
+for a reason: PyPI refuses the `linux_armv6l` tag, so the Pi Zero wheel is installed by URL and **the
+version is in the filename** — a missed bump there is a 404 after the release ships, for the users
+with the smallest boards.
+
 Nothing in `.github/workflows/` carries a version — it flows from these files through scikit-build and
-cibuildwheel — and the git tag is not read either, so a tag that disagrees with `version` publishes the
-pyproject's number without complaint.
+cibuildwheel. The git tag is not read by the build either, so a tag that disagrees with `version` used
+to publish the pyproject's number without complaint; `wheels.yml`'s `version-guard` job now closes
+that, running `python packaging/version.py --check --expect-tag <the release tag>` before
+`publish-pypi` uploads anything.
 
 Most backends are worth building for one or two architectures, so the real matrix is far sparser than
 the cross product — roughly nine wheels, not backends times platforms:
