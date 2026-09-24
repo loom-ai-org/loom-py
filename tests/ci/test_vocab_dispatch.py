@@ -156,6 +156,58 @@ class TestADecodeOnlyVocabularySaysSo:
             ctc_model.tokenize("HI")
 
 
+class TestChatterboxTextDoor:
+    """Family 9's fourth leaf: a character-level BPE whose `encode` is the reference's whole text path.
+
+    The point for this binding is that the tag reaches `loom::ChatterboxVocab` and that `tokenize` is
+    the WHOLE path -- `punc_norm` included -- so a caller hands over the sentence as typed. The exact
+    ids are the engine's to prove (tests/ci/test_chatterbox_vocab.cpp, and 3000/3000 against the
+    reference); what is pinned here is that this door is the engine's and not a second implementation.
+    """
+
+    @pytest.fixture
+    def model(self, tmp_path):
+        path = str(tmp_path / "chatterbox.gguf")
+        w = GGUFWriter(path, "loom-vocab-dispatch-fixture")
+        w.add_string("loom.architecture", "vocab_dispatch_test")
+        w.add_string("model.graph_topology", EMPTY_TOPOLOGY)
+        w.add_tokenizer_model("chatterbox")
+        tokens = ["[STOP]", "[UNK]", "[SPACE]", ".", "H", "i", "t", "h", "e", "th", "the"]
+        w.add_token_list(tokens)
+        w.add_token_merges(["t h", "th e"])
+        w.add_unk_token_id(1)
+        p = "tokenizer.ggml.chatterbox."
+        w.add_array(p + "added_tokens", ["[STOP]", "[UNK]", "[SPACE]"])
+        w.add_array(p + "word_chars", ["H", "i", "t", "h", "e"])
+        w.add_array(p + "replace_from", [";"])
+        w.add_array(p + "replace_to", [", "])
+        w.add_array(p + "sentence_enders", [".", "!", "?", "-", ","])
+        w.add_array(p + "upper_from", ["h"])
+        w.add_array(p + "upper_to", ["H"])
+        w.add_array(p + "decode_drop", ["[STOP]", "[UNK]"])
+        w.add_string(p + "space_token", "[SPACE]")
+        w.add_string(p + "terminal", ".")
+        w.add_string(p + "empty_text", "Hi.")
+        w.add_tensor("test.placeholder", np.zeros(4, dtype=np.float32))
+        w.write_header_to_file()
+        w.write_kv_data_to_file()
+        w.write_tensors_to_file()
+        w.close()
+        return loom.Model.from_file(path)
+
+    def test_the_tag_is_recognized_and_the_model_carries_a_tokenizer(self, model):
+        assert model.tokenizer is not None
+        assert model.tokenizer.kind == "chatterbox"
+        assert model.tokenizer.size == 11
+
+    def test_tokenize_is_the_whole_text_path(self, model):
+        # "hi the" -> punc_norm -> "Hi the." -> "Hi[SPACE]the." -> H, i, [SPACE], the, .
+        assert model.tokenize("hi the") == [4, 5, 2, 10, 3]
+
+    def test_ids_decode_back_to_the_normalized_sentence(self, model):
+        assert model.detokenize([4, 5, 2, 10, 3]) == "Hi the."
+
+
 class TestLanguageArgumentIsRejectedWhereItCannotBeHonoured:
     """A dropped argument is the failure this rejection prevents: a caller asking for Korean and
     quietly getting whatever the tokenizer does by default."""
