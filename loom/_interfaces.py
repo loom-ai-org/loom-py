@@ -228,7 +228,7 @@ class Text2Speech(Interface):
 
     def _infer(self, text: str | None = None, *, phonemes: str | Sequence[int] | None = None,
                tokens: Sequence[int] | None = None, steps: int | None = None,
-               seed: int = 0, language: str | None = None,
+               seed: int = 0, language: str | None = None, voice: Any = None,
                sample_rate: int = 16000, **driver_inputs) -> Audio:
         """Three ways in, and which ones a given model accepts is a property of the model.
 
@@ -239,6 +239,10 @@ class Text2Speech(Interface):
         `phonemes` takes either the STRING a G2P produced (encoded here, through the model's own table
         and its own BOS/EOS assembly) or ids already encoded. `tokens` is the third and lowest: ids
         passed through untouched, assembly included, which is what the driver's own header documents.
+
+        `voice` picks a voice for a model that takes voice files (`model.voices` lists them): a name, a
+        path, or a :class:`loom.Voice`. Omitted, the model's own default is used. Its inputs go to the
+        driver, and a driver input you pass explicitly still wins.
 
         **`sample_rate` is the FALLBACK, not an override.** A model that declares its own rate is
         believed, because the export read it off the checkpoint and the caller is guessing; a model that
@@ -255,7 +259,10 @@ class Text2Speech(Interface):
         contract = self._model.contract
         ids = self._resolve_ids(text, phonemes, tokens, language, contract)
 
-        inputs: dict[str, Any] = dict(driver_inputs)
+        inputs: dict[str, Any] = {}
+        if voice is not None:
+            inputs.update({name: list(values) for name, values in self._model.voice(voice).inputs.items()})
+        inputs.update(driver_inputs)
         inputs["tokens"] = [float(i) for i in ids]
         # Declared defaults, applied only when the caller named nothing: a sampler step count is a
         # property of the export (`loom.tts.default_steps`), and a host inventing one is how two front

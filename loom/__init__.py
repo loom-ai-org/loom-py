@@ -32,12 +32,12 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from . import _loom
 from . import phonemizers
-from ._hub import download
+from ._hub import download, list_files
 from ._interfaces import (ALL_INTERFACES, Audio, Classification, Codes2Speech, Interface,
                           Speech2Text, Text2Class, Text2Codes, Text2Speech, Text2Text, TokenClass,
                           UnsupportedTask)
 
-__all__ = ["Model", "Tokenizer", "Transcription", "Segment", "Audio", "Classification", "TokenClass",
+__all__ = ["Model", "Voice", "Tokenizer", "Transcription", "Segment", "Audio", "Classification", "TokenClass",
            "Interface", "UnsupportedTask", "Text2Text", "Speech2Text", "Text2Speech", "Text2Class",
            "Text2Codes", "Codes2Speech",
            "phonemizers", "LoomError", "devices", "contract_of", "download", "__version__"]
@@ -144,6 +144,20 @@ except Exception:  # editable/source-tree checkout with no installed distributio
 LoomError = _loom.LoomError
 
 
+@dataclass(frozen=True)
+class Voice:
+    """A voice file, loaded for one model: its `inputs` are driver inputs by name (for Pocket-TTS,
+    `voice_kv`), and its `license` is the recording's, which is not always the model's."""
+    name: str
+    license: str
+    origin: str
+    inputs: Mapping[str, Sequence[float]]
+    path: Path
+
+    def __repr__(self) -> str:
+        return f"<loom.Voice {self.name!r} license={self.license!r}>"
+
+
 class Model:
     """A loaded loom GGUF: its topologies, its hyperparameters and its driver.
 
@@ -154,6 +168,9 @@ class Model:
     def __init__(self, handle: "_loom.Model", path: Path):
         self._handle = handle
         self._path = path
+        # Where `from_pretrained` got it, so a voice named but not on disk can be fetched from the same
+        # repo and revision. None for a file loaded from disk.
+        self._hub: dict | None = None
         self._contract = dict(handle.contract())
         # One instance per interface, all of them, always. Most raise -- see `_interfaces.Interface`
         # for why that is better than a method that is absent: "can this model do X" stays a question
@@ -202,8 +219,10 @@ class Model:
 
         `device` is passed through to :meth:`from_file`.
         """
-        return cls.from_file(download(repo_id, filename=filename, revision=revision,
-                                      cache_dir=cache_dir, token=token), device=device)
+        model = cls.from_file(download(repo_id, filename=filename, revision=revision,
+                                       cache_dir=cache_dir, token=token), device=device)
+        model._hub = dict(repo_id=repo_id, revision=revision, cache_dir=cache_dir, token=token)
+        return model
 
     # -- what the file says about itself -------------------------------------------------------
 
@@ -275,6 +294,57 @@ class Model:
     @property
     def path(self) -> Path:
         return self._path
+
+    # -- voices --------------------------------------------------------------------------------
+
+    @property
+    def voices(self) -> list[str]:
+        """The voices this model can use by NAME: the ones the file carries (`contract["voices"]`, the
+        first being what it uses when you name none), then the voice files in a `voices/` directory
+        beside it -- and, for a model from :meth:`from_pretrained`, in its repo's `voices/`.
+
+        Empty for a model whose voice is not something you pick this way."""
+        names = list(self._contract.get("voices") or [])
+        if self._handle.takes_voice_files():
+            found = {p.stem for p in (self._path.parent / "voices").glob("*.gguf")}
+            if self._hub is not None:
+                found |= {Path(n).stem for n in list_files(self._hub["repo_id"], "voices/",
+                                                           self._hub["revision"], self._hub["token"])
+                          if n.endswith(".gguf")}
+            names += sorted(found - set(names))
+        return names
+
+    def voice(self, voice: "str | os.PathLike | Voice") -> "Voice":
+        """A voice file loaded for THIS model (loom.cpp ADR-045), by path or by name.
+
+        A name is looked up as `voices/<name>.gguf` beside the model file, then -- for a model from
+        :meth:`from_pretrained` -- in its repo, downloaded to the same place. The engine refuses a file
+        made for other weights: a voice is the model's own state after hearing the speaker, and it only
+        fits the weights that produced it.
+        """
+        if isinstance(voice, Voice):
+            return voice
+        if not self._handle.takes_voice_files():
+            raise ValueError(
+                f"{self._path.name} takes no voice files (it declares no voice fingerprint); "
+                f"its voices, if it has several, are chosen through its own driver inputs")
+        path = Path(voice).expanduser()
+        if not path.is_file():
+            name = str(voice)
+            if os.sep in name or "/" in name or name.endswith(".gguf"):
+                raise FileNotFoundError(f"no such voice file: {path}")
+            path = self._path.parent / "voices" / f"{name}.gguf"
+            if not path.is_file() and self._hub is not None:
+                path = download(self._hub["repo_id"], filename=f"voices/{name}.gguf",
+                                revision=self._hub["revision"], cache_dir=self._hub["cache_dir"],
+                                token=self._hub["token"])
+            if not path.is_file():
+                raise FileNotFoundError(
+                    f"no voice {name!r} for {self._path.name}: looked for {path}. "
+                    f"Available by name: {self.voices or 'none'}")
+        loaded = self._handle.load_voice(str(path))
+        return Voice(name=loaded["name"] or path.stem, license=loaded["license"],
+                     origin=loaded["origin"], inputs=dict(loaded["inputs"]), path=path)
 
     def hparam(self, key: str, kind: str = "u32") -> Any:
         """One `loom.*` hyperparameter, by the type the GGUF stored it as.

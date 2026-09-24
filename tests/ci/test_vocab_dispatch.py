@@ -161,7 +161,8 @@ class TestPocketTtsTextDoor:
     sentence chunking included.
 
     Pinned here: the tag reaches `loom::PocketTtsVocab`, `tokenize` prepares the text (capital, full
-    stop) and puts `</s>` between the chunks it cuts, and `detokenize` drops them. The exact ids are
+    stop) and opens each chunk it cuts with the header carrying its tail (`<s>` for at most four words),
+    and `detokenize` drops the headers. The exact ids are
     the engine's to prove (tests/ci/test_pocket_tts_vocab.cpp, and 7000/7000 against the reference).
     """
 
@@ -192,7 +193,9 @@ class TestPocketTtsTextDoor:
         w.add_array(p + "sentence_end_ids", [6, 7])
         w.add_array(p + "clause_end_ids", [0])
         w.add_int32(p + "max_tokens_per_chunk", 2)
-        w.add_int32(p + "chunk_separator", 2)
+        w.add_int32(p + "chunk_header_short", 1)
+        w.add_int32(p + "chunk_header_long", 2)
+        w.add_int32(p + "short_chunk_max_words", 4)
         w.add_tensor("test.placeholder", np.zeros(4, dtype=np.float32))
         w.write_header_to_file()
         w.write_kv_data_to_file()
@@ -207,11 +210,11 @@ class TestPocketTtsTextDoor:
 
     def test_tokenize_is_the_whole_text_path(self, model):
         # "hi the. the!" -> "Hi the. the!" -> two sentences over a budget of two -> "Hi the." and
-        # "The!", each prepared on its own, `</s>` between.
-        assert model.tokenize("hi the. the!") == [3, 4, 6, 2, 5, 7]
+        # "The!", each prepared on its own, each opened by `<s>` (two words and one: the short tail).
+        assert model.tokenize("hi the. the!") == [1, 3, 4, 6, 1, 5, 7]
 
-    def test_ids_decode_back_without_the_separator(self, model):
-        assert model.detokenize([3, 4, 6, 2, 5, 7]) == "Hi the. The!"
+    def test_ids_decode_back_without_the_headers(self, model):
+        assert model.detokenize([1, 3, 4, 6, 2, 5, 7]) == "Hi the. The!"
 
 
 class TestChatterboxTextDoor:
