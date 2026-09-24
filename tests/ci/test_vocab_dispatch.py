@@ -217,6 +217,57 @@ class TestPocketTtsTextDoor:
         assert model.detokenize([1, 3, 4, 6, 2, 5, 7]) == "Hi the. The!"
 
 
+class TestVoxCpm2TextDoor:
+    """Family 9's sixth leaf: a rank-merged character BPE with byte fallback, whose `encode` is the
+    reference's text path -- whitespace runs to one space, the BPE, then multi-character Chinese pieces
+    split back into characters.
+
+    Pinned here: the tag reaches `loom::VoxCpmVocab`, `tokenize` is the whole path (no BOS, the split
+    applied), and `detokenize` undoes the `▁`. The exact ids are the engine's to prove
+    (tests/ci/test_voxcpm_vocab.cpp, and 4992/4992 against the reference).
+    """
+
+    @pytest.fixture
+    def model(self, tmp_path):
+        path = str(tmp_path / "voxcpm2.gguf")
+        w = GGUFWriter(path, "loom-vocab-dispatch-fixture")
+        w.add_string("loom.architecture", "vocab_dispatch_test")
+        w.add_string("model.graph_topology", EMPTY_TOPOLOGY)
+        w.add_tokenizer_model("voxcpm2")
+        pieces = ["<unk>", "<s>"] + [f"<0x{b:02X}>" for b in range(256)] + \
+            ["\u2581", "H", "i", "Hi", "\u2581Hi", "\u4f60", "\u597d", "\u4f60\u597d", "\u2581\u4f60\u597d"]
+        ids = {p: i for i, p in enumerate(pieces)}
+        w.add_token_list(pieces)
+        w.add_token_types([3, 3] + [6] * 256 + [1] * 9)
+        w.add_token_merges(["H i", "\u2581 Hi", "\u4f60 \u597d", "\u2581 \u4f60\u597d"])
+        w.add_unk_token_id(0)
+        p = "tokenizer.ggml.voxcpm2."
+        w.add_array(p + "added_tokens", ["<unk>", "<s>"])
+        w.add_string(p + "prepend", "\u2581")
+        w.add_string(p + "space", "\u2581")
+        w.add_array(p + "split_from", [ids["\u4f60\u597d"], ids["\u2581\u4f60\u597d"]])
+        w.add_array(p + "split_offsets", [0, 2, 4])
+        w.add_array(p + "split_to", [ids["\u4f60"], ids["\u597d"]] * 2)
+        w.add_tensor("test.placeholder", np.zeros(4, dtype=np.float32))
+        w.write_header_to_file()
+        w.write_kv_data_to_file()
+        w.write_tensors_to_file()
+        w.close()
+        return loom.Model.from_file(path)
+
+    def test_the_tag_is_recognized_and_the_model_carries_a_tokenizer(self, model):
+        assert model.tokenizer is not None
+        assert model.tokenizer.kind == "voxcpm2"
+        assert model.tokenizer.size == 267
+
+    def test_tokenize_is_the_whole_text_path(self, model):
+        # "Hi\n\n你好" -> "Hi 你好" -> ▁Hi ▁你好 -> the Chinese piece split, its `▁` with it. No BOS.
+        assert model.tokenize("Hi\n\n\u4f60\u597d") == [262, 263, 264]
+
+    def test_ids_decode_back(self, model):
+        assert model.detokenize([262, 258]) == "Hi "
+
+
 class TestChatterboxTextDoor:
     """Family 9's fourth leaf: a character-level BPE whose `encode` is the reference's whole text path.
 
