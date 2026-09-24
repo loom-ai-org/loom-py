@@ -96,6 +96,11 @@ public:
             // mapping Chinese character by character, which would return the unknown id for a whole
             // sentence and synthesise confident nonsense.
             tokenizer->f5_ = loom::F5Vocab::load(model);
+        } else if (tokenizer->kind_ == "chatterbox") {
+            // Family 9's fourth leaf. A character-level BPE (NOT byte-level "gpt2") whose `encode` is
+            // the reference's whole text path: `punc_norm`, spaces to `[SPACE]`, then the BPE. So a
+            // caller hands it the sentence as typed, exactly as `ChatterboxTTS.generate` takes it.
+            tokenizer->chatterbox_ = loom::ChatterboxVocab::load(model);
         } else if (tokenizer->kind_ == "llama" || tokenizer->kind_ == "t5") {
             tokenizer->spm_ = loom::Vocab::load(model);
         }
@@ -104,7 +109,8 @@ public:
     }
 
     bool valid() const {
-        return spm_ || bpe_ || wordpiece_ || byte_ || supertonic_ || phoneme_ || ctc_ || f5_;
+        return spm_ || bpe_ || wordpiece_ || byte_ || supertonic_ || phoneme_ || ctc_ || f5_ ||
+               chatterbox_;
     }
     const std::string& kind() const { return kind_; }
 
@@ -116,6 +122,7 @@ public:
         if (phoneme_) return phoneme_->size();
         if (ctc_) return ctc_->size();
         if (f5_) return f5_->size();
+        if (chatterbox_) return chatterbox_->size();
         // n_tokens(), not vocab_size() -- the latter is the 65536-entry BMP lookup table, which is not
         // what any caller reading `tokenizer.size()` means.
         return supertonic_->n_tokens();
@@ -143,6 +150,8 @@ public:
         // TABLE ids, not graph ids: the driver adds the filler-token offset the embedding reserves
         // row 0 for, the same way it does for a caller who built the ids elsewhere.
         if (f5_) return f5_->encode(text);
+        // Without the start/stop ids, which the driver adds -- as `generate` does after tokenizing.
+        if (chatterbox_) return chatterbox_->encode(text);
         return supertonic_->tokenize(text, lang);  // empty lang -> the file's own default_lang
     }
 
@@ -154,6 +163,7 @@ public:
         if (phoneme_) return phoneme_->decode(ids);
         if (ctc_) return ctc_->decode(ids);
         if (f5_) return f5_->decode(ids);
+        if (chatterbox_) return chatterbox_->decode(ids);
         return supertonic_->detokenize(ids);
     }
 
@@ -171,6 +181,7 @@ private:
     std::unique_ptr<loom::PhonemeVocab> phoneme_;
     std::unique_ptr<loom::CtcVocab> ctc_;
     std::unique_ptr<loom::F5Vocab> f5_;
+    std::unique_ptr<loom::ChatterboxVocab> chatterbox_;
 };
 
 // One driver input, marshalled. A driver's world is numbers and arrays of numbers -- the bridge's own
