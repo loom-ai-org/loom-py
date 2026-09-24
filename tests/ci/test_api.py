@@ -23,6 +23,9 @@ class TestPackage:
     def test_it_imports_and_exports_what_it_says(self):
         assert loom.__all__ == [
             "Model",
+            # A voice file loaded for one model (loom.cpp ADR-045): what `model.voice()` returns and
+            # `text2speech.infer(voice=...)` accepts.
+            "Voice",
             "Tokenizer",
             "Transcription",
             "Segment",
@@ -141,6 +144,12 @@ class TestHubFileSelection:
         with pytest.raises(ValueError) as raised:
             loom.download("some/repo")
         assert "f32.gguf" in str(raised.value) and "q8_0.gguf" in str(raised.value)
+
+    def test_voice_files_in_a_subdirectory_are_not_models(self, monkeypatch):
+        """A repo that ships `voices/*.gguf` (loom.cpp ADR-045) still has ONE model, at its root."""
+        fake = self._with_hub(monkeypatch, ["model.gguf", "voices/alba.gguf", "voices/marius.gguf"])
+        assert str(loom.download("some/repo")).endswith("model.gguf")
+        assert fake.downloaded == "model.gguf"
 
     def test_no_gguf_at_all_says_so(self, monkeypatch):
         self._with_hub(monkeypatch, ["README.md"])

@@ -279,6 +279,22 @@ public:
     std::vector<std::string> topologies() const { return names_; }
     std::string architecture() const { return model_->architecture(); }
 
+    // A VOICE FILE for this model (`loom::load_voice`, loom.cpp ADR-045): its tensors are driver inputs
+    // by name, and the engine refuses one made for other weights. The check and the format live in the
+    // engine so this binding and `loom_cli --voice` cannot disagree about either.
+    bool takes_voice_files() const { return model_->has_kv("loom.voice.compat"); }
+    py::dict load_voice(const std::string& path) const {
+        const loom::VoiceFile voice = loom::load_voice(*model_, path);
+        py::dict inputs;
+        for (const auto& [name, values] : voice.inputs) inputs[py::str(name)] = py::cast(values);
+        py::dict out;
+        out["name"] = voice.name;
+        out["license"] = voice.license;
+        out["origin"] = voice.origin;
+        out["inputs"] = inputs;
+        return out;
+    }
+
     // WHAT THIS FILE SAYS IT IS, which is what the Python layer dispatches its end-to-end doors on.
     // `architecture` above is a per-MODEL name, so anything keyed on it would be a table of model names
     // living in this package -- exactly what loom-py's CLAUDE.md forbids and what the declared contract
@@ -618,6 +634,8 @@ PYBIND11_MODULE(_loom, m) {
         .def("device_description", &Model::device_description)
         .def("topologies", &Model::topologies)
         .def("architecture", &Model::architecture)
+        .def("takes_voice_files", &Model::takes_voice_files)
+        .def("load_voice", &Model::load_voice, py::arg("path"))
         .def("has_driver", &Model::has_driver)
         .def("driver_source", &Model::driver_source)
         .def("hparam_u32", &Model::hparam_u32, py::arg("key"))
