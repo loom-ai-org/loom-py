@@ -156,6 +156,64 @@ class TestADecodeOnlyVocabularySaysSo:
             ctc_model.tokenize("HI")
 
 
+class TestPocketTtsTextDoor:
+    """Family 9's fifth leaf: a SentencePiece unigram whose `encode` is the reference's whole text path,
+    sentence chunking included.
+
+    Pinned here: the tag reaches `loom::PocketTtsVocab`, `tokenize` prepares the text (capital, full
+    stop) and puts `</s>` between the chunks it cuts, and `detokenize` drops them. The exact ids are
+    the engine's to prove (tests/ci/test_pocket_tts_vocab.cpp, and 7000/7000 against the reference).
+    """
+
+    @pytest.fixture
+    def model(self, tmp_path):
+        path = str(tmp_path / "pocket_tts.gguf")
+        w = GGUFWriter(path, "loom-vocab-dispatch-fixture")
+        w.add_string("loom.architecture", "vocab_dispatch_test")
+        w.add_string("model.graph_topology", EMPTY_TOPOLOGY)
+        w.add_tokenizer_model("pocket_tts")
+        pieces = ["<unk>", "<s>", "</s>", "\u2581Hi", "\u2581the", "\u2581The", ".", "!"]
+        w.add_token_list(pieces)
+        w.add_token_scores([0.0, 0.0, 0.0] + [-1.0] * 5)
+        w.add_token_types([2, 3, 3] + [1] * 5)
+        w.add_unk_token_id(0)
+        w.add_add_space_prefix(True)
+        w.add_remove_extra_whitespaces(False)
+        p = "tokenizer.ggml.pocket_tts."
+        w.add_array(p + "replace_from", ["\n", "\r", "  "])
+        w.add_array(p + "replace_to", [" ", " ", " "])
+        w.add_array(p + "terminal", list(".!?"))
+        w.add_array(p + "weak", list(",;:"))
+        w.add_array(p + "closers", list("\"')"))
+        w.add_array(p + "full_stop", ["."])
+        w.add_array(p + "upper_from", ["h", "t"])
+        w.add_array(p + "upper_to", ["H", "T"])
+        w.add_array(p + "digits", list("0123456789"))
+        w.add_array(p + "sentence_end_ids", [6, 7])
+        w.add_array(p + "clause_end_ids", [0])
+        w.add_int32(p + "max_tokens_per_chunk", 2)
+        w.add_int32(p + "chunk_separator", 2)
+        w.add_tensor("test.placeholder", np.zeros(4, dtype=np.float32))
+        w.write_header_to_file()
+        w.write_kv_data_to_file()
+        w.write_tensors_to_file()
+        w.close()
+        return loom.Model.from_file(path)
+
+    def test_the_tag_is_recognized_and_the_model_carries_a_tokenizer(self, model):
+        assert model.tokenizer is not None
+        assert model.tokenizer.kind == "pocket_tts"
+        assert model.tokenizer.size == 8
+
+    def test_tokenize_is_the_whole_text_path(self, model):
+        # "hi the. the!" -> "Hi the. the!" -> two sentences over a budget of two -> "Hi the." and
+        # "The!", each prepared on its own, `</s>` between.
+        assert model.tokenize("hi the. the!") == [3, 4, 6, 2, 5, 7]
+
+    def test_ids_decode_back_without_the_separator(self, model):
+        assert model.detokenize([3, 4, 6, 2, 5, 7]) == "Hi the. The!"
+
+
 class TestChatterboxTextDoor:
     """Family 9's fourth leaf: a character-level BPE whose `encode` is the reference's whole text path.
 
