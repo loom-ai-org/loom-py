@@ -736,6 +736,42 @@ class TestInterfacesAreTheModalityPair:
         audio = _model(handle).codes2speech.infer([[1, 2]])
         assert audio.sample_rate == 44100, "the file's own rate, not the fallback"
 
+    def test_a_stereo_codec_returns_interleaved_audio_that_says_so(self):
+        """MOSS-Audio-Tokenizer emits `L R L R ...` and declares `channels = 2`. The count travels
+        with the samples for the rate's reason: read as mono, stereo plays at half speed and nothing
+        raises."""
+        handle = _FakeHandle([[0.1, -0.1, 0.2, -0.2]],
+                             contract=dict(_CODEC_CONTRACT, sample_rate=48000, channels=2),
+                             hparams={"codec.n_codebooks": 2})
+        audio = _model(handle).codes2speech.infer([[1, 2]])
+        assert audio.channels == 2 and len(audio) == 4
+        assert audio.duration == pytest.approx(2 / 48000)
+        import numpy as np
+        assert np.asarray(audio).shape == (2, 2)
+
+    def test_a_stereo_file_is_written_with_two_channels(self, tmp_path):
+        import wave
+        from loom._interfaces import Audio
+
+        path = tmp_path / "stereo.wav"
+        Audio(samples=[0.5, -0.5, 0.25, -0.25], sample_rate=48000, channels=2).save(str(path))
+        with wave.open(str(path)) as f:
+            assert f.getnchannels() == 2 and f.getnframes() == 2
+
+    def test_a_codec_with_an_absent_id_takes_a_prefix_of_its_codebooks(self):
+        """A residual quantizer's first k codebooks decode on their own, which is how MOSS-TTS's 12
+        reach MOSS-Audio-Tokenizer's 32: the rest of each row is filled with the id the file declares
+        as absent."""
+        handle = _FakeHandle([[0.1]], contract=_CODEC_CONTRACT,
+                             hparams={"codec.n_codebooks": 4, "codec.absent_code": 1024})
+        _model(handle).codes2speech.infer([[1, 2], [3, 4]])
+        assert handle.calls[0]["codes"] == [1.0, 2.0, 1024.0, 1024.0, 3.0, 4.0, 1024.0, 1024.0]
+
+    def test_a_narrow_row_is_still_refused_by_a_codec_without_an_absent_id(self):
+        handle = _FakeHandle([[0.1]], contract=_CODEC_CONTRACT, hparams={"codec.n_codebooks": 4})
+        with pytest.raises(ValueError, match="4 codebooks per frame"):
+            _model(handle).codes2speech.infer([[1, 2]])
+
     def test_text2text_is_the_same_call_as_generate(self):
         handle = _FakeHandle([[7, 8], [7, 8]],
                              contract=dict(_ASR_CONTRACT, task="text-generation", input_kind="text",

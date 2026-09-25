@@ -47,6 +47,9 @@ class Audio:
     """
     samples: list[float]
     sample_rate: int
+    # Interleaved channels: 2 means `samples` runs `L R L R ...`. Travels with the samples for the
+    # rate's reason -- a stereo run read as mono plays at half speed with nothing raised.
+    channels: int = 1
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -55,7 +58,9 @@ class Audio:
     def duration(self) -> float:
         """Seconds, or 0 for an Audio built by hand with no rate -- without one there is no duration to
         report, only a count of numbers."""
-        return len(self.samples) / self.sample_rate if self.sample_rate else 0.0
+        if not self.sample_rate:
+            return 0.0
+        return len(self.samples) / self.channels / self.sample_rate
 
     def save(self, path: str) -> None:
         """Write a 16-bit PCM WAV. Deliberately `wave` from the standard library rather than soundfile:
@@ -72,16 +77,18 @@ class Audio:
         clipped = [max(-1.0, min(1.0, float(s))) for s in self.samples]
         frames = b"".join(int(s * 32767.0).to_bytes(2, "little", signed=True) for s in clipped)
         with wave.open(path, "wb") as out:
-            out.setnchannels(1)
+            # Interleaved samples are already in a WAV data chunk's own frame order.
+            out.setnchannels(self.channels)
             out.setsampwidth(2)
             out.setframerate(self.sample_rate)
             out.writeframes(frames)
 
     def __array__(self, dtype=None):  # numpy interop without importing numpy
+        """`[samples]` for mono, `[frames, channels]` for interleaved audio -- soundfile's layout."""
         import numpy as np
 
         array = np.asarray(self.samples, dtype=dtype or np.float32)
-        return array
+        return array.reshape(-1, self.channels) if self.channels > 1 else array
 
 
 @dataclass(frozen=True)
@@ -501,7 +508,20 @@ class Codes2Speech(Interface):
                 f"declared output kind is audio, so either the export or the driver is wrong."
             )
         return Audio(samples=[float(s) for s in samples],
-                     sample_rate=declared or int(sample_rate) or 24000)
+                     sample_rate=declared or int(sample_rate) or 24000,
+                     channels=int(self._model.contract.get("channels") or 1))
+
+    def _absent_code(self):
+        """The id this codec decodes as "codebook not in the row", or None when it declares none.
+
+        A residual quantizer's decode of its first k codebooks is a PREFIX of the full sum, so a codec
+        declaring this can take rows narrower than its width -- the LM that feeds it emits fewer
+        codebooks than it has (MOSS-TTS: 12 of MOSS-Audio-Tokenizer's 32). Absent for every codec
+        whose rows must be full."""
+        try:
+            return int(self._model.hparam("codec.absent_code", "u32"))
+        except Exception:
+            return None
 
     def _as_matrix(self, codes) -> list:
         """`codes` as a list of per-frame rows, whichever of the two shapes the caller holds.
@@ -521,6 +541,11 @@ class Codes2Speech(Interface):
         rows = list(codes)
         if rows and isinstance(rows[0], (list, tuple)):
             rows = [list(r) for r in rows]
+            absent = self._absent_code()
+            if absent is not None and width:
+                # Narrower rows are a prefix; the rest of each is filled with the absent id. A row
+                # WIDER than the codec is still an error below, as is any row on a codec without one.
+                rows = [r + [absent] * (width - len(r)) if len(r) < width else r for r in rows]
             bad = [i for i, r in enumerate(rows) if width and len(r) != width]
             if bad:
                 raise ValueError(
