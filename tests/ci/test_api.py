@@ -762,6 +762,26 @@ class TestInterfacesAreTheModalityPair:
         audio = _model(handle).codes2speech.infer([[1, 2]])
         assert audio.sample_rate == 44100, "the file's own rate, not the fallback"
 
+    def test_dropping_a_model_frees_it_without_the_cycle_collector(self):
+        """A Model must not be in a reference cycle: its engine weights (16.8 GB for MOSS-TTS) are
+        released only when it is, and a cycle defers that to whenever the collector next runs -- which
+        OOM-killed the model-card gate loading one 21 GB pair on top of the last."""
+        import gc
+        import weakref
+
+        gc.disable()
+        try:
+            model = _model(_FakeHandle([[0.1]], contract=_CODEC_CONTRACT,
+                                       hparams={"codec.n_codebooks": 2}))
+            door = model.codes2speech
+            ref = weakref.ref(model)
+            del model
+            assert ref() is not None, "a door held on its own keeps its model alive"
+            del door
+            assert ref() is None, "model -> interface -> model is a cycle again"
+        finally:
+            gc.enable()
+
     def test_a_stereo_codec_returns_interleaved_audio_that_says_so(self):
         """MOSS-Audio-Tokenizer emits `L R L R ...` and declares `channels = 2`. The count travels
         with the samples for the rate's reason: read as mono, stereo plays at half speed and nothing
