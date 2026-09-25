@@ -391,7 +391,7 @@ def test_tts_output_is_intelligible(name, oracle, jfk, tmp_path, monkeypatch):
     audio = produced(ns, "samples", "sample_rate")
     if audio is None:
         pytest.skip(f"{name}'s card synthesised nothing{' -- ' + unmet if unmet else ''}")
-    samples = list(audio.samples)
+    samples = _mono(audio)
     rate = audio.sample_rate
     assert samples, f"{name} synthesised nothing"
     peak = max(abs(s) for s in samples)
@@ -438,7 +438,7 @@ def test_a_codec_lm_says_the_words(name, oracle, jfk, tmp_path, monkeypatch):
     audio = produced(ns, "samples", "sample_rate")
     if audio is None:
         pytest.skip(f"{name}'s card produced no audio{' -- ' + unmet if unmet else ''}")
-    samples = list(audio.samples)
+    samples = _mono(audio)
     peak = max(abs(s) for s in samples)
     assert MIN_PEAK <= peak <= MAX_PEAK, (
         f"{name} peak {peak:.4f} outside [{MIN_PEAK}, {MAX_PEAK}] -- silence or clipping, which is a "
@@ -611,9 +611,13 @@ def test_codec_output_length_follows_the_input(name, jfk, tmp_path, monkeypatch)
     frame_rate = float(model.hparam("codec.frame_rate", "f32"))
     hop = rate / frame_rate
     frames = round(float(model.hparam("codec.frame_rate", "f32")))   # what the card decodes
-    expected = round(frames * hop)
+    # Times the channels: a stereo codec (MOSS-Audio-Tokenizer) returns interleaved `L R L R`, so its
+    # run is twice as long as its duration in samples -- which the file declares, like the hop.
+    channels = int(model.contract.get("channels") or 1)
+    assert audio.channels == channels, "the waveform must carry the channel count the file declares"
+    expected = round(frames * hop) * channels
     assert len(audio.samples) == expected, (
-        f"{name} decoded {frames} frames to {len(audio.samples)} samples; at {hop:.1f} samples per "
+        f"{name} decoded {frames} frames to {len(audio.samples)} floats; at {hop:.1f} samples per "
         f"frame that should be {expected}. A length that does not follow the input is the failure "
         f"this row exists for -- it produces a plausible file and the wrong duration."
     )
@@ -688,6 +692,17 @@ def test_a_codec_that_draws_its_own_noise_still_answers_the_same_twice(name):
         pytest.skip(f"{name} has no stochastic leaf -- `seed` changes nothing, which is correct for a "
                     f"deterministic codec like DAC")
     assert len(seeded) == len(first), "a seed must change the draw, not the length"
+
+
+def _mono(audio):
+    """The waveform as one channel, for the oracle: interleaved channels averaged. MOSS-Audio-Tokenizer
+    is the first stereo output here, and a recogniser handed `L R L R` as one channel hears it at
+    half speed."""
+    samples = list(audio.samples)
+    channels = int(getattr(audio, "channels", 1) or 1)
+    if channels == 1:
+        return samples
+    return [sum(samples[i:i + channels]) / channels for i in range(0, len(samples), channels)]
 
 
 def _resample_16k(samples, rate):

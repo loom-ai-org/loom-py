@@ -172,11 +172,9 @@ class Model:
         # repo and revision. None for a file loaded from disk.
         self._hub: dict | None = None
         self._contract = dict(handle.contract())
-        # One instance per interface, all of them, always. Most raise -- see `_interfaces.Interface`
-        # for why that is better than a method that is absent: "can this model do X" stays a question
-        # you can ask, and the answer names what the model actually is.
-        for cls in ALL_INTERFACES:
-            setattr(self, cls.name, cls(self))
+        # Every interface is reachable as `model.<name>`, all of them, always -- see the properties
+        # attached after this class. Most raise (`_interfaces.Interface` says why that is better than a
+        # method that is absent), but "can this model do X" stays a question you can ask.
 
     # -- construction --------------------------------------------------------------------------
 
@@ -691,6 +689,21 @@ class Tokenizer:
     def __repr__(self) -> str:
         lang = f" lang={self.default_lang!r}" if self.default_lang else ""
         return f"<loom.Tokenizer {self.kind!r} size={self.size}{lang}>"
+
+
+def _interface_property(cls):
+    return property(lambda self: cls(self), doc=f"`{cls.name}`: {cls.summary}")
+
+
+# **Built on access, not stored on the instance, and that is a memory fix.** Storing one interface per
+# door on the model made every `Model` a reference CYCLE (model -> interface -> model), so `del model`
+# freed nothing until Python's cycle collector happened to run: the engine's weights -- 16.8 GB for
+# MOSS-TTS -- stayed resident, and the model-card gate was OOM-killed loading the next row's pair on
+# top of the last one's. An interface holds its model; the model holds no interface. A door kept on
+# its own (`door = model.text2codes`) still keeps its model alive, which is the direction that matters.
+for _cls in ALL_INTERFACES:
+    setattr(Model, _cls.name, _interface_property(_cls))
+del _cls
 
 
 def _as_value(name: str, value: Any) -> float | list[float]:
