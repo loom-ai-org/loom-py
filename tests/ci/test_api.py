@@ -662,6 +662,32 @@ class TestInterfacesAreTheModalityPair:
         assert codec.calls[0]["codes"] == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
         assert audio.sample_rate == 44100
 
+    def test_a_narrower_lm_feeds_a_codec_that_declares_an_absent_id(self):
+        """MOSS-TTS emits 12 codebooks into MOSS-Audio-Tokenizer's 32: the pair fits because the
+        codec declares an absent id, and the host fills the rest of each row with it (ADR-050)."""
+        lm = _FakeHandle([[1, 2, 3, 4]], contract=_CODES_LM_CONTRACT, hparams={"codec.n_codebooks": 2})
+        codec = _FakeHandle([[0.1]], contract=_CODEC_CONTRACT,
+                            hparams={"codec.n_codebooks": 3, "codec.absent_code": 9})
+        _model(codec).codes2speech.infer(_model(lm).text2codes.infer("hello"))
+        assert codec.calls[0]["codes"] == [1.0, 2.0, 9.0, 3.0, 4.0, 9.0]
+
+    def test_a_declared_language_becomes_its_position_in_the_contract(self):
+        """1-based, with 0 meaning none: the driver indexes the prompt pieces the export pre-encoded
+        once per declared language (MOSS-TTS)."""
+        handle = _FakeHandle([[1, 2, 3], [1, 2, 3]],
+                             contract=dict(_CODES_LM_CONTRACT, languages=["zh", "en"]),
+                             hparams={"codec.n_codebooks": 3})
+        _model(handle).text2codes.infer("hello", language="en")
+        assert handle.calls[0]["language"] == 2.0
+        _model(handle).text2codes.infer("hello")
+        assert "language" not in handle.calls[1]
+
+    def test_an_undeclared_language_is_refused_with_the_ones_there_are(self):
+        handle = _FakeHandle([[1, 2, 3]], contract=dict(_CODES_LM_CONTRACT, languages=["zh", "en"]),
+                             hparams={"codec.n_codebooks": 3})
+        with pytest.raises(ValueError, match=r"declares \['zh', 'en'\]"):
+            _model(handle).text2codes.infer("hello", language="fr")
+
     def test_max_new_tokens_reaches_the_driver_only_when_named(self):
         """It counts AUDIO FRAMES, and the default belongs to the file. A host that always passed one
         would override a ceiling the export derived from the model's own position budget."""

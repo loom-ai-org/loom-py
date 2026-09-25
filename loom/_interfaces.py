@@ -394,7 +394,8 @@ class Text2Codes(Interface):
     summary = "text in, neural-codec tokens out -- an AR LM that speaks through a codec"
 
     def _infer(self, text: str | None = None, *, tokens: Sequence[int] | None = None,
-               max_new_tokens: int | None = None, **driver_inputs) -> list[list[int]]:
+               max_new_tokens: int | None = None, language: str | None = None,
+               **driver_inputs) -> list[list[int]]:
         """Generate codec tokens for a sentence.
 
         **The other half of the pair is a second model**, and that is the whole shape of this door:
@@ -435,6 +436,8 @@ class Text2Codes(Interface):
         inputs["tokens"] = [float(i) for i in ids]
         if max_new_tokens is not None:
             inputs["max_new_tokens"] = float(max_new_tokens)
+        if language is not None:
+            inputs["language"] = float(self._language_index(language))
         flat = self._model.infer(**inputs)
         if not isinstance(flat, list):
             raise TypeError(
@@ -443,6 +446,20 @@ class Text2Codes(Interface):
                 f"`model.driver_source` documents what `infer` actually returns."
             )
         return self._as_frames(flat)
+
+    def _language_index(self, language: str) -> int:
+        """`language` as the driver's `language` input: its 1-based position in the languages the
+        FILE declares, 0 meaning none. MOSS-TTS is the first to declare them -- its prompt template
+        carries a language line, pre-encoded once per language by the export. A code the file does
+        not declare is refused rather than dropped: silently synthesising with no language hint is a
+        worse answer than an error that lists the ones it has."""
+        declared = list(self._model.contract.get("languages") or [])
+        if language not in declared:
+            raise ValueError(
+                f"language={language!r} is not one this model declares"
+                + (f"; it declares {declared}" if declared else "; it declares none")
+            )
+        return declared.index(language) + 1
 
     def _as_frames(self, flat: Sequence[float]) -> list[list[int]]:
         """The driver's flat, frame-major run, cut into per-frame rows of the declared width.
