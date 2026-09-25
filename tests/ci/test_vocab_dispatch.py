@@ -350,3 +350,44 @@ class TestLanguageArgumentIsRejectedWhereItCannotBeHonoured:
 
     def test_the_same_vocabulary_tokenizes_fine_without_one(self, byte_model):
         assert byte_model.tokenize("hi") == [ord("h") + 3, ord("i") + 3, 1]
+
+
+class TestCosyVoice3TextDoor:
+    """Family 9's seventh leaf: Qwen2's byte-level BPE whose `encode` is the reference's text
+    normalisation -- numbers spelled out, the paragraph split into pieces, each piece opened by
+    `<|endoftext|>` so the driver can generate them in turn.
+
+    Pinned here: the tag reaches `loom::CosyVoice3Vocab`, `tokenize` is the whole path (spelling and
+    chunk headers), and `detokenize` drops the headers. The exact ids are the engine's to prove
+    (tests/ci/test_cosyvoice3_vocab.cpp, and 9000/9000 against the reference). The file is the engine
+    test's own fixture, written by its generator: a byte-level table with no merges the texts reach, so
+    ids are UTF-8 bytes, `<|endoftext|>` is 256, and the chunk budgets are 12/6/4 tokens.
+    """
+
+    @pytest.fixture
+    def model(self, tmp_path):
+        import runpy
+        import sys
+        from pathlib import Path
+
+        generator = Path(__file__).resolve().parents[2] / "vendor/loom.cpp/tests/fixtures/make_cosyvoice3_vocab_gguf.py"
+        path = tmp_path / "cosyvoice3.gguf"
+        argv = sys.argv
+        sys.argv = [str(generator), str(path)]
+        try:
+            runpy.run_path(str(generator), run_name="__main__")
+        finally:
+            sys.argv = argv
+        return loom.Model.from_file(str(path))
+
+    def test_the_tag_is_recognized_and_the_model_carries_a_tokenizer(self, model):
+        assert model.tokenizer is not None
+        assert model.tokenizer.kind == "cosyvoice3"
+
+    def test_tokenize_spells_numbers_and_opens_every_chunk(self, model):
+        ids = model.tokenize("Aa. Bb. Cc. Dd.")
+        assert ids == [256, *b"Aa. Bb. Cc.", 256, *b" Dd."]
+        assert model.tokenize("I am 12") == [256, *b"I am twelve."]
+
+    def test_detokenize_drops_the_headers(self, model):
+        assert model.detokenize(model.tokenize("Aa. Bb. Cc. Dd.")) == "Aa. Bb. Cc. Dd."
