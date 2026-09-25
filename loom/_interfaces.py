@@ -394,7 +394,7 @@ class Text2Codes(Interface):
     summary = "text in, neural-codec tokens out -- an AR LM that speaks through a codec"
 
     def _infer(self, text: str | None = None, *, tokens: Sequence[int] | None = None,
-               max_new_tokens: int | None = None, language: str | None = None,
+               max_new_tokens: int | None = None, language: str | None = None, voice: Any = None,
                **driver_inputs) -> list[list[int]]:
         """Generate codec tokens for a sentence.
 
@@ -416,6 +416,12 @@ class Text2Codes(Interface):
 
         Two ways in, the same ladder every other door offers: `text` goes through the model's own
         vocabulary, `tokens` are ids a caller already holds.
+
+        `voice` clones a voice for a model that takes voice files (`model.voices` lists them): a name,
+        a path, or a :class:`loom.Voice` -- `Text2Speech`'s door, the same resolution. For MOSS-TTS a
+        voice is one or more reference clips already encoded to codes by
+        `loom_exporter.moss_tts_voices`. Its inputs go to the driver, and one you pass explicitly still
+        wins.
         """
         if (text is None) == (tokens is None):
             raise TypeError(
@@ -432,7 +438,10 @@ class Text2Codes(Interface):
         else:
             ids = [int(t) for t in tokens]
 
-        inputs: dict[str, Any] = dict(driver_inputs)
+        inputs: dict[str, Any] = {}
+        if voice is not None:
+            inputs.update({name: list(values) for name, values in self._model.voice(voice).inputs.items()})
+        inputs.update(driver_inputs)
         inputs["tokens"] = [float(i) for i in ids]
         if max_new_tokens is not None:
             inputs["max_new_tokens"] = float(max_new_tokens)
