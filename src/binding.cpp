@@ -101,6 +101,12 @@ public:
             // the reference's whole text path: `punc_norm`, spaces to `[SPACE]`, then the BPE. So a
             // caller hands it the sentence as typed, exactly as `ChatterboxTTS.generate` takes it.
             tokenizer->chatterbox_ = loom::ChatterboxVocab::load(model);
+        } else if (tokenizer->kind_ == "pocket_tts") {
+            // Family 9's fifth leaf. A SentencePiece unigram whose `encode` is the reference's whole
+            // text path: prepare the text, split it into sentence chunks, prepare and tokenize each,
+            // `</s>` between them -- the driver generates each chunk from a fresh copy of the voice.
+            // So a caller hands it the text as typed, however long.
+            tokenizer->pocket_tts_ = loom::PocketTtsVocab::load(model);
         } else if (tokenizer->kind_ == "llama" || tokenizer->kind_ == "t5") {
             tokenizer->spm_ = loom::Vocab::load(model);
         }
@@ -110,7 +116,7 @@ public:
 
     bool valid() const {
         return spm_ || bpe_ || wordpiece_ || byte_ || supertonic_ || phoneme_ || ctc_ || f5_ ||
-               chatterbox_;
+               chatterbox_ || pocket_tts_;
     }
     const std::string& kind() const { return kind_; }
 
@@ -123,6 +129,7 @@ public:
         if (ctc_) return ctc_->size();
         if (f5_) return f5_->size();
         if (chatterbox_) return chatterbox_->size();
+        if (pocket_tts_) return pocket_tts_->size();
         // n_tokens(), not vocab_size() -- the latter is the 65536-entry BMP lookup table, which is not
         // what any caller reading `tokenizer.size()` means.
         return supertonic_->n_tokens();
@@ -152,6 +159,7 @@ public:
         if (f5_) return f5_->encode(text);
         // Without the start/stop ids, which the driver adds -- as `generate` does after tokenizing.
         if (chatterbox_) return chatterbox_->encode(text);
+        if (pocket_tts_) return pocket_tts_->encode(text);
         return supertonic_->tokenize(text, lang);  // empty lang -> the file's own default_lang
     }
 
@@ -164,6 +172,7 @@ public:
         if (ctc_) return ctc_->decode(ids);
         if (f5_) return f5_->decode(ids);
         if (chatterbox_) return chatterbox_->decode(ids);
+        if (pocket_tts_) return pocket_tts_->decode(ids);
         return supertonic_->detokenize(ids);
     }
 
@@ -182,6 +191,7 @@ private:
     std::unique_ptr<loom::CtcVocab> ctc_;
     std::unique_ptr<loom::F5Vocab> f5_;
     std::unique_ptr<loom::ChatterboxVocab> chatterbox_;
+    std::unique_ptr<loom::PocketTtsVocab> pocket_tts_;
 };
 
 // One driver input, marshalled. A driver's world is numbers and arrays of numbers -- the bridge's own
@@ -268,6 +278,22 @@ public:
 
     std::vector<std::string> topologies() const { return names_; }
     std::string architecture() const { return model_->architecture(); }
+
+    // A VOICE FILE for this model (`loom::load_voice`, loom.cpp ADR-045): its tensors are driver inputs
+    // by name, and the engine refuses one made for other weights. The check and the format live in the
+    // engine so this binding and `loom_cli --voice` cannot disagree about either.
+    bool takes_voice_files() const { return model_->has_kv("loom.voice.compat"); }
+    py::dict load_voice(const std::string& path) const {
+        const loom::VoiceFile voice = loom::load_voice(*model_, path);
+        py::dict inputs;
+        for (const auto& [name, values] : voice.inputs) inputs[py::str(name)] = py::cast(values);
+        py::dict out;
+        out["name"] = voice.name;
+        out["license"] = voice.license;
+        out["origin"] = voice.origin;
+        out["inputs"] = inputs;
+        return out;
+    }
 
     // WHAT THIS FILE SAYS IT IS, which is what the Python layer dispatches its end-to-end doors on.
     // `architecture` above is a per-MODEL name, so anything keyed on it would be a table of model names
@@ -608,6 +634,8 @@ PYBIND11_MODULE(_loom, m) {
         .def("device_description", &Model::device_description)
         .def("topologies", &Model::topologies)
         .def("architecture", &Model::architecture)
+        .def("takes_voice_files", &Model::takes_voice_files)
+        .def("load_voice", &Model::load_voice, py::arg("path"))
         .def("has_driver", &Model::has_driver)
         .def("driver_source", &Model::driver_source)
         .def("hparam_u32", &Model::hparam_u32, py::arg("key"))
