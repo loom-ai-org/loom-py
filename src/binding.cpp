@@ -107,6 +107,12 @@ public:
             // `</s>` between them -- the driver generates each chunk from a fresh copy of the voice.
             // So a caller hands it the text as typed, however long.
             tokenizer->pocket_tts_ = loom::PocketTtsVocab::load(model);
+        } else if (tokenizer->kind_ == "voxcpm2") {
+            // Family 9's sixth leaf. A character-level BPE merged by rank, with byte fallback, whose
+            // `encode` is the reference's text path: whitespace runs to one space, the BPE, then its
+            // multi-character Chinese pieces split back into characters. The driver appends
+            // `<|audio_start|>`, as the reference does after tokenizing.
+            tokenizer->voxcpm_ = loom::VoxCpmVocab::load(model);
         } else if (tokenizer->kind_ == "llama" || tokenizer->kind_ == "t5") {
             tokenizer->spm_ = loom::Vocab::load(model);
         }
@@ -116,7 +122,7 @@ public:
 
     bool valid() const {
         return spm_ || bpe_ || wordpiece_ || byte_ || supertonic_ || phoneme_ || ctc_ || f5_ ||
-               chatterbox_ || pocket_tts_;
+               chatterbox_ || pocket_tts_ || voxcpm_;
     }
     const std::string& kind() const { return kind_; }
 
@@ -130,6 +136,7 @@ public:
         if (f5_) return f5_->size();
         if (chatterbox_) return chatterbox_->size();
         if (pocket_tts_) return pocket_tts_->size();
+        if (voxcpm_) return voxcpm_->size();
         // n_tokens(), not vocab_size() -- the latter is the 65536-entry BMP lookup table, which is not
         // what any caller reading `tokenizer.size()` means.
         return supertonic_->n_tokens();
@@ -160,6 +167,7 @@ public:
         // Without the start/stop ids, which the driver adds -- as `generate` does after tokenizing.
         if (chatterbox_) return chatterbox_->encode(text);
         if (pocket_tts_) return pocket_tts_->encode(text);
+        if (voxcpm_) return voxcpm_->encode(text);
         return supertonic_->tokenize(text, lang);  // empty lang -> the file's own default_lang
     }
 
@@ -173,6 +181,7 @@ public:
         if (f5_) return f5_->decode(ids);
         if (chatterbox_) return chatterbox_->decode(ids);
         if (pocket_tts_) return pocket_tts_->decode(ids);
+        if (voxcpm_) return voxcpm_->decode(ids);
         return supertonic_->detokenize(ids);
     }
 
@@ -192,6 +201,7 @@ private:
     std::unique_ptr<loom::F5Vocab> f5_;
     std::unique_ptr<loom::ChatterboxVocab> chatterbox_;
     std::unique_ptr<loom::PocketTtsVocab> pocket_tts_;
+    std::unique_ptr<loom::VoxCpmVocab> voxcpm_;
 };
 
 // One driver input, marshalled. A driver's world is numbers and arrays of numbers -- the bridge's own
