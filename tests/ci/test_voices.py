@@ -1,4 +1,5 @@
-"""Voice files (loom.cpp ADR-045): `model.voices`, `model.voice(...)` and `text2speech.infer(voice=...)`.
+"""Voice files (loom.cpp ADR-045): `model.voices`, `model.voice(...)`, and `infer(voice=...)` on both
+doors that take one -- `text2speech`, and `text2codes` for a codec LM that clones (MOSS-TTS).
 
 A voice file is a small GGUF whose tensors are driver inputs by name, stamped with the fingerprint of
 the weights it was made for; the model declares the same fingerprint, and the ENGINE refuses a
@@ -22,14 +23,20 @@ end
 """
 
 
-def _model(path, compat=COMPAT, voices=("builtin",)):
+def _model(path, compat=COMPAT, voices=("builtin",), codes=False):
     w = GGUFWriter(str(path), "voice-door-test")
     w.add_string("loom.architecture", "voice_door_test")
     w.add_string("model.graph_topology", '{"version": 1, "nodes": []}')
     w.add_string("model.driver_script", DRIVER)
-    w.add_string("loom.task", "text-to-speech")
-    w.add_string("loom.input.kind", "text")
-    w.add_string("loom.output.kind", "audio")
+    if codes:
+        w.add_string("loom.task", "text-to-codes")
+        w.add_string("loom.input.kind", "text")
+        w.add_string("loom.output.kind", "audio_codes")
+        w.add_uint32("loom.codec.n_codebooks", 1)
+    else:
+        w.add_string("loom.task", "text-to-speech")
+        w.add_string("loom.input.kind", "text")
+        w.add_string("loom.output.kind", "audio")
     w.add_uint32("loom.sample_rate", 24000)
     if compat is not None:
         w.add_string("loom.voice.compat", compat)
@@ -138,3 +145,14 @@ def test_a_name_not_on_disk_is_fetched_from_the_models_hub_repo(model, tmp_path,
     assert "remote" in model.voices
     assert model.text2speech.infer(tokens=[5], voice="remote").samples == [6.0, 6.0]
     assert fetched == [("loom-ai-org/x", "voices/remote.gguf", "abc")]
+
+
+def test_text2codes_takes_a_voice_through_the_same_door(tmp_path):
+    """MOSS-TTS clones from a voice file of reference codes, and its door is `text2codes`: the same
+    resolution, the same precedence, rows of the declared width back."""
+    m = _model(tmp_path / "codes.gguf", voices=(), codes=True)
+    _voice(tmp_path / "voices" / "pair.gguf", [3.0, 4.0], name="pair")
+    assert m.voices == ["pair"]
+    assert m.text2codes.infer(tokens=[5], voice="pair") == [[3], [4]]
+    assert m.text2codes.infer(tokens=[5], voice="pair", voice_kv=[8.0]) == [[8]]
+    assert m.text2codes.infer(tokens=[5]) == [[-1]]

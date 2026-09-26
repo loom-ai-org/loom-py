@@ -56,6 +56,7 @@ It skips cleanly without that variable, like every gate test. `pip install "loom
 additionally covers the text-in door; without it the cards' G2P lines are reported as skipped
 preconditions rather than failures, because a missing optional extra is not a broken card.
 """
+import gc
 import os
 import re
 import wave
@@ -284,6 +285,23 @@ def oracle():
     pytest.skip(f"{ORACLE} is not in LOOM_MODEL_CARDS; it is the oracle for every TTS row")
 
 
+# Every namespace `run_card` built, emptied when its test ends. A test that SKIPS after running a card
+# -- a voice-cloning card stops at the reader's own voice file, which is a skip -- leaves its exception
+# on the report, the traceback keeps the test's frame, and the frame keeps the namespace: MOSS-TTS's
+# 16.8 GB model and its codec stayed resident into the next row, which loaded them again and was
+# OOM-killed at 27.3 GB. Emptying the dict frees the models whatever still holds the frame.
+_CARD_NAMESPACES = []
+
+
+@pytest.fixture(autouse=True)
+def _release_card_namespaces():
+    yield
+    for ns in _CARD_NAMESPACES:
+        ns.clear()
+    _CARD_NAMESPACES.clear()
+    gc.collect()
+
+
 def run_card(name, gguf, readme, jfk, tmp_path, monkeypatch):
     """Execute every block of one card, in order, in one namespace; return that namespace.
 
@@ -299,6 +317,7 @@ def run_card(name, gguf, readme, jfk, tmp_path, monkeypatch):
     assert blocks, f"{name}'s card publishes no python block, so it documents nothing runnable"
     monkeypatch.chdir(tmp_path)   # cards write out.wav; let them, somewhere disposable
     ns = {"loom": loom, "audio": jfk}
+    _CARD_NAMESPACES.append(ns)
     # A PRECONDITION STOPS THE BLOCK BUT DOES NOT DISCARD WHAT IT ALREADY DID, and the first version
     # of this got that wrong in a way that silently cost real coverage. Four of the five TTS cards
     # synthesise from phonemes FIRST and only then call `set_lexicon` to demonstrate the text door.
