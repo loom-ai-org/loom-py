@@ -336,6 +336,7 @@ public:
         out["output_kind"] = c.output_kind;
         out["interface"] = c.interface_name();
         out["sample_rate"] = c.sample_rate;
+        out["channels"] = c.channels;
         out["clip_samples"] = c.clip_samples;
         out["max_input_tokens"] = c.max_input_tokens;
         out["text_frontend"] = c.text_frontend;
