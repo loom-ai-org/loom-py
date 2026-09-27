@@ -42,7 +42,10 @@ def download(
 
     if filename is None:
         listing = hub.list_repo_files(repo_id, revision=revision, token=token)
-        candidates = sorted(name for name in listing if name.endswith(GGUF_SUFFIX))
+        # Top-level files only: a repo's MODEL sits at its root, and a subdirectory holds what goes with
+        # it -- `voices/*.gguf` are voice files (loom.cpp ADR-045), not models, and counting them would
+        # make every repo that ships voices ask which "model" you meant.
+        candidates = sorted(name for name in listing if name.endswith(GGUF_SUFFIX) and "/" not in name)
         if not candidates:
             raise FileNotFoundError(f"{repo_id} (revision {revision}) contains no {GGUF_SUFFIX} file")
         if len(candidates) > 1:
@@ -57,3 +60,9 @@ def download(
         repo_id=repo_id, filename=filename, revision=revision,
         cache_dir=str(cache_dir) if cache_dir else None, token=token,
     ))
+
+
+def list_files(repo_id: str, prefix: str, revision: str = "main", token: str | None = None) -> list[str]:
+    """The repo's files under `prefix`, e.g. `"voices/"`."""
+    hub = _require_hub()
+    return sorted(n for n in hub.list_repo_files(repo_id, revision=revision, token=token) if n.startswith(prefix))

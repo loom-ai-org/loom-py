@@ -156,6 +156,170 @@ class TestADecodeOnlyVocabularySaysSo:
             ctc_model.tokenize("HI")
 
 
+class TestPocketTtsTextDoor:
+    """Family 9's fifth leaf: a SentencePiece unigram whose `encode` is the reference's whole text path,
+    sentence chunking included.
+
+    Pinned here: the tag reaches `loom::PocketTtsVocab`, `tokenize` prepares the text (capital, full
+    stop) and opens each chunk it cuts with the header carrying its tail (`<s>` for at most four words),
+    and `detokenize` drops the headers. The exact ids are
+    the engine's to prove (tests/ci/test_pocket_tts_vocab.cpp, and 7000/7000 against the reference).
+    """
+
+    @pytest.fixture
+    def model(self, tmp_path):
+        path = str(tmp_path / "pocket_tts.gguf")
+        w = GGUFWriter(path, "loom-vocab-dispatch-fixture")
+        w.add_string("loom.architecture", "vocab_dispatch_test")
+        w.add_string("model.graph_topology", EMPTY_TOPOLOGY)
+        w.add_tokenizer_model("pocket_tts")
+        pieces = ["<unk>", "<s>", "</s>", "\u2581Hi", "\u2581the", "\u2581The", ".", "!"]
+        w.add_token_list(pieces)
+        w.add_token_scores([0.0, 0.0, 0.0] + [-1.0] * 5)
+        w.add_token_types([2, 3, 3] + [1] * 5)
+        w.add_unk_token_id(0)
+        w.add_add_space_prefix(True)
+        w.add_remove_extra_whitespaces(False)
+        p = "tokenizer.ggml.pocket_tts."
+        w.add_array(p + "replace_from", ["\n", "\r", "  "])
+        w.add_array(p + "replace_to", [" ", " ", " "])
+        w.add_array(p + "terminal", list(".!?"))
+        w.add_array(p + "weak", list(",;:"))
+        w.add_array(p + "closers", list("\"')"))
+        w.add_array(p + "full_stop", ["."])
+        w.add_array(p + "upper_from", ["h", "t"])
+        w.add_array(p + "upper_to", ["H", "T"])
+        w.add_array(p + "digits", list("0123456789"))
+        w.add_array(p + "sentence_end_ids", [6, 7])
+        w.add_array(p + "clause_end_ids", [0])
+        w.add_int32(p + "max_tokens_per_chunk", 2)
+        w.add_int32(p + "chunk_header_short", 1)
+        w.add_int32(p + "chunk_header_long", 2)
+        w.add_int32(p + "short_chunk_max_words", 4)
+        w.add_tensor("test.placeholder", np.zeros(4, dtype=np.float32))
+        w.write_header_to_file()
+        w.write_kv_data_to_file()
+        w.write_tensors_to_file()
+        w.close()
+        return loom.Model.from_file(path)
+
+    def test_the_tag_is_recognized_and_the_model_carries_a_tokenizer(self, model):
+        assert model.tokenizer is not None
+        assert model.tokenizer.kind == "pocket_tts"
+        assert model.tokenizer.size == 8
+
+    def test_tokenize_is_the_whole_text_path(self, model):
+        # "hi the. the!" -> "Hi the. the!" -> two sentences over a budget of two -> "Hi the." and
+        # "The!", each prepared on its own, each opened by `<s>` (two words and one: the short tail).
+        assert model.tokenize("hi the. the!") == [1, 3, 4, 6, 1, 5, 7]
+
+    def test_ids_decode_back_without_the_headers(self, model):
+        assert model.detokenize([1, 3, 4, 6, 2, 5, 7]) == "Hi the. The!"
+
+
+class TestVoxCpm2TextDoor:
+    """Family 9's sixth leaf: a rank-merged character BPE with byte fallback, whose `encode` is the
+    reference's text path -- whitespace runs to one space, the BPE, then multi-character Chinese pieces
+    split back into characters.
+
+    Pinned here: the tag reaches `loom::VoxCpmVocab`, `tokenize` is the whole path (no BOS, the split
+    applied), and `detokenize` undoes the `▁`. The exact ids are the engine's to prove
+    (tests/ci/test_voxcpm_vocab.cpp, and 4992/4992 against the reference).
+    """
+
+    @pytest.fixture
+    def model(self, tmp_path):
+        path = str(tmp_path / "voxcpm2.gguf")
+        w = GGUFWriter(path, "loom-vocab-dispatch-fixture")
+        w.add_string("loom.architecture", "vocab_dispatch_test")
+        w.add_string("model.graph_topology", EMPTY_TOPOLOGY)
+        w.add_tokenizer_model("voxcpm2")
+        pieces = ["<unk>", "<s>"] + [f"<0x{b:02X}>" for b in range(256)] + \
+            ["\u2581", "H", "i", "Hi", "\u2581Hi", "\u4f60", "\u597d", "\u4f60\u597d", "\u2581\u4f60\u597d"]
+        ids = {p: i for i, p in enumerate(pieces)}
+        w.add_token_list(pieces)
+        w.add_token_types([3, 3] + [6] * 256 + [1] * 9)
+        w.add_token_merges(["H i", "\u2581 Hi", "\u4f60 \u597d", "\u2581 \u4f60\u597d"])
+        w.add_unk_token_id(0)
+        p = "tokenizer.ggml.voxcpm2."
+        w.add_array(p + "added_tokens", ["<unk>", "<s>"])
+        w.add_string(p + "prepend", "\u2581")
+        w.add_string(p + "space", "\u2581")
+        w.add_array(p + "split_from", [ids["\u4f60\u597d"], ids["\u2581\u4f60\u597d"]])
+        w.add_array(p + "split_offsets", [0, 2, 4])
+        w.add_array(p + "split_to", [ids["\u4f60"], ids["\u597d"]] * 2)
+        w.add_tensor("test.placeholder", np.zeros(4, dtype=np.float32))
+        w.write_header_to_file()
+        w.write_kv_data_to_file()
+        w.write_tensors_to_file()
+        w.close()
+        return loom.Model.from_file(path)
+
+    def test_the_tag_is_recognized_and_the_model_carries_a_tokenizer(self, model):
+        assert model.tokenizer is not None
+        assert model.tokenizer.kind == "voxcpm2"
+        assert model.tokenizer.size == 267
+
+    def test_tokenize_is_the_whole_text_path(self, model):
+        # "Hi\n\n你好" -> "Hi 你好" -> ▁Hi ▁你好 -> the Chinese piece split, its `▁` with it. No BOS.
+        assert model.tokenize("Hi\n\n\u4f60\u597d") == [262, 263, 264]
+
+    def test_ids_decode_back(self, model):
+        assert model.detokenize([262, 258]) == "Hi "
+
+
+class TestChatterboxTextDoor:
+    """Family 9's fourth leaf: a character-level BPE whose `encode` is the reference's whole text path.
+
+    The point for this binding is that the tag reaches `loom::ChatterboxVocab` and that `tokenize` is
+    the WHOLE path -- `punc_norm` included -- so a caller hands over the sentence as typed. The exact
+    ids are the engine's to prove (tests/ci/test_chatterbox_vocab.cpp, and 3000/3000 against the
+    reference); what is pinned here is that this door is the engine's and not a second implementation.
+    """
+
+    @pytest.fixture
+    def model(self, tmp_path):
+        path = str(tmp_path / "chatterbox.gguf")
+        w = GGUFWriter(path, "loom-vocab-dispatch-fixture")
+        w.add_string("loom.architecture", "vocab_dispatch_test")
+        w.add_string("model.graph_topology", EMPTY_TOPOLOGY)
+        w.add_tokenizer_model("chatterbox")
+        tokens = ["[STOP]", "[UNK]", "[SPACE]", ".", "H", "i", "t", "h", "e", "th", "the"]
+        w.add_token_list(tokens)
+        w.add_token_merges(["t h", "th e"])
+        w.add_unk_token_id(1)
+        p = "tokenizer.ggml.chatterbox."
+        w.add_array(p + "added_tokens", ["[STOP]", "[UNK]", "[SPACE]"])
+        w.add_array(p + "word_chars", ["H", "i", "t", "h", "e"])
+        w.add_array(p + "replace_from", [";"])
+        w.add_array(p + "replace_to", [", "])
+        w.add_array(p + "sentence_enders", [".", "!", "?", "-", ","])
+        w.add_array(p + "upper_from", ["h"])
+        w.add_array(p + "upper_to", ["H"])
+        w.add_array(p + "decode_drop", ["[STOP]", "[UNK]"])
+        w.add_string(p + "space_token", "[SPACE]")
+        w.add_string(p + "terminal", ".")
+        w.add_string(p + "empty_text", "Hi.")
+        w.add_tensor("test.placeholder", np.zeros(4, dtype=np.float32))
+        w.write_header_to_file()
+        w.write_kv_data_to_file()
+        w.write_tensors_to_file()
+        w.close()
+        return loom.Model.from_file(path)
+
+    def test_the_tag_is_recognized_and_the_model_carries_a_tokenizer(self, model):
+        assert model.tokenizer is not None
+        assert model.tokenizer.kind == "chatterbox"
+        assert model.tokenizer.size == 11
+
+    def test_tokenize_is_the_whole_text_path(self, model):
+        # "hi the" -> punc_norm -> "Hi the." -> "Hi[SPACE]the." -> H, i, [SPACE], the, .
+        assert model.tokenize("hi the") == [4, 5, 2, 10, 3]
+
+    def test_ids_decode_back_to_the_normalized_sentence(self, model):
+        assert model.detokenize([4, 5, 2, 10, 3]) == "Hi the."
+
+
 class TestLanguageArgumentIsRejectedWhereItCannotBeHonoured:
     """A dropped argument is the failure this rejection prevents: a caller asking for Korean and
     quietly getting whatever the tokenizer does by default."""
@@ -186,3 +350,44 @@ class TestLanguageArgumentIsRejectedWhereItCannotBeHonoured:
 
     def test_the_same_vocabulary_tokenizes_fine_without_one(self, byte_model):
         assert byte_model.tokenize("hi") == [ord("h") + 3, ord("i") + 3, 1]
+
+
+class TestCosyVoice3TextDoor:
+    """Family 9's seventh leaf: Qwen2's byte-level BPE whose `encode` is the reference's text
+    normalisation -- numbers spelled out, the paragraph split into pieces, each piece opened by
+    `<|endoftext|>` so the driver can generate them in turn.
+
+    Pinned here: the tag reaches `loom::CosyVoice3Vocab`, `tokenize` is the whole path (spelling and
+    chunk headers), and `detokenize` drops the headers. The exact ids are the engine's to prove
+    (tests/ci/test_cosyvoice3_vocab.cpp, and 9000/9000 against the reference). The file is the engine
+    test's own fixture, written by its generator: a byte-level table with no merges the texts reach, so
+    ids are UTF-8 bytes, `<|endoftext|>` is 256, and the chunk budgets are 12/6/4 tokens.
+    """
+
+    @pytest.fixture
+    def model(self, tmp_path):
+        import runpy
+        import sys
+        from pathlib import Path
+
+        generator = Path(__file__).resolve().parents[2] / "vendor/loom.cpp/tests/fixtures/make_cosyvoice3_vocab_gguf.py"
+        path = tmp_path / "cosyvoice3.gguf"
+        argv = sys.argv
+        sys.argv = [str(generator), str(path)]
+        try:
+            runpy.run_path(str(generator), run_name="__main__")
+        finally:
+            sys.argv = argv
+        return loom.Model.from_file(str(path))
+
+    def test_the_tag_is_recognized_and_the_model_carries_a_tokenizer(self, model):
+        assert model.tokenizer is not None
+        assert model.tokenizer.kind == "cosyvoice3"
+
+    def test_tokenize_spells_numbers_and_opens_every_chunk(self, model):
+        ids = model.tokenize("Aa. Bb. Cc. Dd.")
+        assert ids == [256, *b"Aa. Bb. Cc.", 256, *b" Dd."]
+        assert model.tokenize("I am 12") == [256, *b"I am twelve."]
+
+    def test_detokenize_drops_the_headers(self, model):
+        assert model.detokenize(model.tokenize("Aa. Bb. Cc. Dd.")) == "Aa. Bb. Cc. Dd."

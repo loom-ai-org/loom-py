@@ -56,6 +56,7 @@ It skips cleanly without that variable, like every gate test. `pip install "loom
 additionally covers the text-in door; without it the cards' G2P lines are reported as skipped
 preconditions rather than failures, because a missing optional extra is not a broken card.
 """
+import gc
 import os
 import re
 import wave
@@ -284,6 +285,23 @@ def oracle():
     pytest.skip(f"{ORACLE} is not in LOOM_MODEL_CARDS; it is the oracle for every TTS row")
 
 
+# Every namespace `run_card` built, emptied when its test ends. A test that SKIPS after running a card
+# -- a voice-cloning card stops at the reader's own voice file, which is a skip -- leaves its exception
+# on the report, the traceback keeps the test's frame, and the frame keeps the namespace: MOSS-TTS's
+# 16.8 GB model and its codec stayed resident into the next row, which loaded them again and was
+# OOM-killed at 27.3 GB. Emptying the dict frees the models whatever still holds the frame.
+_CARD_NAMESPACES = []
+
+
+@pytest.fixture(autouse=True)
+def _release_card_namespaces():
+    yield
+    for ns in _CARD_NAMESPACES:
+        ns.clear()
+    _CARD_NAMESPACES.clear()
+    gc.collect()
+
+
 def run_card(name, gguf, readme, jfk, tmp_path, monkeypatch):
     """Execute every block of one card, in order, in one namespace; return that namespace.
 
@@ -299,6 +317,7 @@ def run_card(name, gguf, readme, jfk, tmp_path, monkeypatch):
     assert blocks, f"{name}'s card publishes no python block, so it documents nothing runnable"
     monkeypatch.chdir(tmp_path)   # cards write out.wav; let them, somewhere disposable
     ns = {"loom": loom, "audio": jfk}
+    _CARD_NAMESPACES.append(ns)
     # A PRECONDITION STOPS THE BLOCK BUT DOES NOT DISCARD WHAT IT ALREADY DID, and the first version
     # of this got that wrong in a way that silently cost real coverage. Four of the five TTS cards
     # synthesise from phonemes FIRST and only then call `set_lexicon` to demonstrate the text door.
@@ -391,7 +410,7 @@ def test_tts_output_is_intelligible(name, oracle, jfk, tmp_path, monkeypatch):
     audio = produced(ns, "samples", "sample_rate")
     if audio is None:
         pytest.skip(f"{name}'s card synthesised nothing{' -- ' + unmet if unmet else ''}")
-    samples = list(audio.samples)
+    samples = _mono(audio)
     rate = audio.sample_rate
     assert samples, f"{name} synthesised nothing"
     peak = max(abs(s) for s in samples)
@@ -438,7 +457,7 @@ def test_a_codec_lm_says_the_words(name, oracle, jfk, tmp_path, monkeypatch):
     audio = produced(ns, "samples", "sample_rate")
     if audio is None:
         pytest.skip(f"{name}'s card produced no audio{' -- ' + unmet if unmet else ''}")
-    samples = list(audio.samples)
+    samples = _mono(audio)
     peak = max(abs(s) for s in samples)
     assert MIN_PEAK <= peak <= MAX_PEAK, (
         f"{name} peak {peak:.4f} outside [{MIN_PEAK}, {MAX_PEAK}] -- silence or clipping, which is a "
@@ -611,9 +630,13 @@ def test_codec_output_length_follows_the_input(name, jfk, tmp_path, monkeypatch)
     frame_rate = float(model.hparam("codec.frame_rate", "f32"))
     hop = rate / frame_rate
     frames = round(float(model.hparam("codec.frame_rate", "f32")))   # what the card decodes
-    expected = round(frames * hop)
+    # Times the channels: a stereo codec (MOSS-Audio-Tokenizer) returns interleaved `L R L R`, so its
+    # run is twice as long as its duration in samples -- which the file declares, like the hop.
+    channels = int(model.contract.get("channels") or 1)
+    assert audio.channels == channels, "the waveform must carry the channel count the file declares"
+    expected = round(frames * hop) * channels
     assert len(audio.samples) == expected, (
-        f"{name} decoded {frames} frames to {len(audio.samples)} samples; at {hop:.1f} samples per "
+        f"{name} decoded {frames} frames to {len(audio.samples)} floats; at {hop:.1f} samples per "
         f"frame that should be {expected}. A length that does not follow the input is the failure "
         f"this row exists for -- it produces a plausible file and the wrong duration."
     )
@@ -688,6 +711,17 @@ def test_a_codec_that_draws_its_own_noise_still_answers_the_same_twice(name):
         pytest.skip(f"{name} has no stochastic leaf -- `seed` changes nothing, which is correct for a "
                     f"deterministic codec like DAC")
     assert len(seeded) == len(first), "a seed must change the draw, not the length"
+
+
+def _mono(audio):
+    """The waveform as one channel, for the oracle: interleaved channels averaged. MOSS-Audio-Tokenizer
+    is the first stereo output here, and a recogniser handed `L R L R` as one channel hears it at
+    half speed."""
+    samples = list(audio.samples)
+    channels = int(getattr(audio, "channels", 1) or 1)
+    if channels == 1:
+        return samples
+    return [sum(samples[i:i + channels]) / channels for i in range(0, len(samples), channels)]
 
 
 def _resample_16k(samples, rate):
