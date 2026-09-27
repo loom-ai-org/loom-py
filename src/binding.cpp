@@ -88,6 +88,14 @@ public:
             tokenizer->ctc_ = loom::CtcVocab::load(model);
         } else if (tokenizer->kind_ == "supertonic") {
             tokenizer->supertonic_ = loom::SupertonicTextVectorizer::load(model);
+        } else if (tokenizer->kind_ == "f5") {
+            // Family 9's third leaf. A CHARACTER table, so `encode` is a codepoint scan -- and it is a
+            // PARTIAL door by construction: F5-TTS's own front end runs rjieba segmentation and
+            // pypinyin before a single id, and only the table half can ship in a GGUF. It reproduces
+            // that function exactly for ordinary English prose and raises by name on CJK rather than
+            // mapping Chinese character by character, which would return the unknown id for a whole
+            // sentence and synthesise confident nonsense.
+            tokenizer->f5_ = loom::F5Vocab::load(model);
         } else if (tokenizer->kind_ == "llama" || tokenizer->kind_ == "t5") {
             tokenizer->spm_ = loom::Vocab::load(model);
         }
@@ -95,7 +103,9 @@ public:
         return tokenizer;
     }
 
-    bool valid() const { return spm_ || bpe_ || wordpiece_ || byte_ || supertonic_ || phoneme_ || ctc_; }
+    bool valid() const {
+        return spm_ || bpe_ || wordpiece_ || byte_ || supertonic_ || phoneme_ || ctc_ || f5_;
+    }
     const std::string& kind() const { return kind_; }
 
     size_t size() const {
@@ -105,6 +115,7 @@ public:
         if (byte_) return byte_->size();
         if (phoneme_) return phoneme_->size();
         if (ctc_) return ctc_->size();
+        if (f5_) return f5_->size();
         // n_tokens(), not vocab_size() -- the latter is the 65536-entry BMP lookup table, which is not
         // what any caller reading `tokenizer.size()` means.
         return supertonic_->n_tokens();
@@ -129,6 +140,9 @@ public:
         if (wordpiece_) return wordpiece_->encode(text);
         if (byte_) return byte_->encode(text);
         if (phoneme_) return phoneme_->encode(text);
+        // TABLE ids, not graph ids: the driver adds the filler-token offset the embedding reserves
+        // row 0 for, the same way it does for a caller who built the ids elsewhere.
+        if (f5_) return f5_->encode(text);
         return supertonic_->tokenize(text, lang);  // empty lang -> the file's own default_lang
     }
 
@@ -139,6 +153,7 @@ public:
         if (byte_) return byte_->decode(ids);
         if (phoneme_) return phoneme_->decode(ids);
         if (ctc_) return ctc_->decode(ids);
+        if (f5_) return f5_->decode(ids);
         return supertonic_->detokenize(ids);
     }
 
@@ -155,6 +170,7 @@ private:
     std::unique_ptr<loom::SupertonicTextVectorizer> supertonic_;
     std::unique_ptr<loom::PhonemeVocab> phoneme_;
     std::unique_ptr<loom::CtcVocab> ctc_;
+    std::unique_ptr<loom::F5Vocab> f5_;
 };
 
 // One driver input, marshalled. A driver's world is numbers and arrays of numbers -- the bridge's own
