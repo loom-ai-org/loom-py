@@ -89,4 +89,12 @@ RUN dnf -y install cmake ninja-build && dnf clean all && \
         -DSHADERC_SKIP_COPYRIGHT_CHECK=ON && \
     cmake --build /tmp/shaderc-build --target install -j"$(nproc)" && \
     rm -rf /tmp/shaderc /tmp/shaderc-build /tmp/vulkan-headers /tmp/vh-build && \
-    glslc --version
+    glslc --version && \
+    dnf -y remove cmake ninja-build && dnf clean all
+# ...and dnf's cmake and ninja go again, because they are shaderc's build tools and nothing else's. Left
+# in, they are what the WHEEL build finds: the manylinux base carries its own CMake in /usr/local/bin
+# (4.4.3 at 1.0.0-rc11) but no ninja, so scikit-build-core paired that CMake with EL8's ninja 1.8.2,
+# which rejects the depfile rule with several outputs CMake 4 writes for ggml's shaders ("multiple
+# outputs aren't (yet?) supported by depslog") -- both Vulkan wheels failed at the rc11 release.
+# Without them this image matches the CUDA one: no ninja on PATH, so scikit-build-core installs a
+# current one from PyPI beside the base's CMake.
