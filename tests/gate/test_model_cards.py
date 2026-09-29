@@ -316,6 +316,12 @@ def run_card(name, gguf, readme, jfk, tmp_path, monkeypatch):
     blocks = python_blocks(readme)
     assert blocks, f"{name}'s card publishes no python block, so it documents nothing runnable"
     monkeypatch.chdir(tmp_path)   # cards write out.wav; let them, somewhere disposable
+    # THE READER'S OWN RECORDING, for a card that clones a voice. Such a card cannot ship one, so it
+    # names a file -- `reference.wav` -- and without it the card stopped at that precondition, which
+    # meant no cloning card was ever executed here. jfk.wav stands in for it on every such card (the
+    # user's call, 2026-09-26: one common fixture, public domain, already this file's ASR reference),
+    # and a card that uses it prints the clip's own transcript, which is what makes it a fair prompt.
+    (tmp_path / "reference.wav").write_bytes(JFK_WAV.read_bytes())
     ns = {"loom": loom, "audio": jfk}
     _CARD_NAMESPACES.append(ns)
     # A PRECONDITION STOPS THE BLOCK BUT DOES NOT DISCARD WHAT IT ALREADY DID, and the first version
