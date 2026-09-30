@@ -975,6 +975,102 @@ class TestText2Speech:
             _model(handle).text2speech.infer()
 
 
+class _CharHandle(_FakeHandle):
+    """A character-level vocabulary, one id per codepoint -- F5-TTS's shape, and the one that makes the
+    join visible in the ids: the canonical fake answers `[10, 11, 12]` to everything."""
+
+    def encode(self, text, lang=""):
+        self.encode_calls.append(text)
+        return [ord(c) for c in text]
+
+
+_TTS_INFILL_CONTRACT = dict(_TTS_TEXT_CONTRACT, sample_rate=24000, default_steps=32)
+
+
+def _infill(returns=([0.1, -0.1],), **kw):
+    return _CharHandle(list(returns), vocab="f5", contract=_TTS_INFILL_CONTRACT,
+                       hparams={"tts.reference": "infill"}, **kw)
+
+
+class TestText2SpeechReference:
+    """`reference=` + `reference_text=`: cloning by in-filling, the door F5-TTS's card could not use.
+
+    The join is pinned against `loom_cli --ref-text` (tools/loom_cli/main.cpp, the f5 branch), which
+    in turn is the reference's own `infer_batch_process`: transcript, a space when it does not end in
+    one, then the text -- and `n_ref_text` counts the transcript's ids including that space."""
+
+    def test_the_join_and_its_length_are_loom_clis(self):
+        handle = _infill()
+        _model(handle).text2speech.infer("hi you", reference=[0.5, -0.5], reference_text="Ok.")
+        call, = handle.calls
+        assert call["text_ids"] == [float(ord(c)) for c in "Ok. hi you"]
+        assert call["n_ref_text"] == 4.0, "the transcript plus the space the join added"
+        assert call["waveform"] == [0.5, -0.5]
+        assert "tokens" not in call, "the driver's ids are text_ids; tokens would be a second spelling"
+        assert call["n_steps"] == 32.0 and call["seed"] == 0.0
+
+    def test_a_transcript_ending_in_a_space_gets_no_second_one(self):
+        handle = _infill()
+        _model(handle).text2speech.infer("hi", reference=[0.5], reference_text="Ok. ")
+        assert handle.calls[0]["text_ids"] == [float(ord(c)) for c in "Ok. hi"]
+        assert handle.calls[0]["n_ref_text"] == 4.0
+
+    def test_the_audio_comes_back_at_the_declared_rate(self):
+        audio = _model(_infill()).text2speech.infer("hi", reference=[0.5], reference_text="Ok.")
+        assert audio.sample_rate == 24000 and audio.samples == [0.1, -0.1]
+
+    def test_an_audio_reference_at_the_wrong_rate_is_refused_not_resampled(self):
+        wrong = loom.Audio([0.5] * 4, sample_rate=16000)
+        with pytest.raises(ValueError, match="24000 Hz"):
+            _model(_infill()).text2speech.infer("hi", reference=wrong, reference_text="Ok.")
+        right = loom.Audio([0.5] * 4, sample_rate=24000)
+        handle = _infill()
+        _model(handle).text2speech.infer("hi", reference=right, reference_text="Ok.")
+        assert handle.calls[0]["waveform"] == [0.5] * 4
+
+    def test_the_two_halves_go_together(self):
+        model = _model(_infill())
+        with pytest.raises(TypeError, match="go together"):
+            model.text2speech.infer("hi", reference=[0.5])
+        with pytest.raises(TypeError, match="go together"):
+            model.text2speech.infer("hi", reference_text="Ok.")
+        with pytest.raises(ValueError, match="empty"):
+            model.text2speech.infer("hi", reference=[0.5], reference_text="  ")
+
+    def test_ids_cannot_be_joined_to_a_transcript(self):
+        with pytest.raises(TypeError, match="text="):
+            _model(_infill()).text2speech.infer(tokens=[1, 2], reference=[0.5], reference_text="Ok.")
+
+    def test_a_model_that_does_not_declare_infill_refuses_rather_than_ignoring_the_clip(self):
+        """A model that does not in-fill would take `waveform` and speak in its own voice anyway, which
+        is a wrong answer, not an error. The file says which it is; nothing here guesses."""
+        handle = _CharHandle([], contract=dict(_TTS_INFILL_CONTRACT, voices=["alba"]))
+        with pytest.raises(loom.UnsupportedTask) as excinfo:
+            _model(handle).text2speech.infer("hi", reference=[0.5], reference_text="Ok.")
+        assert "voice=" in str(excinfo.value) and "alba" in str(excinfo.value)
+        assert handle.calls == []
+
+    def test_a_model_that_only_clones_says_so_when_given_text_alone(self):
+        """F5-TTS has no voice of its own. Its driver refuses a missing `waveform` by name, but only
+        the door can say what to pass instead."""
+        handle = _infill()
+        with pytest.raises(TypeError, match="reference="):
+            _model(handle).text2speech.infer("hi")
+        assert handle.calls == []
+
+    def test_the_raw_driver_inputs_still_reach_it_through_the_door(self):
+        """The spelling the published card uses (`waveform=`/`text_ids=`/`n_ref_text=`) is not broken
+        by the check above."""
+        handle = _infill()
+        _model(handle).text2speech.infer(tokens=[1], waveform=[0.5], text_ids=[1.0], n_ref_text=1)
+        assert handle.calls[0]["waveform"] == [0.5]
+
+    def test_the_driver_inputs_it_builds_cannot_also_be_passed(self):
+        with pytest.raises(TypeError, match="n_ref_text"):
+            _model(_infill()).text2speech.infer("hi", reference=[0.5], reference_text="Ok.",
+                                                n_ref_text=3)
+
+
 class TestAudio:
     def test_it_writes_a_wav_a_reader_can_open(self):
         import wave
