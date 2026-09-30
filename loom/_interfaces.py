@@ -236,6 +236,7 @@ class Text2Speech(Interface):
     def _infer(self, text: str | None = None, *, phonemes: str | Sequence[int] | None = None,
                tokens: Sequence[int] | None = None, steps: int | None = None,
                seed: int = 0, language: str | None = None, voice: Any = None,
+               reference: Any = None, reference_text: str | None = None,
                sample_rate: int = 16000, **driver_inputs) -> Audio:
         """Three ways in, and which ones a given model accepts is a property of the model.
 
@@ -251,6 +252,10 @@ class Text2Speech(Interface):
         path, or a :class:`loom.Voice`. Omitted, the model's own default is used. Its inputs go to the
         driver, and a driver input you pass explicitly still wins.
 
+        `reference` + `reference_text` clone the voice in a clip, for a model that clones by
+        IN-FILLING (F5-TTS): the clip's samples at the model's own rate (or a mono :class:`Audio` at
+        that rate) and what it says, word for word. See `_reference_inputs` for the join.
+
         **`sample_rate` is the FALLBACK, not an override.** A model that declares its own rate is
         believed, because the export read it off the checkpoint and the caller is guessing; a model that
         declares none is a real gap today (only Supertonic states it) and this is what fills it. The
@@ -264,13 +269,23 @@ class Text2Speech(Interface):
         guess from a bad one -- so a model whose rate matters should be re-exported declaring it.
         """
         contract = self._model.contract
-        ids = self._resolve_ids(text, phonemes, tokens, language, contract)
-
         inputs: dict[str, Any] = {}
         if voice is not None:
             inputs.update({name: list(values) for name, values in self._model.voice(voice).inputs.items()})
         inputs.update(driver_inputs)
-        inputs["tokens"] = [float(i) for i in ids]
+        if reference is not None or reference_text is not None:
+            inputs.update(self._reference_inputs(text, phonemes, tokens, reference, reference_text,
+                                                 contract, driver_inputs))
+        elif self._reference_mode() == self.INFILL and not {"waveform", "text_ids"} & set(driver_inputs):
+            # Said HERE rather than left to the driver, which refuses too but can only name its input.
+            raise TypeError(
+                f"{self._model.path.name} has no voice of its own: it clones the voice in a clip. Pass "
+                f"reference=<samples at {contract.get('sample_rate') or 'its'} Hz> and "
+                f"reference_text=<what the clip says, word for word> beside the text."
+            )
+        else:
+            ids = self._resolve_ids(text, phonemes, tokens, language, contract)
+            inputs["tokens"] = [float(i) for i in ids]
         # Declared defaults, applied only when the caller named nothing: a sampler step count is a
         # property of the export (`loom.tts.default_steps`), and a host inventing one is how two front
         # ends produce different audio from the same file.
@@ -300,6 +315,95 @@ class Text2Speech(Interface):
                 RuntimeWarning, stacklevel=3,
             )
         return Audio(samples=[float(s) for s in samples], sample_rate=declared or int(sample_rate))
+
+    #: What a model that clones by in-filling declares as `loom.tts.reference`. An hparam rather than
+    #: a contract field by ADR-020's split: it does not choose the door (that is still text2speech), it
+    #: says how the host builds this door's inputs.
+    INFILL = "infill"
+
+    def _reference_inputs(self, text, phonemes, tokens, reference, reference_text, contract,
+                          driver_inputs) -> dict[str, Any]:
+        """The driver inputs for cloning the voice in `reference`, which says `reference_text`.
+
+        **The join is the reference's own and `loom_cli --ref-text`'s:** the model in-fills ONE
+        spectrogram whose first frames are the clip, so its text is the transcript FOLLOWED by the
+        text to speak, with a space between them when the transcript does not end in one (without it
+        the transcript's last word runs into the text's first, and the model says them as one word).
+        `n_ref_text` is how many of the ids are the transcript's -- nothing in the ids marks the join,
+        and the model's duration estimate is a ratio of the two lengths.
+
+        Which models take this is READ off the file (`loom.tts.reference`), never inferred: a model that
+        does not in-fill would ignore a reference it was handed and speak in its own voice, and that
+        is a wrong answer rather than an error.
+        """
+        if reference is None or reference_text is None:
+            raise TypeError(
+                "reference= and reference_text= go together: the clip, and what it says word for word. "
+                "A model that clones by in-filling needs both."
+            )
+        if text is None or phonemes is not None or tokens is not None:
+            raise TypeError(
+                "a reference clones a voice for TEXT: pass text= with it, not phonemes= or tokens=. The "
+                "transcript is joined to the text before either is encoded."
+            )
+        if not str(reference_text).strip():
+            raise ValueError(
+                "reference_text is empty. It is what the clip says, word for word -- the model aligns "
+                "the clip's frames to it, so an empty one has nothing to align."
+            )
+        mode = self._reference_mode()
+        if mode != self.INFILL:
+            voices = contract.get("voices") or []
+            other = (f" It takes voice files instead: voice= one of {voices}, or a file you made."
+                     if voices else "")
+            raise UnsupportedTask(
+                f"{self._model.path.name} does not declare that it clones from a reference clip and "
+                f"its transcript (`loom.tts.reference` is {mode or 'absent'}).{other} A file exported "
+                f"before this was declared needs re-exporting with a current loom-exporter."
+            )
+        clash = sorted({"waveform", "text_ids", "n_ref_text"} & set(driver_inputs))
+        if clash:
+            raise TypeError(
+                f"reference= builds {clash} itself; passing them as well would be two answers to one "
+                f"question. Use one spelling or the other."
+            )
+        prompt = str(reference_text)
+        if not prompt.endswith(" "):
+            prompt += " "
+        ref_ids = self._model.tokenize(prompt)
+        all_ids = self._model.tokenize(prompt + text)
+        return {
+            "waveform": self._reference_samples(reference, contract),
+            "text_ids": [float(i) for i in all_ids],
+            "n_ref_text": float(len(ref_ids)),
+        }
+
+    def _reference_mode(self) -> str:
+        try:
+            return str(self._model.hparam("tts.reference", "str"))
+        except Exception:
+            return ""
+
+    def _reference_samples(self, reference, contract) -> list[float]:
+        """The clip as samples at the model's rate. An `Audio` carries its rate, so a mismatch is
+        refused rather than played at the wrong speed into the model; plain samples are taken to be at
+        the declared rate, which is what the argument documents. Resampling is the caller's: this
+        package has no audio dependency, and a resampler chosen here would be a quality decision made
+        silently."""
+        declared = int(contract.get("sample_rate") or 0)
+        if isinstance(reference, Audio):
+            if reference.channels != 1:
+                raise ValueError(f"the reference clip has {reference.channels} channels; pass it mono.")
+            if declared and reference.sample_rate != declared:
+                raise ValueError(
+                    f"the reference clip is at {reference.sample_rate} Hz and this model reads "
+                    f"{declared} Hz. Resample it first (librosa.load(path, sr={declared}) does both)."
+                )
+            reference = reference.samples
+        samples = [float(s) for s in reference]
+        if not samples:
+            raise ValueError("the reference clip is empty.")
+        return samples
 
     def _resolve_ids(self, text, phonemes, tokens, language, contract) -> Sequence[int]:
         named = [n for n, v in (("text", text), ("phonemes", phonemes), ("tokens", tokens))
