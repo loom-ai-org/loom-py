@@ -460,6 +460,48 @@ def test_tts_output_is_intelligible(name, oracle, jfk, tmp_path, monkeypatch):
 
 @pytest.mark.gate
 @pytest.mark.parametrize("name", NAMES)
+def test_every_staged_voice_file_fits_and_speaks(name, oracle):
+    """Every `voices/*.gguf` beside the model loads into it, and one of them speaks the words.
+
+    Nothing else here opens a staged voice file: a card's snippet names one voice at most, and most name
+    none. But a voice file is stamped with what its model declares (`loom.voice.compat` and the
+    architecture, loom.cpp ADR-045), so a re-export that changes either leaves every file under
+    `voices/` unloadable while the card, which uses the built-in voice, still passes. Loading is cheap
+    (the engine compares two strings and reads a small tensor), so ALL of them are loaded; one that is
+    not the built-in voice is then synthesised and read back, which is what says the file sets the
+    input the driver actually uses.
+    """
+    _cards_dir()
+    gguf, _ = _entry(name)
+    voices = sorted((gguf.parent / "voices").glob("*.gguf"))
+    if not voices:
+        pytest.skip(f"{name} stages no voices/*.gguf")
+    if loom.contract_of(gguf).get("interface") != "text2speech":
+        pytest.skip(f"{name}'s voice files are for a {loom.contract_of(gguf).get('interface')} door; "
+                    f"the cloning-card rows cover those")
+    model = loom.Model.from_file(gguf)
+    try:
+        for path in voices:
+            voice = model.voice(path)
+            assert voice.inputs, f"{name}: {path.name} sets no driver input"
+        built_in = set(model.contract.get("voices") or [])
+        pick = next((p for p in voices if p.stem not in built_in), voices[0])
+        audio = model.text2speech.infer(TTS_WORDS, voice=pick.stem)
+        samples = _mono(audio)
+        peak = max(abs(s) for s in samples) if samples else 0.0
+        assert MIN_PEAK <= peak <= MAX_PEAK, f"{name} voice {pick.stem!r}: peak {peak:.4f}"
+        heard = oracle.speech2text.infer(_resample_16k(samples, audio.sample_rate), language="en").text
+        rate_wer = wer(TTS_WORDS, heard)
+        assert rate_wer <= MAX_WER_TTS, (
+            f"{name} voice {pick.stem!r} said {TTS_WORDS!r}, oracle heard {heard!r} (WER {rate_wer:.2f})"
+        )
+    finally:
+        del model
+        gc.collect()
+
+
+@pytest.mark.gate
+@pytest.mark.parametrize("name", NAMES)
 def test_a_codec_lm_says_the_words(name, oracle, jfk, tmp_path, monkeypatch):
     """The *is it right* question for family 10, and it is the same question as for TTS one door over.
 
