@@ -42,6 +42,7 @@ here.
 **Running it:**
 
     export LOOM_MODEL_CARDS=~/Dev/loom/hf-models      # the staging tree, cards beside GGUFs
+    export LOOM_CARD_VOICES=<dir of <card>.gguf>      # optional: jfk.wav as each cloning card's voice file
     pytest tests/gate/test_model_cards.py -q
 
 **Which rows apply is decided by `loom.contract_of`, not by opening the model.** Every row here is
@@ -302,6 +303,15 @@ def _release_card_namespaces():
     gc.collect()
 
 
+def _card_voice(name):
+    """`$LOOM_CARD_VOICES/<name>.gguf` -- the gate's voice file for one card -- or None."""
+    root = os.environ.get("LOOM_CARD_VOICES")
+    if not root:
+        return None
+    path = Path(root).expanduser() / f"{name}.gguf"
+    return path if path.is_file() else None
+
+
 def run_card(name, gguf, readme, jfk, tmp_path, monkeypatch):
     """Execute every block of one card, in order, in one namespace; return that namespace.
 
@@ -322,6 +332,16 @@ def run_card(name, gguf, readme, jfk, tmp_path, monkeypatch):
     # user's call, 2026-09-26: one common fixture, public domain, already this file's ASR reference),
     # and a card that uses it prints the clip's own transcript, which is what makes it a fair prompt.
     (tmp_path / "reference.wav").write_bytes(JFK_WAV.read_bytes())
+    # THE READER'S OWN VOICE FILE, for a card whose reader file is one rather than a clip (MOSS-TTS,
+    # CosyVoice3: `voices/me.gguf`). The same stand-in, one step further along: jfk.wav made into a voice
+    # file for THAT model, since a voice file is stamped with the weights it was made for and making one
+    # needs PyTorch and the upstream checkpoint -- neither of which this gate may assume.
+    # `LOOM_CARD_VOICES` names a directory of `<card>.gguf`; without it such a card stops at the file,
+    # as a precondition the skip message names.
+    voice = _card_voice(name)
+    if voice is not None:
+        (tmp_path / "voices").mkdir(exist_ok=True)
+        (tmp_path / "voices" / "me.gguf").write_bytes(voice.read_bytes())
     ns = {"loom": loom, "audio": jfk}
     _CARD_NAMESPACES.append(ns)
     # A PRECONDITION STOPS THE BLOCK BUT DOES NOT DISCARD WHAT IT ALREADY DID, and the first version
@@ -343,6 +363,9 @@ def run_card(name, gguf, readme, jfk, tmp_path, monkeypatch):
             # A card may legitimately tell the reader to bring a file (a lexicon it links to). That
             # is a precondition, not a broken card -- but name it, so the list stays visible.
             unmet = f"{name} block {i} needs a file the reader supplies: {e}"
+            if "voices" in str(e) and _card_voice(name) is None:
+                unmet += (f" -- set LOOM_CARD_VOICES to a directory holding {name}.gguf, a voice "
+                          f"file made from jfk.wav, to run it")
             break
     return ns, unmet
 
