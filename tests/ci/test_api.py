@@ -315,6 +315,30 @@ class TestTranscribeWarnings:
             _model(handle).transcribe([0.0, 1.0], language="en")
 
 
+class TestTargetLanguage:
+    """`target_language` (ADR-061) is a NAME passed through to the engine, and only when given -- the
+    engine resolves it against the file's own target table, and omission is how the driver is told to
+    apply its default (English, for Canary)."""
+
+    def test_it_reaches_the_engine_by_name(self):
+        handle = _FakeHandle([])
+        _model(handle).transcribe([0.0], language="de", target_language="en")
+        assert handle.calls[-1]["target_language"] == "en"
+        assert handle.calls[-1]["language"] == "de"
+
+    def test_omitted_means_absent_not_defaulted(self):
+        handle = _FakeHandle([])
+        _model(handle).transcribe([0.0])
+        assert "target_language" not in handle.calls[-1]
+
+    def test_the_speech2text_door_carries_it(self):
+        handle = _FakeHandle([], contract={"task": "automatic-speech-recognition",
+                                           "input_kind": "audio", "output_kind": "token_ids",
+                                           "interface": "speech2text", "declared": True})
+        _model(handle).speech2text.infer([0.0], target_language="fr")
+        assert handle.calls[-1]["target_language"] == "fr"
+
+
 def tmp_lexicon(text="time\ttˈaɪm\nfriend\tfɹˈɛnd\n"):
     """A `word<TAB>ipa` TSV on disk. A real file, because `set_lexicon` reads it: it is loaded at
     registration so that a source yielding no entries is reported at the line that named it."""

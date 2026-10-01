@@ -537,6 +537,7 @@ class Model:
         *,
         language: str | None = None,
         task: str | None = None,
+        target_language: str | None = None,
         timestamps: bool = False,
         condition_on_previous: bool = True,
     ) -> "Transcription":
@@ -559,6 +560,11 @@ class Model:
         being handed one; naming something this model does not have raises, rather than quietly
         transcribing as if you had not asked.
 
+        `target_language` is the language to WRITE, for a model that chooses it separately from the one
+        it hears (Canary: `language="de", target_language="en"` translates German speech into English).
+        None leaves it to the model's own default -- English, for Canary. A model that cannot choose
+        raises when one is named, rather than answering in its own language.
+
         Returns a `Transcription`: `.text` for the joined transcript, `.segments` for timed spans.
         """
         options: dict[str, Any] = {"timestamps": timestamps,
@@ -567,6 +573,8 @@ class Model:
             options["language"] = str(language)
         if task is not None:
             options["task"] = str(task)
+        if target_language is not None:
+            options["target_language"] = str(target_language)
         raw = self._handle.transcribe([float(x) for x in waveform], options)
         # An argument this file has nothing to select with was IGNORED rather than refused -- `language`
         # on a monolingual checkpoint names exactly what it was always going to do. A warning rather

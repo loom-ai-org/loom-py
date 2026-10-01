@@ -117,6 +117,9 @@ ORACLE = "whisper-small"
 # Measured 2026-08-31 against samples/jfk.wav, on the rc7 exports:
 ASR_BASELINE = {
     "conformer-ctc-small":    0.00,
+    # "american" for "americans" and "as" for "ask": 2 in 22. NeMo's own forward decodes the identical
+    # string from the identical audio (2026-10-01), so this is the checkpoint, not the port.
+    "citrinet-1024":          0.09,
     "granite-speech-4.0-1b":  0.00,
     "parakeet-rnnt-0.6b":     0.00,
     "parakeet-tdt-0.6b":      0.00,
