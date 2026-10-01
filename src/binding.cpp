@@ -323,12 +323,13 @@ public:
     // meaningful, and a dict says "this key was not declared" in the one way Python already reads
     // without a sentinel per field. `declared` is separate because a host must be able to tell a file
     // that states its contract from one it has to be told about.
-    py::dict contract() const { return contract_dict(loom::ModelContract::read(*model_)); }
+    py::dict contract() const { return contract_dict(*model_); }
 
     // One builder, used by `Model.contract` and by the module-level `contract_of` below. A second
     // spelling of this dict is a second answer to "what is this file", which is the one question the
     // declared contract exists to have exactly one of.
-    static py::dict contract_dict(const loom::ModelContract& c) {
+    static py::dict contract_dict(const loom::GgufModel& model) {
+        const loom::ModelContract c = loom::ModelContract::read(model);
         py::dict out;
         out["declared"] = c.declared();
         out["task"] = c.task;
@@ -347,6 +348,15 @@ public:
         out["default_steps"] = c.default_steps;
         out["voices"] = c.voices;
         out["labels"] = c.labels;
+        // The ASR names a caller may pass, as DECLARED -- read with no vocabulary, so a pre-contract
+        // Whisper file (whose names resolve by spelling) reports none rather than a guess. These are
+        // the lists `transcribe`'s refusals point at.
+        if (c.task == loom::task_names::ASR) {
+            const loom::audio::AsrDecodeTable t = loom::audio::AsrDecodeTable::read(model, nullptr, c);
+            out["asr_languages"] = t.language_names;
+            out["asr_tasks"] = t.task_names;
+            out["asr_target_languages"] = t.target_language_names;
+        }
         return out;
     }
 
@@ -474,6 +484,9 @@ public:
         // way to look up the id of `<|en|>`, and used to have to.
         if (options.contains("language")) opts.language = options["language"].cast<std::string>();
         if (options.contains("task")) opts.task = options["task"].cast<std::string>();
+        if (options.contains("target_language")) {
+            opts.target_language = options["target_language"].cast<std::string>();
+        }
         if (options.contains("timestamps")) opts.timestamps = options["timestamps"].cast<bool>();
         if (options.contains("condition_on_previous")) {
             opts.condition_on_previous = options["condition_on_previous"].cast<bool>();
@@ -625,7 +638,7 @@ PYBIND11_MODULE(_loom, m) {
     // FileNotFoundError naming the path is a better answer than a LoadError from the parser, and
     // `test_a_missing_file_says_so_before_the_engine_sees_it` pins that for the other door.
     m.def("contract_of", [](const std::string& path) {
-        return Model::contract_dict(loom::ModelContract::read(*loom::GgufModel::load_metadata(path)));
+        return Model::contract_dict(*loom::GgufModel::load_metadata(path));
     }, py::arg("path"),
        "What a loom GGUF declares itself to be -- the same dict as `Model.contract`, read from the "
        "file's metadata without loading its weights.");
