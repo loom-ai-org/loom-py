@@ -28,6 +28,8 @@ model.text2speech.infer("hello world")                   # -> Audio
 model.text2class.infer("Wolfgang lives in Berlin")       # -> Classification, a label per token
 model.text2codes.infer("[S1] Hello world.")              # -> codec tokens, frame-major
 model.codes2speech.infer(codes)                          # -> Audio, the other half of that pair
+model.speech2class.infer(waveform)                       # -> AudioClasses, per clip or per frame
+model.speech2embeddings.infer(waveform)                  # -> list[float], one vector per clip
 ```
 
 Which door a model answers is read off the file, not guessed from its name:
@@ -73,6 +75,21 @@ r.labels                      # ['O', 'B-MISC', 'I-MISC', 'B-PER', ...] — ever
 
 The framing tokens the encode added ([CLS]/[SEP]) are dropped for you, on the ids the file declares
 rather than on their spelling; `strip_special=False` keeps them if you want the raw alignment.
+
+`speech2class` returns the model's own distribution, not a decision — a VAD is thresholded and
+smoothed differently by every consumer, and a language id is read top-k — with the time each frame
+row starts at, read off the file:
+
+```python
+r = vad.speech2class.infer(audio)            # one row per 20 ms frame
+r.granularity, r.labels                      # 'frame', ['non_speech', 'speech']
+speech = r.probability("speech")             # the speech curve
+r.times[:3]                                  # [0.0, 0.02, 0.04] — seconds, frame starts
+lid.speech2class.infer(audio).top(3)         # [('th: Thai', 0.988), ('lo: Lao', 0.012), ...]
+```
+
+`speech2embeddings` returns the model's vector unnormalised; comparing two (cosine, for a speaker
+embedding) and choosing a threshold are yours.
 
 **A model that speaks through a codec is two files, and the codes are what joins them.** An
 autoregressive codec LM emits discrete tokens, not audio; a neural codec turns those tokens into a
