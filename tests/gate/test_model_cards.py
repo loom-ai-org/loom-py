@@ -63,6 +63,7 @@ additionally covers the text-in door; without it the cards' G2P lines are report
 preconditions rather than failures, because a missing optional extra is not a broken card.
 """
 import gc
+import math
 import os
 import re
 import wave
@@ -102,6 +103,27 @@ CLASSIFY_ENTITIES = {("wolfgang", "PER"), ("berlin", "LOC")}
 # and the mark belongs to a word's LAST piece, so a word-final piece is exactly what a mark attaches
 # to. Reconstructing words here would be re-implementing the loop the card publishes.
 CLASSIFY_MARKS = {("berlin", "."), ("it", "?")}
+
+# Family 13's expectations, against the same recording every ASR row uses (ADR-062). jfk.wav is 11 s of
+# one man speaking English with pauses, so each of the three classifier kinds has an answer that is a
+# CONSTANT rather than a second model's opinion: the language is English, most frames hold speech, and
+# a frame model's rows span the clip at the rate the file declares. Measured 2026-10-01 on the rc13
+# exports: MarbleNet 73% speech frames (zero on silence), pyannote 70% speaker frames, ECAPA
+# `en: English` at 0.82.
+#
+# A frame model's row count is `seconds * frame_rate` less what its receptive field consumes at the
+# edges, which is a few frames and does not grow with the clip (pyannote: 589 for 592.6, 115 for 118.5).
+FRAME_ROW_SLACK = 5
+# The fraction of jfk.wav's frames a VAD or a segmentation model must place in a speech class. Both sit
+# near 0.7; a broken export answers all non-speech (a dead head) or a constant row, and lands far away.
+MIN_SPEECH_FRACTION = 0.5
+# A speaker embedding is graded by COMPARISON, which is what the vector is for: the two halves of one
+# recording must score as one speaker, and the same recording resampled 1.4x (higher and faster -- a
+# different voice to the model) must not. Measured: 0.69 and 0.06. A constant output -- the classic
+# broken embedder -- scores 1.0 on both and fails the second.
+MIN_SAME_SPEAKER = 0.5
+MAX_OTHER_SPEAKER = 0.3
+
 
 # The model that reads TTS output back. Whisper rather than a NeMo model because it is the one every
 # card set already depends on for the ASR examples, and because its own card is checked here too --
@@ -679,6 +701,108 @@ def test_token_classification_finds_the_entities(name, jfk, tmp_path, monkeypatc
             f"  marked:            {sorted(marked)}\n"
             f"  labelling:         {[(t.piece, t.label) for t in result]}"
         )
+
+
+def _cosine(a, b):
+    return sum(x * y for x, y in zip(a, b)) / math.sqrt(sum(x * x for x in a) * sum(y * y for y in b))
+
+
+@pytest.mark.gate
+@pytest.mark.parametrize("name", NAMES)
+def test_audio_classifier_hears_the_reference(name, jfk, tmp_path, monkeypatch):
+    """An audio classifier gives jfk.wav the answer it has: English, speech, rows spanning the clip.
+
+    Family 13's *is it right* question, and it needs asking for the reason family 12's did: a dead
+    head returns a well-formed `AudioClasses` -- right labels, right row count -- whose contents are
+    one class everywhere. So the card's own result is graded against what the recording is, and
+    which expectation applies is read off the LABELS the file declares rather than off its name: a
+    `non_speech` class means a frame model whose other classes are speech, an `en: ...` label means a
+    language id.
+
+    Two answers are checked by a call made here rather than by the card, and both are about INPUT the
+    card cannot ship: silence must come back as non-speech (a VAD that says "speech" to everything
+    passes the speech-fraction check), and a frame model's row count must follow the clip length the
+    harness knows.
+    """
+    _cards_dir()
+    gguf, readme = _entry(name)
+    if loom.contract_of(gguf).get("interface") != "speech2class":
+        pytest.skip(f"{name} is not speech2class")
+
+    ns, unmet = run_card(name, gguf, readme, jfk, tmp_path, monkeypatch)
+    result = produced(ns, "probabilities", "labels", "granularity")
+    if result is None:
+        pytest.skip(f"{name}'s card classified nothing{' -- ' + unmet if unmet else ''}")
+
+    assert result.labels, f"{name} declares no label names, so its rows mean nothing to a reader"
+    assert len(result), f"{name} returned no rows"
+    for row in result.probabilities:
+        assert len(row) == len(result.labels), "every row is one probability per declared label"
+        assert abs(sum(row) - 1.0) < 1e-3, f"{name} returned a row that is not a distribution: {sum(row)}"
+
+    if result.granularity == "clip":
+        assert len(result) == 1, f"a clip answer is one row, got {len(result)}"
+        languages = [label for label in result.labels if ":" in label]
+        if not any(label.startswith("en:") for label in languages):
+            pytest.skip(f"{name} is a clip classifier with no English label; no expectation for jfk.wav")
+        assert result.best[0].startswith("en:"), (
+            f"{name} heard jfk.wav as {result.best[0]!r}; top 3: {result.top(3)}")
+        return
+
+    assert result.granularity == "frame", f"unknown granularity {result.granularity!r}"
+    assert result.frame_rate > 0, f"{name} returned frame rows with no frame rate to place them in time"
+    if "non_speech" not in result.labels:
+        pytest.skip(f"{name} is a frame classifier with no non_speech class; no expectation for jfk.wav")
+    silent = result.labels.index("non_speech")
+    speech = sum(1 for row in result.probabilities if max(range(len(row)), key=row.__getitem__) != silent)
+    assert speech / len(result) >= MIN_SPEECH_FRACTION, (
+        f"{name} placed {speech} of {len(result)} jfk.wav frames in a speech class; a recording that "
+        f"is mostly speech should get at least {MIN_SPEECH_FRACTION:.0%}")
+
+    model = loom.Model.from_file(str(gguf))
+    quiet = model.speech2class.infer([0.0] * (10 * 16000))
+    expected = 10 * quiet.frame_rate
+    assert abs(len(quiet) - expected) <= FRAME_ROW_SLACK, (
+        f"{name} returned {len(quiet)} rows for 10 s at {quiet.frame_rate:.2f} frames/s; expected about "
+        f"{expected:.0f}. A row count that does not follow the input is a baked length.")
+    assert quiet.best.count("non_speech") == len(quiet), (
+        f"{name} heard speech in silence: {len(quiet) - quiet.best.count('non_speech')} of {len(quiet)} frames")
+
+
+@pytest.mark.gate
+@pytest.mark.parametrize("name", NAMES)
+def test_audio_embedder_tells_speakers_apart(name, jfk, tmp_path, monkeypatch):
+    """A speaker embedding scores one speaker as one speaker, and a different voice as different.
+
+    The card is run first, and must bind a vector -- a list of floats -- that is finite and not zero.
+    The comparison is made here, because the card can only ship one voice: the two halves of jfk.wav
+    are the same speaker, and jfk.wav resampled 1.4x (higher and faster) is a different one to the
+    model. A constant output, which is what a broken embedder produces, passes the first and fails the
+    second.
+    """
+    _cards_dir()
+    gguf, readme = _entry(name)
+    if loom.contract_of(gguf).get("interface") != "speech2embeddings":
+        pytest.skip(f"{name} is not speech2embeddings")
+
+    ns, unmet = run_card(name, gguf, readme, jfk, tmp_path, monkeypatch)
+    vectors = [v for v in ns.values()
+               if isinstance(v, list) and len(v) >= 16 and all(isinstance(x, float) for x in v)]
+    if not vectors:
+        pytest.skip(f"{name}'s card embedded nothing{' -- ' + unmet if unmet else ''}")
+    vector = vectors[-1]
+    assert all(math.isfinite(x) for x in vector), f"{name} returned a non-finite embedding"
+    assert any(x != 0.0 for x in vector), f"{name} returned an all-zero embedding"
+
+    model = loom.Model.from_file(str(gguf))
+    half = len(jfk) // 2
+    first = model.speech2embeddings.infer(jfk[:half])
+    second = model.speech2embeddings.infer(jfk[half:])
+    other = model.speech2embeddings.infer([jfk[int(i * 1.4)] for i in range(int(len(jfk) / 1.4))])
+    same, different = _cosine(first, second), _cosine(first, other)
+    assert same >= MIN_SAME_SPEAKER, f"{name} scored two halves of one speaker at cosine {same:.2f}"
+    assert different <= MAX_OTHER_SPEAKER, (
+        f"{name} scored a different voice at cosine {different:.2f} (same speaker: {same:.2f})")
 
 
 @pytest.mark.gate
