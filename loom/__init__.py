@@ -33,13 +33,14 @@ from typing import Any, Iterable, Mapping, Sequence
 from . import _loom
 from . import phonemizers
 from ._hub import download, list_files
-from ._interfaces import (ALL_INTERFACES, Audio, Classification, Codes2Speech, Interface,
-                          Speech2Text, Text2Class, Text2Codes, Text2Speech, Text2Text, TokenClass,
-                          UnsupportedTask)
+from ._interfaces import (ALL_INTERFACES, Audio, AudioClasses, Classification, Codes2Speech, Interface,
+                          Speech2Class, Speech2Embeddings, Speech2Text, Text2Class, Text2Codes,
+                          Text2Speech, Text2Text, TokenClass, UnsupportedTask)
 
 __all__ = ["Model", "Voice", "Tokenizer", "Transcription", "Segment", "Audio", "Classification", "TokenClass",
+           "AudioClasses",
            "Interface", "UnsupportedTask", "Text2Text", "Speech2Text", "Text2Speech", "Text2Class",
-           "Text2Codes", "Codes2Speech",
+           "Text2Codes", "Codes2Speech", "Speech2Class", "Speech2Embeddings",
            "phonemizers", "LoomError", "devices", "contract_of", "download", "__version__"]
 
 
@@ -611,6 +612,26 @@ class Model:
                     for entry in raw],
             labels=list(self._contract.get("labels") or []),
         )
+
+    def classify_audio(self, waveform: Sequence[float]) -> "AudioClasses":
+        """Run an audio classifier over one clip and shape its answer by the file's contract.
+
+        `model.speech2class.infer(waveform)` lands here. The engine (`loom::audio::classify`) cuts the
+        driver's flat answer into rows of the declared labels and refuses one that is not whole rows;
+        this only turns the rows into lists.
+        """
+        raw = self._handle.classify_audio([float(x) for x in waveform])
+        width = len(raw["labels"])
+        flat = raw["probabilities"]
+        return AudioClasses(
+            granularity=raw["granularity"], labels=list(raw["labels"]),
+            probabilities=[list(flat[r * width:(r + 1) * width]) for r in range(raw["n_rows"])],
+            frame_rate=float(raw["frame_rate"]), frame_offset=float(raw["frame_offset"]),
+        )
+
+    def embed(self, waveform: Sequence[float]) -> list[float]:
+        """Run an audio embedder over one clip -- `model.speech2embeddings.infer(waveform)` lands here."""
+        return list(self._handle.embed([float(x) for x in waveform]))
 
     def call(self, fn_name: str, inputs: Mapping[str, Any]) -> list[float] | float:
         """`infer` by another name, for a model whose driver exposes more than one entry point."""

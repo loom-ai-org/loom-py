@@ -29,12 +29,13 @@ class TestPackage:
             "Tokenizer",
             "Transcription",
             "Segment",
-            # The end-to-end layer. The result types and the six implemented interfaces are exported
-            # because a caller annotates against them; the eleven not-yet-implemented ones are reached
-            # as `model.<name>` and are deliberately not names to import.
+            # The end-to-end layer. The result types and the eight implemented interfaces are exported
+            # because a caller annotates against them; the not-yet-implemented ones are reached as
+            # `model.<name>` and are deliberately not names to import.
             "Audio",
             "Classification",
             "TokenClass",
+            "AudioClasses",
             "Interface",
             "UnsupportedTask",
             "Text2Text",
@@ -43,6 +44,8 @@ class TestPackage:
             "Text2Class",
             "Text2Codes",
             "Codes2Speech",
+            "Speech2Class",
+            "Speech2Embeddings",
             # The G2P frontend: a module rather than a class, because a caller registers into it.
             "phonemizers",
             "LoomError",
@@ -288,6 +291,22 @@ class _FakeHandle:
                                     "extra_inputs": dict(extra_inputs)})
         return [{"token": int(t), "label_id": i % 2, "label": ["O", "B-PER"][i % 2]}
                 for i, t in enumerate(tokens)]
+
+    # Family 13's doors (loom/core/audio_classify.h). The engine cuts the flat answer into rows; the
+    # double hands back what that cut produces -- two frame rows of two labels -- and records the audio.
+    def classify_audio(self, waveform):
+        self.audio_calls = getattr(self, "audio_calls", []) + [list(waveform)]
+        contract = self._contract
+        if contract.get("output_granularity") == "clip":
+            return {"granularity": "clip", "labels": contract["labels"], "n_rows": 1,
+                    "frame_rate": 0.0, "frame_offset": 0.0, "probabilities": [0.1, 0.7, 0.2]}
+        return {"granularity": "frame", "labels": contract["labels"], "n_rows": 2,
+                "frame_rate": contract["frame_rate"], "frame_offset": contract["frame_offset"],
+                "probabilities": [0.9, 0.1, 0.2, 0.8]}
+
+    def embed(self, waveform):
+        self.audio_calls = getattr(self, "audio_calls", []) + [list(waveform)]
+        return [0.5, -0.25, 0.125]
 
 
 class TestTranscribeWarnings:
@@ -569,6 +588,15 @@ _TOKEN_CLASS_CONTRACT = dict(_ASR_CONTRACT, task="token-classification", input_k
 _CODEC_CONTRACT = dict(_ASR_CONTRACT, task="audio-codec", input_kind="audio_codes",
                        output_kind="audio", interface="codes2speech", sample_rate=44100,
                        clip_samples=0, text_frontend="")
+_VAD_CONTRACT = dict(_ASR_CONTRACT, task="audio-classification", input_kind="audio",
+                     output_kind="class", interface="speech2class", text_frontend="", languages=[],
+                     clip_samples=0, labels=["non_speech", "speech"], output_granularity="frame",
+                     frame_rate=50.0, frame_offset=0.01)
+_LID_CONTRACT = dict(_VAD_CONTRACT, labels=["en", "de", "fr"], output_granularity="clip",
+                     frame_rate=0.0, frame_offset=0.0)
+_EMBEDDER_CONTRACT = dict(_VAD_CONTRACT, task="audio-embedding", output_kind="embeddings",
+                          interface="speech2embeddings", labels=[], output_granularity="clip",
+                          frame_rate=0.0, frame_offset=0.0)
 _CODES_LM_CONTRACT = dict(_ASR_CONTRACT, task="text-to-codes", input_kind="text",
                           output_kind="audio_codes", interface="text2codes", sample_rate=0,
                           clip_samples=0, text_frontend="vocab")
@@ -656,6 +684,35 @@ class TestInterfacesAreTheModalityPair:
         handle = _FakeHandle([], vocab=None, contract=_TOKEN_CLASS_CONTRACT)
         with pytest.raises(loom.UnsupportedTask, match="embeds no vocabulary"):
             _model(handle).text2class.infer("hello")
+
+    def test_a_frame_classifier_answers_speech2class_with_rows_and_times(self):
+        """Family 13 (ADR-062): the answer is the model's distribution per frame, with the time each
+        frame starts at -- the engine's cut, turned into lists here and nothing more."""
+        handle = _FakeHandle([], contract=_VAD_CONTRACT)
+        model = _model(handle)
+        assert model.capabilities == ("speech2class",)
+        result = model.speech2class.infer([0.0, 0.5, -0.5])
+        assert handle.audio_calls == [[0.0, 0.5, -0.5]]
+        assert result.granularity == "frame" and len(result) == 2
+        assert result.probabilities == [[0.9, 0.1], [0.2, 0.8]]
+        assert result.best == ["non_speech", "speech"]
+        assert result.times == [0.01, 0.01 + 1 / 50.0]
+        assert result.probability("speech") == [0.1, 0.8]
+
+    def test_a_clip_classifier_answers_one_row_read_top_k(self):
+        result = _model(_FakeHandle([], contract=_LID_CONTRACT)).speech2class.infer([0.0])
+        assert result.granularity == "clip" and len(result) == 1
+        assert result.top(2) == [("de", 0.7), ("fr", 0.2)]
+        assert result.times == [0.0]
+
+    def test_an_embedder_answers_speech2embeddings_and_nothing_else(self):
+        handle = _FakeHandle([], contract=_EMBEDDER_CONTRACT)
+        model = _model(handle)
+        assert model.capabilities == ("speech2embeddings",)
+        assert model.speech2embeddings.infer([0.25]) == [0.5, -0.25, 0.125]
+        with pytest.raises(loom.UnsupportedTask) as excinfo:
+            model.speech2class.infer([0.25])
+        assert "speech2embeddings" in str(excinfo.value)
 
     def test_an_ar_codec_lm_answers_text2codes_and_returns_frames(self):
         """The first half of the family-10 pair. `audio_codes` as an OUTPUT kind is what makes this a
