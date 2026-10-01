@@ -222,11 +222,11 @@ class Speech2Text(Interface):
     summary = "audio in, transcript out"
 
     def _infer(self, waveform: Sequence[float], *, language: str | None = None,
-               task: str | None = None, timestamps: bool = False,
-               condition_on_previous: bool = True):
+               task: str | None = None, target_language: str | None = None,
+               timestamps: bool = False, condition_on_previous: bool = True):
         return self._model.transcribe(
-            waveform, language=language, task=task, timestamps=timestamps,
-            condition_on_previous=condition_on_previous)
+            waveform, language=language, task=task, target_language=target_language,
+            timestamps=timestamps, condition_on_previous=condition_on_previous)
 
 
 class Text2Speech(Interface):
