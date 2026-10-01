@@ -131,6 +131,52 @@ class Classification:
         return " ".join(f"{t.piece}/{t.label or t.label_id}" for t in self.tokens)
 
 
+@dataclass(frozen=True)
+class AudioClasses:
+    """What `Speech2Class.infer` returns: the model's own class distribution, per clip or per frame.
+
+    **Probabilities, not a decision.** A VAD's consumers threshold, smooth and hang over its output
+    each in their own way, and a language id is routinely read top-k -- so the answer is the whole
+    distribution, row by row, and `best`/`top` are conveniences over it rather than a rule this layer
+    makes for you. The cut into rows, the label names and the time each frame row covers are the
+    ENGINE's (`loom::audio::classify`), read off the file's contract, so loom_cli and this agree.
+
+    `granularity` is "clip" (one row) or "frame" (one row per encoder frame, starting at
+    `frame_offset` seconds and `1 / frame_rate` apart).
+    """
+    granularity: str
+    labels: list
+    probabilities: list  # rows of len(labels) probabilities
+    frame_rate: float = 0.0
+    frame_offset: float = 0.0
+
+    def __len__(self) -> int:
+        return len(self.probabilities)
+
+    @property
+    def best(self) -> list:
+        """The most probable label of each row."""
+        return [self.labels[max(range(len(row)), key=row.__getitem__)] for row in self.probabilities]
+
+    @property
+    def times(self) -> list:
+        """Each row's start in seconds -- all 0.0 for a clip answer, which covers the whole clip."""
+        if not self.frame_rate:
+            return [0.0] * len(self.probabilities)
+        return [self.frame_offset + i / self.frame_rate for i in range(len(self.probabilities))]
+
+    def top(self, k: int = 5, row: int = 0) -> list:
+        """`[(label, probability), ...]`, the `k` most probable classes of one row -- the clip's, by
+        default."""
+        pairs = sorted(zip(self.labels, self.probabilities[row]), key=lambda lp: -lp[1])
+        return pairs[:k]
+
+    def probability(self, label: str) -> list:
+        """One label's probability in every row -- a VAD's speech curve, for instance."""
+        k = self.labels.index(label)
+        return [row[k] for row in self.probabilities]
+
+
 class Interface:
     """Base for every X2Y door. Subclasses declare the modality pair they serve and implement `infer`.
 
@@ -227,6 +273,33 @@ class Speech2Text(Interface):
         return self._model.transcribe(
             waveform, language=language, task=task, target_language=target_language,
             timestamps=timestamps, condition_on_previous=condition_on_previous)
+
+
+class Speech2Class(Interface):
+    name = "speech2class"
+    summary = "audio in, a class distribution per clip or per frame out (language id, VAD, segmentation)"
+
+    def _infer(self, waveform: Sequence[float]) -> AudioClasses:
+        """Classify a clip: mono floats in [-1, 1] at the model's own `contract["sample_rate"]`.
+
+        One call over the whole clip -- no windowing, which is the model's to want and none of family
+        13's do. Returns an `AudioClasses`: per clip for a language id, per frame for a VAD or a
+        segmentation model.
+        """
+        return self._model.classify_audio(waveform)
+
+
+class Speech2Embeddings(Interface):
+    name = "speech2embeddings"
+    summary = "audio in, one embedding vector out (speaker embedding)"
+
+    def _infer(self, waveform: Sequence[float]) -> list[float]:
+        """Embed a clip: mono floats in [-1, 1] at the model's own `contract["sample_rate"]`.
+
+        Returns the model's own vector, unnormalised. Comparing two -- cosine similarity, for a speaker
+        embedding -- is the caller's, since a threshold is a property of the application.
+        """
+        return self._model.embed(waveform)
 
 
 class Text2Speech(Interface):
@@ -725,21 +798,20 @@ Text2Image = _planned("text2image", "image synthesis")
 Image2Text = _planned("image2text", "captioning, OCR, VLM prompting")
 Speech2Image = _planned("speech2image", "speech-conditioned image synthesis")
 Image2Speech = _planned("image2speech", "image-conditioned speech")
-Speech2Class = _planned("speech2class", "audio classification, language id, keyword spotting")
 Image2Class = _planned("image2class", "image classification")
 Text2Embeddings = _planned("text2embeddings", "text embedding")
-Speech2Embeddings = _planned("speech2embeddings", "speaker embedding, audio embedding")
 Image2Embeddings = _planned("image2embeddings", "image embedding")
 Image2Boundingbox = _planned("image2boundingbox", "object detection")
 Image2Segmentationmask = _planned("image2segmentationmask", "segmentation")
 
 
-#: Every interface a `Model` carries, in the order `capabilities` and `repr` report them. The five
+#: Every interface a `Model` carries, in the order `capabilities` and `repr` report them. The
 #: implemented ones first, because that is the order a reader cares about.
 ALL_INTERFACES = (
     Text2Text, Speech2Text, Text2Speech, Text2Class, Text2Codes, Codes2Speech,
+    Speech2Class, Speech2Embeddings,
     Speech2Speech, Text2Image, Image2Text, Speech2Image, Image2Speech,
-    Speech2Class, Image2Class,
-    Text2Embeddings, Speech2Embeddings, Image2Embeddings,
+    Image2Class,
+    Text2Embeddings, Image2Embeddings,
     Image2Boundingbox, Image2Segmentationmask,
 )

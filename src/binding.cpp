@@ -348,6 +348,11 @@ public:
         out["default_steps"] = c.default_steps;
         out["voices"] = c.voices;
         out["labels"] = c.labels;
+        // How many answers a `class`/`embeddings` output gives, and the time a frame row covers
+        // (ADR-062). Empty/0 for every other output.
+        out["output_granularity"] = c.output_granularity;
+        out["frame_rate"] = c.frame_rate;
+        out["frame_offset"] = c.frame_offset;
         // The ASR names a caller may pass, as DECLARED -- read with no vocabulary, so a pre-contract
         // Whisper file (whose names resolve by spelling) reports none rather than a guess. These are
         // the lists `transcribe`'s refusals point at.
@@ -460,6 +465,34 @@ public:
             out.append(d);
         }
         return out;
+    }
+
+    // AUDIO CLASSIFICATION and EMBEDDING, the engine's `loom::audio::classify`/`embed` (see
+    // loom/core/audio_classify.h). What the engine owns is the CUT -- rows of the declared labels, the
+    // time each frame row covers, and the refusal of an answer that is not whole rows -- so this side
+    // only marshals. The probabilities come back flat with their row count; `Model.classify_audio`
+    // shapes them into the result object.
+    py::object classify_audio(const std::vector<float>& waveform) {
+        if (driver_.empty()) {
+            throw std::runtime_error(
+                "this GGUF carries no driver script, so there is nothing to classify.");
+        }
+        const loom::audio::ClassProbabilities r = loom::audio::classify(*bridge_, *model_, waveform);
+        py::dict out;
+        out["granularity"] = r.granularity;
+        out["labels"] = r.labels;
+        out["n_rows"] = r.n_rows;
+        out["frame_rate"] = r.frame_rate;
+        out["frame_offset"] = r.frame_offset;
+        out["probabilities"] = r.probabilities;
+        return out;
+    }
+
+    std::vector<float> embed(const std::vector<float>& waveform) {
+        if (driver_.empty()) {
+            throw std::runtime_error("this GGUF carries no driver script, so there is nothing to embed.");
+        }
+        return loom::audio::embed(*bridge_, *model_, waveform);
     }
 
     // TRANSCRIPTION, which is the engine's `loom::audio::transcribe` and nothing else (see
@@ -685,6 +718,8 @@ PYBIND11_MODULE(_loom, m) {
         .def("transcribe", &Model::transcribe, py::arg("waveform"), py::arg("options"))
         .def("classify", &Model::classify, py::arg("tokens"), py::arg("strip_special"),
              py::arg("extra_inputs"))
+        .def("classify_audio", &Model::classify_audio, py::arg("waveform"))
+        .def("embed", &Model::embed, py::arg("waveform"))
         .def("contract", &Model::contract)
         .def("has_chat_template", &Model::has_chat_template)
         .def("chat_roles", &Model::chat_roles)
