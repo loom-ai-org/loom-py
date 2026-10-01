@@ -53,6 +53,11 @@ against 1.9 GB free); `contract_of` reads the GGUF's KV table and stops. The two
 need a real model now load it *after* the check rather than before, so a model this row is not for is
 never opened at all.
 
+**The voice-file row synthesises once per staged voice set**, on top of the TTS row's own synthesis, so
+a model with `voices/` is loaded twice. For Voxtral-4B-TTS that is a second 16 GB load, which the 2-core
+dev box cannot afford beside anything else: run that model's rows on the workstation, or deselect them
+here with `-k "not voxtral"` (the accounting check then counts its rows as deselected, not skipped).
+
 It skips cleanly without that variable, like every gate test. `pip install "loom-py-rt[phonemes]"`
 additionally covers the text-in door; without it the cards' G2P lines are reported as skipped
 preconditions rather than failures, because a missing optional extra is not a broken card.
