@@ -122,6 +122,9 @@ MIN_SPEECH_FRACTION = 0.5
 # different voice to the model) must not. Measured: 0.69 and 0.06. A constant output -- the classic
 # broken embedder -- scores 1.0 on both and fails the second.
 MIN_SAME_SPEAKER = 0.5
+# Every precision a multi-file repo carries, against its largest file: mean per-frame cosine. Q4_1
+# wakehubert-tiny measured 0.987 against PyTorch, Q4_0 0.981 (2026-10-03); a broken file lands far below.
+MIN_PRECISION_AGREEMENT = 0.95
 MAX_OTHER_SPEAKER = 0.3
 
 
@@ -273,9 +276,17 @@ def localise(block: str, gguf: Path) -> str:
     broken card. A repo the staging tree does not carry is left as `from_pretrained`, so it downloads
     and the card still runs; that is the honest fallback, since a release cannot be blocked on a
     model it is not publishing.
+
+    **A file name, when the block passes one, is resolved too**: a repo carrying several precisions
+    of one model (wakehubert-tiny) is loaded as `from_pretrained(repo, "<file>.gguf")`, and that file
+    is the staged one beside the card -- not the largest, which is what `gguf` names.
     """
     def replace(match: "re.Match") -> str:
         slug = match.group(1).split("/")[-1].removesuffix("-loom")
+        filename = match.group(2)
+        if filename:
+            staged = gguf.parent.parent / slug / filename
+            return f"loom.Model.from_file({str(staged)!r})" if staged.is_file() else match.group(0)
         if slug == gguf.stem:
             return f"loom.Model.from_file({str(gguf)!r})"
         sibling = gguf.parent.parent / slug / f"{slug}.gguf"
@@ -284,7 +295,7 @@ def localise(block: str, gguf: Path) -> str:
         return match.group(0)
 
     return re.sub(
-        r"loom\.Model\.from_pretrained\(\s*['\"]([^'\"]+)['\"]\s*\)",
+        r"loom\.Model\.from_pretrained\(\s*['\"]([^'\"]+)['\"]\s*(?:,\s*['\"]([^'\"]+\.gguf)['\"]\s*)?\)",
         replace,
         block,
     )
@@ -790,8 +801,11 @@ def test_audio_embedder_tells_speakers_apart(name, jfk, tmp_path, monkeypatch):
     """
     _cards_dir()
     gguf, readme = _entry(name)
-    if loom.contract_of(gguf).get("interface") != "speech2embeddings":
+    contract = loom.contract_of(gguf)
+    if contract.get("interface") != "speech2embeddings":
         pytest.skip(f"{name} is not speech2embeddings")
+    if contract.get("output_granularity") != "clip":
+        pytest.skip(f"{name}'s embeddings are per {contract.get('output_granularity')!r}, not per clip")
 
     ns, unmet = run_card(name, gguf, readme, jfk, tmp_path, monkeypatch)
     vectors = [v for v in ns.values()
@@ -811,6 +825,50 @@ def test_audio_embedder_tells_speakers_apart(name, jfk, tmp_path, monkeypatch):
     assert same >= MIN_SAME_SPEAKER, f"{name} scored two halves of one speaker at cosine {same:.2f}"
     assert different <= MAX_OTHER_SPEAKER, (
         f"{name} scored a different voice at cosine {different:.2f} (same speaker: {same:.2f})")
+
+
+@pytest.mark.gate
+@pytest.mark.parametrize("name", NAMES)
+def test_frame_features_follow_the_clip_in_every_precision(name, jfk, tmp_path, monkeypatch):
+    """A frame-level feature extractor (embeddings per FRAME, which no door answers yet; the card calls
+    `infer`): one row per frame of the clip, every row the same width, and the rows MOVE with the audio.
+
+    Then every GGUF the repo carries -- wakehubert-tiny ships four precisions -- is run on jfk.wav and
+    compared with the largest frame by frame. The card's snippet loads one of them, and a release that
+    only ever executed that one would publish three files nothing had run. The floor is generous on
+    purpose (Q4_1 measured a mean cosine of 0.987 against PyTorch): it catches a file that is BROKEN --
+    the wrong weights, a scrambled layout, a dead layer -- not one that is merely coarser.
+    """
+    _cards_dir()
+    gguf, readme = _entry(name)
+    contract = loom.contract_of(gguf)
+    if contract.get("output_kind") != "embeddings" or contract.get("output_granularity") != "frame":
+        pytest.skip(f"{name} does not return embeddings per frame")
+    hop = round(contract["sample_rate"] / contract["frame_rate"])
+
+    ns, unmet = run_card(name, gguf, readme, jfk, tmp_path, monkeypatch)
+    tables = [v for v in ns.values()
+              if isinstance(v, list) and len(v) > 1 and all(isinstance(r, list) and r for r in v)]
+    if not tables:
+        pytest.skip(f"{name}'s card produced no rows{' -- ' + unmet if unmet else ''}")
+    rows = tables[-1]
+    width = len(rows[0])
+    assert len(rows) == len(jfk) // hop, (
+        f"{name}'s card made {len(rows)} rows of jfk.wav; one per {hop} samples is {len(jfk) // hop}")
+    assert all(len(r) == width for r in rows), f"{name}'s rows are not all {width} wide"
+    assert all(math.isfinite(x) for r in rows for x in r), f"{name} returned a non-finite feature"
+    assert _cosine(rows[len(rows) // 4], rows[3 * len(rows) // 4]) < 0.99, (
+        f"{name} returned near-identical features a quarter and three quarters into the clip")
+
+    reference = loom.Model.from_file(str(gguf)).infer(waveform=jfk)
+    for other in sorted(gguf.parent.glob("*.gguf")):
+        flat = loom.Model.from_file(str(other)).infer(waveform=jfk)
+        assert len(flat) == len(reference), f"{other.name} returned {len(flat)} numbers, not {len(reference)}"
+        cosines = [_cosine(flat[i:i + width], reference[i:i + width])
+                   for i in range(0, len(flat), width)]
+        mean = sum(cosines) / len(cosines)
+        assert mean >= MIN_PRECISION_AGREEMENT, (
+            f"{other.name} agrees with {gguf.name} at a mean per-frame cosine of {mean:.4f}")
 
 
 @pytest.mark.gate
