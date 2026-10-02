@@ -144,6 +144,10 @@ ASR_BASELINE = {
     "citrinet-1024":          0.09,
     # Word-perfect, with punctuation and casing; its card asks for the default English target.
     "canary-1b-v2":           0.00,
+    # Word-perfect, punctuation and casing included, at both sizes -- and identical in ids to
+    # transformers' own generate on jfk.wav and on all 73 LibriSpeech-dummy utterances (2026-10-02).
+    "moonshine-streaming-tiny":  0.00,
+    "moonshine-streaming-small": 0.00,
     "granite-speech-4.0-1b":  0.00,
     "parakeet-rnnt-0.6b":     0.00,
     "parakeet-tdt-0.6b":      0.00,
