@@ -118,6 +118,11 @@ public:
             // normalisation: numbers spelled out, the paragraph split into pieces, each piece's ids
             // opened by `<|endoftext|>` -- the driver generates the pieces in turn and joins the audio.
             tokenizer->cosyvoice3_ = loom::CosyVoice3Vocab::load(model);
+        } else if (tokenizer->kind_ == "soprano") {
+            // Family 9's eighth leaf. A character BPE whose `encode` is the reference's text path:
+            // tortoise-tts's English normaliser, the sentence split, each sentence wrapped in the
+            // prompt `[STOP][TEXT]...[START]` -- the driver generates the sentences in turn.
+            tokenizer->soprano_ = loom::SopranoVocab::load(model);
         } else if (tokenizer->kind_ == "llama" || tokenizer->kind_ == "t5") {
             tokenizer->spm_ = loom::Vocab::load(model);
         }
@@ -127,7 +132,7 @@ public:
 
     bool valid() const {
         return spm_ || bpe_ || wordpiece_ || byte_ || supertonic_ || phoneme_ || ctc_ || f5_ ||
-               chatterbox_ || pocket_tts_ || voxcpm_ || cosyvoice3_;
+               chatterbox_ || pocket_tts_ || voxcpm_ || cosyvoice3_ || soprano_;
     }
     const std::string& kind() const { return kind_; }
 
@@ -143,6 +148,7 @@ public:
         if (pocket_tts_) return pocket_tts_->size();
         if (voxcpm_) return voxcpm_->size();
         if (cosyvoice3_) return cosyvoice3_->size();
+        if (soprano_) return soprano_->size();
         // n_tokens(), not vocab_size() -- the latter is the 65536-entry BMP lookup table, which is not
         // what any caller reading `tokenizer.size()` means.
         return supertonic_->n_tokens();
@@ -175,6 +181,7 @@ public:
         if (pocket_tts_) return pocket_tts_->encode(text);
         if (voxcpm_) return voxcpm_->encode(text);
         if (cosyvoice3_) return cosyvoice3_->encode(text);
+        if (soprano_) return soprano_->encode(text);
         return supertonic_->tokenize(text, lang);  // empty lang -> the file's own default_lang
     }
 
@@ -190,6 +197,7 @@ public:
         if (pocket_tts_) return pocket_tts_->decode(ids);
         if (voxcpm_) return voxcpm_->decode(ids);
         if (cosyvoice3_) return cosyvoice3_->decode(ids);
+        if (soprano_) return soprano_->decode(ids);
         return supertonic_->detokenize(ids);
     }
 
@@ -211,6 +219,7 @@ private:
     std::unique_ptr<loom::PocketTtsVocab> pocket_tts_;
     std::unique_ptr<loom::VoxCpmVocab> voxcpm_;
     std::unique_ptr<loom::CosyVoice3Vocab> cosyvoice3_;
+    std::unique_ptr<loom::SopranoVocab> soprano_;
 };
 
 // One driver input, marshalled. A driver's world is numbers and arrays of numbers -- the bridge's own
