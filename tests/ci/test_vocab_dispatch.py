@@ -391,3 +391,45 @@ class TestCosyVoice3TextDoor:
 
     def test_detokenize_drops_the_headers(self, model):
         assert model.detokenize(model.tokenize("Aa. Bb. Cc. Dd.")) == "Aa. Bb. Cc. Dd."
+
+
+class TestSopranoTextDoor:
+    """Family 9's eighth leaf: a character BPE whose `encode` is the reference's text path --
+    tortoise-tts's English normaliser, the sentence split and merge, each sentence wrapped as
+    `[STOP][TEXT]{sentence}[START]` so the driver can generate them in turn.
+
+    Pinned here: the tag reaches `loom::SopranoVocab`, `tokenize` is the whole path (normalisation and
+    prompts), and `detokenize` drops the prompt's control ids. The exact ids are the engine's to prove
+    (tests/ci/test_soprano_vocab.cpp, and 20,000/20,000 against the reference). The file is the engine
+    test's own fixture: the reference's rule tables, and a character table where ' ' is 4, '.' is 13,
+    'a'..'z' are 25..50 and the merges make "th" 51 and "the" 52.
+    """
+
+    @pytest.fixture
+    def model(self, tmp_path):
+        import runpy
+        import sys
+        from pathlib import Path
+
+        generator = Path(__file__).resolve().parents[2] / "vendor/loom.cpp/tests/fixtures/make_soprano_vocab_gguf.py"
+        path = tmp_path / "soprano.gguf"
+        argv = sys.argv
+        sys.argv = [str(generator), str(path)]
+        try:
+            runpy.run_path(str(generator), run_name="__main__")
+        finally:
+            sys.argv = argv
+        return loom.Model.from_file(str(path))
+
+    def test_the_tag_is_recognized_and_the_model_carries_a_tokenizer(self, model):
+        assert model.tokenizer is not None
+        assert model.tokenizer.kind == "soprano"
+
+    def test_tokenize_normalises_and_wraps_every_sentence(self, model):
+        letter = lambda c: 25 + ord(c) - ord("a")
+        # "Hi 2." is cleaned to "hi two." and wrapped: [STOP] [TEXT] ... [START].
+        assert model.tokenize("Hi 2.") == [3, 1, letter("h"), letter("i"), 4, letter("t"), letter("w"),
+                                          letter("o"), 13, 2]
+
+    def test_detokenize_drops_the_prompt(self, model):
+        assert model.detokenize(model.tokenize("Hi 2.")) == "hi two."

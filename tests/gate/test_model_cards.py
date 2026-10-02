@@ -148,6 +148,10 @@ ASR_BASELINE = {
     # transformers' own generate on jfk.wav and on all 73 LibriSpeech-dummy utterances (2026-10-02).
     "moonshine-streaming-tiny":  0.00,
     "moonshine-streaming-small": 0.00,
+    # Word-perfect, punctuation and casing included; each matches its own reference id for id on jfk.wav
+    # (Kyutai's moshi, at 24 kHz through the card's resample; liquid-audio's generate_sequential), 2026-10-02.
+    "kyutai-stt-1b-en-fr":       0.00,
+    "lfm2.5-audio-1.5b-asr":     0.00,
     "granite-speech-4.0-1b":  0.00,
     "parakeet-rnnt-0.6b":     0.00,
     "parakeet-tdt-0.6b":      0.00,
