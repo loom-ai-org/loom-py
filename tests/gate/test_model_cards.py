@@ -830,14 +830,16 @@ def test_audio_embedder_tells_speakers_apart(name, jfk, tmp_path, monkeypatch):
 @pytest.mark.gate
 @pytest.mark.parametrize("name", NAMES)
 def test_frame_features_follow_the_clip_in_every_precision(name, jfk, tmp_path, monkeypatch):
-    """A frame-level feature extractor (embeddings per FRAME, which no door answers yet; the card calls
-    `infer`): one row per frame of the clip, every row the same width, and the rows MOVE with the audio.
+    """A frame-level feature extractor (embeddings per FRAME; the card calls the `speech2embeddings`
+    door, which answers a `FrameEmbeddings`): one row per frame of the clip, every row the declared
+    width, each row placed at the time the file's frame rate gives, and the rows MOVE with the audio.
 
-    Then every GGUF the repo carries -- wakehubert-tiny ships four precisions -- is run on jfk.wav and
-    compared with the largest frame by frame. The card's snippet loads one of them, and a release that
-    only ever executed that one would publish three files nothing had run. The floor is generous on
-    purpose (Q4_1 measured a mean cosine of 0.987 against PyTorch): it catches a file that is BROKEN --
-    the wrong weights, a scrambled layout, a dead layer -- not one that is merely coarser.
+    Then every GGUF the repo carries -- wakehubert-tiny ships four precisions -- is run on jfk.wav
+    through the same door and compared with the largest frame by frame. The card's snippet loads one of
+    them, and a release that only ever executed that one would publish three files nothing had run. The
+    floor is generous on purpose (Q4_1 measured a mean cosine of 0.987 against PyTorch): it catches a
+    file that is BROKEN -- the wrong weights, a scrambled layout, a dead layer -- not one that is merely
+    coarser.
     """
     _cards_dir()
     gguf, readme = _entry(name)
@@ -845,27 +847,33 @@ def test_frame_features_follow_the_clip_in_every_precision(name, jfk, tmp_path, 
     if contract.get("output_kind") != "embeddings" or contract.get("output_granularity") != "frame":
         pytest.skip(f"{name} does not return embeddings per frame")
     hop = round(contract["sample_rate"] / contract["frame_rate"])
+    width = contract.get("embedding_dim", 0)
+    assert width > 0, (f"{name} returns embeddings per frame and declares no `embedding_dim`, so the "
+                       f"door refuses it; re-export it with a current loom-exporter")
 
     ns, unmet = run_card(name, gguf, readme, jfk, tmp_path, monkeypatch)
-    tables = [v for v in ns.values()
-              if isinstance(v, list) and len(v) > 1 and all(isinstance(r, list) and r for r in v)]
-    if not tables:
-        pytest.skip(f"{name}'s card produced no rows{' -- ' + unmet if unmet else ''}")
-    rows = tables[-1]
-    width = len(rows[0])
+    answers = [v for v in ns.values() if isinstance(v, loom.FrameEmbeddings)]
+    if not answers:
+        pytest.skip(f"{name}'s card produced no FrameEmbeddings{' -- ' + unmet if unmet else ''}")
+    features = answers[-1]
+    rows = features.rows
     assert len(rows) == len(jfk) // hop, (
         f"{name}'s card made {len(rows)} rows of jfk.wav; one per {hop} samples is {len(jfk) // hop}")
-    assert all(len(r) == width for r in rows), f"{name}'s rows are not all {width} wide"
+    assert features.dim == width and all(len(r) == width for r in rows), (
+        f"{name}'s rows are not all the declared {width} wide")
+    assert features.frame_rate == pytest.approx(contract["frame_rate"])
+    assert features.times[1] - features.times[0] == pytest.approx(1 / contract["frame_rate"]), (
+        f"{name}'s rows are not placed {1 / contract['frame_rate']:.4f} s apart")
     assert all(math.isfinite(x) for r in rows for x in r), f"{name} returned a non-finite feature"
     assert _cosine(rows[len(rows) // 4], rows[3 * len(rows) // 4]) < 0.99, (
         f"{name} returned near-identical features a quarter and three quarters into the clip")
 
-    reference = loom.Model.from_file(str(gguf)).infer(waveform=jfk)
+    reference = loom.Model.from_file(str(gguf)).speech2embeddings.infer(jfk).rows
     for other in sorted(gguf.parent.glob("*.gguf")):
-        flat = loom.Model.from_file(str(other)).infer(waveform=jfk)
-        assert len(flat) == len(reference), f"{other.name} returned {len(flat)} numbers, not {len(reference)}"
-        cosines = [_cosine(flat[i:i + width], reference[i:i + width])
-                   for i in range(0, len(flat), width)]
+        other_rows = loom.Model.from_file(str(other)).speech2embeddings.infer(jfk).rows
+        assert len(other_rows) == len(reference), (
+            f"{other.name} returned {len(other_rows)} rows, not {len(reference)}")
+        cosines = [_cosine(a, b) for a, b in zip(other_rows, reference)]
         mean = sum(cosines) / len(cosines)
         assert mean >= MIN_PRECISION_AGREEMENT, (
             f"{other.name} agrees with {gguf.name} at a mean per-frame cosine of {mean:.4f}")

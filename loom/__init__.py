@@ -33,12 +33,12 @@ from typing import Any, Iterable, Mapping, Sequence
 from . import _loom
 from . import phonemizers
 from ._hub import download, list_files
-from ._interfaces import (ALL_INTERFACES, Audio, AudioClasses, Classification, Codes2Speech, Interface,
-                          Speech2Class, Speech2Embeddings, Speech2Text, Text2Class, Text2Codes,
-                          Text2Speech, Text2Text, TokenClass, UnsupportedTask)
+from ._interfaces import (ALL_INTERFACES, Audio, AudioClasses, Classification, Codes2Speech,
+                          FrameEmbeddings, Interface, Speech2Class, Speech2Embeddings, Speech2Text,
+                          Text2Class, Text2Codes, Text2Speech, Text2Text, TokenClass, UnsupportedTask)
 
 __all__ = ["Model", "Voice", "Tokenizer", "Transcription", "Segment", "Audio", "Classification", "TokenClass",
-           "AudioClasses",
+           "AudioClasses", "FrameEmbeddings",
            "Interface", "UnsupportedTask", "Text2Text", "Speech2Text", "Text2Speech", "Text2Class",
            "Text2Codes", "Codes2Speech", "Speech2Class", "Speech2Embeddings",
            "phonemizers", "LoomError", "devices", "contract_of", "download", "__version__"]
@@ -629,9 +629,24 @@ class Model:
             frame_rate=float(raw["frame_rate"]), frame_offset=float(raw["frame_offset"]),
         )
 
-    def embed(self, waveform: Sequence[float]) -> list[float]:
-        """Run an audio embedder over one clip -- `model.speech2embeddings.infer(waveform)` lands here."""
-        return list(self._handle.embed([float(x) for x in waveform]))
+    def embed(self, waveform: Sequence[float]) -> "list[float] | FrameEmbeddings":
+        """Run an audio embedder over one clip -- `model.speech2embeddings.infer(waveform)` lands here.
+
+        The engine (`loom::audio::embed`) cuts the driver's flat answer into rows of the file's declared
+        `embedding_dim` and refuses one that is not whole rows. A `clip` file's one row comes back as
+        the bare vector, as it always has (a published card depends on it); a `frame` file's rows come
+        back as a `FrameEmbeddings`, which carries the time each row starts at (ADR-062's 2026-10-08
+        amendment).
+        """
+        raw = self._handle.embed([float(x) for x in waveform])
+        flat = raw["values"]
+        if raw["granularity"] != "frame":
+            return list(flat)
+        dim = int(raw["dim"])
+        return FrameEmbeddings(
+            rows=[list(flat[r * dim:(r + 1) * dim]) for r in range(raw["n_rows"])], dim=dim,
+            frame_rate=float(raw["frame_rate"]), frame_offset=float(raw["frame_offset"]),
+        )
 
     def call(self, fn_name: str, inputs: Mapping[str, Any]) -> list[float] | float:
         """`infer` by another name, for a model whose driver exposes more than one entry point."""
