@@ -36,6 +36,7 @@ class TestPackage:
             "Classification",
             "TokenClass",
             "AudioClasses",
+            "FrameEmbeddings",
             "Interface",
             "UnsupportedTask",
             "Text2Text",
@@ -304,9 +305,17 @@ class _FakeHandle:
                 "frame_rate": contract["frame_rate"], "frame_offset": contract["frame_offset"],
                 "probabilities": [0.9, 0.1, 0.2, 0.8]}
 
+    # The engine cuts by the declared width; the double hands back that cut -- one row of three for a
+    # clip embedder, two rows of three for a frame one -- in the dict the binding builds.
     def embed(self, waveform):
         self.audio_calls = getattr(self, "audio_calls", []) + [list(waveform)]
-        return [0.5, -0.25, 0.125]
+        contract = self._contract
+        if contract.get("output_granularity") == "frame":
+            return {"granularity": "frame", "n_rows": 2, "dim": 3,
+                    "frame_rate": contract["frame_rate"], "frame_offset": contract["frame_offset"],
+                    "values": [0.0, 0.25, 0.5, 1.0, 1.25, 1.5]}
+        return {"granularity": "clip", "n_rows": 1, "dim": 3, "frame_rate": 0.0, "frame_offset": 0.0,
+                "values": [0.5, -0.25, 0.125]}
 
 
 class TestTranscribeWarnings:
@@ -597,6 +606,8 @@ _LID_CONTRACT = dict(_VAD_CONTRACT, labels=["en", "de", "fr"], output_granularit
 _EMBEDDER_CONTRACT = dict(_VAD_CONTRACT, task="audio-embedding", output_kind="embeddings",
                           interface="speech2embeddings", labels=[], output_granularity="clip",
                           frame_rate=0.0, frame_offset=0.0)
+_FRAME_EMBEDDER_CONTRACT = dict(_EMBEDDER_CONTRACT, output_granularity="frame", frame_rate=50.0,
+                                frame_offset=0.0, embedding_dim=3)
 _CODES_LM_CONTRACT = dict(_ASR_CONTRACT, task="text-to-codes", input_kind="text",
                           output_kind="audio_codes", interface="text2codes", sample_rate=0,
                           clip_samples=0, text_frontend="vocab")
@@ -709,10 +720,30 @@ class TestInterfacesAreTheModalityPair:
         handle = _FakeHandle([], contract=_EMBEDDER_CONTRACT)
         model = _model(handle)
         assert model.capabilities == ("speech2embeddings",)
-        assert model.speech2embeddings.infer([0.25]) == [0.5, -0.25, 0.125]
+        # A clip embedder's answer stays the bare vector: TitaNet's published card depends on it.
+        result = model.speech2embeddings.infer([0.25])
+        assert result == [0.5, -0.25, 0.125] and type(result) is list
         with pytest.raises(loom.UnsupportedTask) as excinfo:
             model.speech2class.infer([0.25])
         assert "speech2embeddings" in str(excinfo.value)
+
+    def test_a_frame_embedder_answers_rows_with_their_times(self):
+        """ADR-062's 2026-10-08 amendment: the same door, a frame file, and the answer is rows of the
+        declared width with the time each one starts at -- the engine's cut, turned into lists here."""
+        handle = _FakeHandle([], contract=_FRAME_EMBEDDER_CONTRACT)
+        model = _model(handle)
+        assert model.capabilities == ("speech2embeddings",)
+        result = model.speech2embeddings.infer([0.0, 0.5])
+        assert handle.audio_calls == [[0.0, 0.5]]
+        assert isinstance(result, loom.FrameEmbeddings)
+        assert len(result) == 2 and result.dim == 3
+        assert result.rows == [[0.0, 0.25, 0.5], [1.0, 1.25, 1.5]]
+        assert result.times == [0.0, 1 / 50.0]
+        assert result.frame_rate == 50.0 and result.frame_offset == 0.0
+
+    def test_frame_embedding_times_start_at_the_declared_offset(self):
+        result = loom.FrameEmbeddings(rows=[[0.0], [1.0], [2.0]], dim=1, frame_rate=4.0, frame_offset=0.5)
+        assert result.times == [0.5, 0.75, 1.0]
 
     def test_an_ar_codec_lm_answers_text2codes_and_returns_frames(self):
         """The first half of the family-10 pair. `audio_codes` as an OUTPUT kind is what makes this a

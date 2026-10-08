@@ -362,6 +362,8 @@ public:
         out["output_granularity"] = c.output_granularity;
         out["frame_rate"] = c.frame_rate;
         out["frame_offset"] = c.frame_offset;
+        // The width of one `embeddings` row; 0 when undeclared (ADR-062's 2026-10-08 amendment).
+        out["embedding_dim"] = c.embedding_dim;
         // The ASR names a caller may pass, as DECLARED -- read with no vocabulary, so a pre-contract
         // Whisper file (whose names resolve by spelling) reports none rather than a guess. These are
         // the lists `transcribe`'s refusals point at.
@@ -479,8 +481,8 @@ public:
     // AUDIO CLASSIFICATION and EMBEDDING, the engine's `loom::audio::classify`/`embed` (see
     // loom/core/audio_classify.h). What the engine owns is the CUT -- rows of the declared labels, the
     // time each frame row covers, and the refusal of an answer that is not whole rows -- so this side
-    // only marshals. The probabilities come back flat with their row count; `Model.classify_audio`
-    // shapes them into the result object.
+    // only marshals. The probabilities (or embedding values) come back flat with their row count;
+    // `Model.classify_audio` / `Model.embed` shape them into the result object.
     py::object classify_audio(const std::vector<float>& waveform) {
         if (driver_.empty()) {
             throw std::runtime_error(
@@ -497,11 +499,19 @@ public:
         return out;
     }
 
-    std::vector<float> embed(const std::vector<float>& waveform) {
+    py::object embed(const std::vector<float>& waveform) {
         if (driver_.empty()) {
             throw std::runtime_error("this GGUF carries no driver script, so there is nothing to embed.");
         }
-        return loom::audio::embed(*bridge_, *model_, waveform);
+        const loom::audio::Embeddings r = loom::audio::embed(*bridge_, *model_, waveform);
+        py::dict out;
+        out["granularity"] = r.granularity;
+        out["n_rows"] = r.n_rows;
+        out["dim"] = r.dim;
+        out["frame_rate"] = r.frame_rate;
+        out["frame_offset"] = r.frame_offset;
+        out["values"] = r.values;
+        return out;
     }
 
     // TRANSCRIPTION, which is the engine's `loom::audio::transcribe` and nothing else (see
