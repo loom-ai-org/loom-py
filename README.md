@@ -29,7 +29,7 @@ model.text2class.infer("Wolfgang lives in Berlin")       # -> Classification, a 
 model.text2codes.infer("[S1] Hello world.")              # -> codec tokens, frame-major
 model.codes2speech.infer(codes)                          # -> Audio, the other half of that pair
 model.speech2class.infer(waveform)                       # -> AudioClasses, per clip or per frame
-model.speech2embeddings.infer(waveform)                  # -> list[float], one vector per clip
+model.speech2embeddings.infer(waveform)                  # -> list[float] per clip, or FrameEmbeddings per frame
 ```
 
 Which door a model answers is read off the file, not guessed from its name:
@@ -89,7 +89,8 @@ lid.speech2class.infer(audio).top(3)         # [('th: Thai', 0.988), ('lo: Lao',
 ```
 
 `speech2embeddings` returns the model's vector unnormalised; comparing two (cosine, for a speaker
-embedding) and choosing a threshold are yours.
+embedding) and choosing a threshold are yours. A frame-level embedder (WakeHuBERT) returns a
+`FrameEmbeddings` instead: `rows` (one vector per frame), `dim`, and `times`, each row's start in seconds.
 
 **A model that speaks through a codec is two files, and the codes are what joins them.** An
 autoregressive codec LM emits discrete tokens, not audio; a neural codec turns those tokens into a
