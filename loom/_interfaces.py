@@ -177,6 +177,33 @@ class AudioClasses:
         return [row[k] for row in self.probabilities]
 
 
+@dataclass(frozen=True)
+class FrameEmbeddings:
+    """What `Speech2Embeddings.infer` returns for a frame-level embedder: one vector per encoder frame.
+
+    A clip embedder answers with the bare vector, because there is nothing to attach to it; a frame
+    answer has the time each row covers, so it gets the object `AudioClasses` already is. The cut into
+    rows (by the file's declared `embedding_dim`) and the times are the ENGINE's (`loom::audio::embed`),
+    so loom_cli and this agree. Row `i` starts `frame_offset + i / frame_rate` seconds into the clip.
+
+    The values are the model's own, unnormalised; what a detector does with them is the caller's.
+    """
+    rows: list  # one list of `dim` floats per frame
+    dim: int
+    frame_rate: float
+    frame_offset: float = 0.0
+
+    def __len__(self) -> int:
+        return len(self.rows)
+
+    @property
+    def times(self) -> list:
+        """Each row's start in seconds."""
+        if not self.frame_rate:
+            return [self.frame_offset] * len(self.rows)
+        return [self.frame_offset + i / self.frame_rate for i in range(len(self.rows))]
+
+
 class Interface:
     """Base for every X2Y door. Subclasses declare the modality pair they serve and implement `infer`.
 
@@ -291,13 +318,19 @@ class Speech2Class(Interface):
 
 class Speech2Embeddings(Interface):
     name = "speech2embeddings"
-    summary = "audio in, one embedding vector out (speaker embedding)"
+    summary = ("audio in, embedding vectors out: one per clip (speaker embedding) or one per frame "
+               "(frame-level features)")
 
-    def _infer(self, waveform: Sequence[float]) -> list[float]:
+    def _infer(self, waveform: Sequence[float]) -> "list[float] | FrameEmbeddings":
         """Embed a clip: mono floats in [-1, 1] at the model's own `contract["sample_rate"]`.
 
-        Returns the model's own vector, unnormalised. Comparing two -- cosine similarity, for a speaker
-        embedding -- is the caller's, since a threshold is a property of the application.
+        What comes back depends on the file's declared granularity. A `clip` embedder (a speaker model)
+        returns its one vector, as a plain list. A `frame` embedder (a frame-level feature extractor)
+        returns a `FrameEmbeddings`: one row per encoder frame, with the time each starts at.
+
+        The values are the model's own, unnormalised. Comparing two -- cosine similarity, for a speaker
+        embedding -- or training a detector on frames is the caller's, since a threshold is a property
+        of the application.
         """
         return self._model.embed(waveform)
 
