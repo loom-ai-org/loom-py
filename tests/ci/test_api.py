@@ -186,8 +186,10 @@ class _FakeHandle:
     GGUF. Only the methods `loom.Model` actually calls are here."""
 
     def __init__(self, returns, vocab="gpt2", eos=-1, contract=None, transcribe_warnings=(),
-                 chat_roles=(), hparams=None):
+                 chat_roles=(), hparams=None, selection_note=""):
         self._returns = list(returns)      # what successive infer() calls hand back
+        # What the engine says when "auto" passed a device over because the weights would not fit.
+        self._selection_note = selection_note
         # What the ENGINE reports as ignored -- an argument this file has nothing to select with. The
         # engine returns these instead of printing them (a library has no logger); the Python layer is
         # what turns them into warnings, and that hand-off is what the test below pins.
@@ -272,6 +274,7 @@ class _FakeHandle:
     def kv_i32(self, key, fallback): return self._eos
     def device_name(self): return "CPU"
     def device_description(self): return "a fake device"
+    def device_selection_note(self): return self._selection_note
     def call(self, fn_name, inputs):
         self.calls.append(inputs)
         return self._returns.pop(0) if self._returns else 0.0
@@ -570,6 +573,20 @@ class TestDeviceIsPassedThroughAndReadBack:
                             lambda path, device: seen.append(device) or _FakeHandle([]))
         loom.Model.from_pretrained("org/repo", device="Vulkan0")
         assert seen == ["Vulkan0"]
+
+    def test_a_device_passed_over_for_memory_is_a_warning(self, monkeypatch, tmp_path):
+        # The engine decides and explains (Device::selection_note); the layer's half is that the
+        # explanation reaches the caller, who asked for the best device and got a slower one.
+        gguf = tmp_path / "m.gguf"
+        gguf.write_bytes(b"")
+        note = "'auto' chose CPU: Vulkan0 (a GPU) has 2.95 GB free and the weights need 4.31 GB"
+        monkeypatch.setattr(loom._loom, "Model", lambda path, device: _FakeHandle([], selection_note=note))
+        with pytest.warns(RuntimeWarning, match="Vulkan0 .* has 2.95 GB free"):
+            loom.Model.from_file(gguf)
+        monkeypatch.setattr(loom._loom, "Model", lambda path, device: _FakeHandle([]))
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            loom.Model.from_file(gguf)
 
     def test_the_resolved_device_is_readable(self):
         handle = _FakeHandle([])
