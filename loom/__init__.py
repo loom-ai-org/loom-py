@@ -194,11 +194,20 @@ class Model:
         then a host-memory accelerator such as BLAS, then the CPU -- rather than by the order ggml
         registered things, which differs between a linked build and the dynamically loaded one this
         wheel ships (see `loom.cpp` BACKLOG.md P4.8b).
+
+        The default also skips a device whose free memory cannot hold the weights -- a second large
+        model on an iGPU, say -- and warns with the numbers when it does. A device you NAME is never
+        skipped: if the weights do not fit there, this raises before allocating anything.
         """
         resolved = Path(path).expanduser()
         if not resolved.is_file():
             raise FileNotFoundError(f"no such model file: {resolved}")
-        return cls(_loom.Model(str(resolved), device), resolved)
+        handle = _loom.Model(str(resolved), device)
+        # A warning rather than silence: the caller asked for the best device and got a slower one.
+        note = handle.device_selection_note()
+        if note:
+            warnings.warn(note, RuntimeWarning, stacklevel=2)
+        return cls(handle, resolved)
 
     @classmethod
     def from_pretrained(
