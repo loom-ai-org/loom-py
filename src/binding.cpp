@@ -249,7 +249,10 @@ public:
     // wheel built with a GPU backend uses it without every caller having to ask, while a wheel built
     // without one resolves to exactly the CPU it always did.
     explicit Model(const std::string& path, const std::string& device = std::string{})
-        : device_(std::make_unique<loom::Device>(loom::Device::open(device))) {
+        // With the weights' size, so that "auto" passes over a device that cannot hold them -- one
+        // that has run out does not say so at allocation, and the run dies later as ErrorDeviceLost.
+        : device_(std::make_unique<loom::Device>(
+              loom::Device::open(device, loom::GgufModel::load_metadata(path)->weight_bytes()))) {
         const loom::Backends backends = device_->backends();
         model_ = loom::GgufModel::load(path, backends);
         if (model_ == nullptr) throw std::runtime_error("could not load a loom GGUF from " + path);
@@ -292,6 +295,8 @@ public:
     // choose still needs to be able to find out what was chosen.
     std::string device_name() const { return device_->name(); }
     std::string device_description() const { return device_->description(); }
+    // Empty unless "auto" passed a device over because the weights would not fit on it.
+    std::string device_selection_note() const { return device_->selection_note(); }
 
     bool has_tokenizer() const { return tokenizer_ != nullptr; }
     std::string tokenizer_kind() const { return tokenizer_ ? tokenizer_->kind() : std::string{}; }
@@ -717,6 +722,7 @@ PYBIND11_MODULE(_loom, m) {
               py::arg("device") = std::string{})
         .def("device_name", &Model::device_name)
         .def("device_description", &Model::device_description)
+        .def("device_selection_note", &Model::device_selection_note)
         .def("topologies", &Model::topologies)
         .def("architecture", &Model::architecture)
         .def("takes_voice_files", &Model::takes_voice_files)
