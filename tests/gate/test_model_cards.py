@@ -570,10 +570,50 @@ def test_a_codec_lm_says_the_words(name, oracle, jfk, tmp_path, monkeypatch):
     It needs the codec beside it in the staging tree, which `localise` resolves; without it the card's
     second `from_pretrained` reaches the Hub and this still runs.
     """
+    heard, readme = _hear_codec_lm_card(name, oracle, jfk, tmp_path, monkeypatch, music=False)
+    # The expectation is the card's own sentence, read back out of it rather than restated here --
+    # this family's cards do not share one line the way the TTS cards share "hello world", and a
+    # constant copied into this file would be a second, unpublished spelling of what is under test.
+    said = card_sentence(readme)
+    assert said, f"{name}'s card passes no sentence to text2codes, so nothing can be expected of it"
+    codes_wer = wer(said, heard)
+    assert codes_wer <= MAX_WER_TTS, (
+        f"{name} was asked for {said!r}, oracle heard {heard!r} (WER {codes_wer:.2f})"
+    )
+
+
+# What Whisper writes for audio it recognises as music rather than speech: a sound tag such as
+# "(upbeat music)" or "[Music]", or the "♪" it puts around sung lines.
+MUSIC_TAG = re.compile(r"[(\[][^)\]]*music[^)\]]*[)\]]|♪", re.IGNORECASE)
+
+
+@pytest.mark.gate
+@pytest.mark.parametrize("name", NAMES)
+def test_a_music_lm_makes_music(name, oracle, jfk, tmp_path, monkeypatch):
+    """The codec-LM row for a card that makes MUSIC (`pipeline_tag: text-to-audio`, MusicGen).
+
+    A music prompt describes a genre and has no words to read back, so the row above cannot grade it:
+    MusicGen's card, working correctly, was heard as "(upbeat music)" and failed it at WER 1.0. What can
+    be asked is whether the recogniser files the output under music. Measured on whisper-small
+    (2026-10-10): two MusicGen takes -> "(upbeat music)" both; JFK's speech -> his words; white noise ->
+    "(water splashing)"; random EnCodec codes -> "(roaring)" with a peak of 1.59, which the peak bound
+    rejects as well. Speech, noise and a broken LM all fail this.
+    """
+    heard, _ = _hear_codec_lm_card(name, oracle, jfk, tmp_path, monkeypatch, music=True)
+    assert MUSIC_TAG.search(heard), (
+        f"{name} is a music card, and the oracle heard its output as {heard!r}, not as music"
+    )
+
+
+def _hear_codec_lm_card(name, oracle, jfk, tmp_path, monkeypatch, *, music):
+    """Run a text2codes card and return what the oracle heard, plus the README. Skips a card from the
+    other codec-LM row (speech vs music, by the card's `pipeline_tag`) BEFORE running it."""
     _cards_dir()
     gguf, readme = _entry(name)
     if loom.contract_of(gguf).get("interface") != "text2codes":
         pytest.skip(f"{name} is not text2codes")
+    if card_makes_music(readme) != music:
+        pytest.skip(f"{name} {'does not make' if music else 'makes'} music: graded by the other row")
 
     ns, unmet = run_card(name, gguf, readme, jfk, tmp_path, monkeypatch)
     audio = produced(ns, "samples", "sample_rate")
@@ -588,15 +628,14 @@ def test_a_codec_lm_says_the_words(name, oracle, jfk, tmp_path, monkeypatch):
 
     heard = oracle.speech2text.infer(_resample_16k(samples, audio.sample_rate), language="en").text
     assert heard.strip(), f"{name} produced audio the oracle heard as nothing (peak {peak:.4f})"
-    # The expectation is the card's own sentence, read back out of it rather than restated here --
-    # this family's cards do not share one line the way the TTS cards share "hello world", and a
-    # constant copied into this file would be a second, unpublished spelling of what is under test.
-    said = card_sentence(readme)
-    assert said, f"{name}'s card passes no sentence to text2codes, so nothing can be expected of it"
-    codes_wer = wer(said, heard)
-    assert codes_wer <= MAX_WER_TTS, (
-        f"{name} was asked for {said!r}, oracle heard {heard!r} (WER {codes_wer:.2f})"
-    )
+    return heard, readme
+
+
+def card_makes_music(readme: Path) -> bool:
+    """Whether the card's Hub `pipeline_tag` is text-to-audio (music), not text-to-speech. Read from the
+    card's front matter, the same published declaration the Hub files it under."""
+    match = re.search(r"^pipeline_tag:\s*(\S+)\s*$", readme.read_text(), re.MULTILINE)
+    return bool(match) and match.group(1) == "text-to-audio"
 
 
 def card_sentence(readme: Path) -> str:
