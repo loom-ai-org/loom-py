@@ -157,6 +157,10 @@ ASR_BASELINE = {
     "lfm2.5-audio-1.5b-asr":     0.00,
     "granite-speech-4.0-1b":  0.00,
     "parakeet-rnnt-0.6b":     0.00,
+    # Word-perfect, punctuation and casing included, with the language left to `auto`; identical in ids
+    # to transformers' generate (sdpa) on jfk.wav and on a 60 s clip (2026-10-10). Its `<en-US>` tags
+    # are control ids, so they do not reach `text` to be counted as words.
+    "nemotron-3.5-asr-streaming-0.6b": 0.00,
     "parakeet-tdt-0.6b":      0.00,
     "whisper-small":          0.00,
     # Russian-first (it declares `ru, en`), so English costs it. The transcript is unmistakably the
