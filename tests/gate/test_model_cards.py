@@ -145,6 +145,9 @@ ASR_BASELINE = {
     # "american" for "americans" and "as" for "ask": 2 in 22. NeMo's own forward decodes the identical
     # string from the identical audio (2026-10-01), so this is the checkpoint, not the port.
     "citrinet-1024":          0.09,
+    # "askd" and "as" for the two "ask"s, 2 in 22, as citrinet-1024 does; NeMo's own forward emits the
+    # identical ids (2026-10-10). Its card's first file is the F32 one; Q8_0 hears "saw" for "so" (0.14).
+    "citrinet-256-ls":        0.09,
     # Word-perfect, with punctuation and casing; its card asks for the default English target.
     "canary-1b-v2":           0.00,
     # Word-perfect, punctuation and casing included, at both sizes -- and identical in ids to
