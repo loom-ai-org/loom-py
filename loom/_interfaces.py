@@ -484,6 +484,15 @@ class Text2Speech(Interface):
             "n_ref_text": float(len(ref_ids)),
         }
 
+    def _phoneme_style(self) -> str:
+        """`loom.tts.phoneme_style`, or "" for a model that declares none (every export before it). An
+        hparam rather than a contract field by ADR-020's split, like `tts.reference`: it says how the host
+        builds this door's input, not which door it is."""
+        try:
+            return str(self._model.hparam("tts.phoneme_style", "str"))
+        except Exception:
+            return ""
+
     def _reference_mode(self) -> str:
         try:
             return str(self._model.hparam("tts.reference", "str"))
@@ -554,9 +563,10 @@ class Text2Speech(Interface):
                     f"so it has no text door. Pass phonemes=[...] from your own G2P, or re-export it "
                     f"with a current loom-exporter, which writes the table its checkpoint already had."
                 )
-            spoken = phonemizers.phonemize(
-                text, alphabet=alphabet, language=language or (contract.get("languages") or ["en"])[0])
-            return self._model.tokenize(spoken)
+            lang = language or (contract.get("languages") or ["en"])[0]
+            spoken = phonemizers.phonemize(text, alphabet=alphabet, language=lang)
+            # The conventions the checkpoint was trained in, when it declares them (`phonemizers.fold`).
+            return self._model.tokenize(phonemizers.fold(spoken, self._phoneme_style(), language=lang))
         if frontend != "vocab":
             raise UnsupportedTask(
                 f"this model declares no text front end, so it cannot encode text. Pass tokens=[...] "
