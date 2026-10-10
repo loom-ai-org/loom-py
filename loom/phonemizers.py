@@ -26,6 +26,7 @@ being how phonemization is provided and remains how a caller substitutes their o
 from __future__ import annotations
 
 import os
+import re
 import warnings
 from typing import Callable, Dict, Optional
 
@@ -136,6 +137,106 @@ def phonemize(text: str, *, alphabet: str = "ipa", language: str = "en") -> str:
         )
     return provider(text, language)
 
+
+
+# -- phoneme styles --------------------------------------------------------------------------------
+#
+# A phoneme TABLE says which symbols a checkpoint knows; it does not say which CONVENTIONS its training
+# data wrote them in. A rule-based G2P plus a dictionary lexicon (ipa-dict) writes stress before the
+# syllable's onset (`ˈkwɪk`), stresses every monosyllable (`ˈðə`), and leaves English vowels unmarked for
+# length (`i`, `ɑ`, `ɔ`). espeak -- what every Piper voice and every voice distilled from one was trained
+# on -- writes `kwˈɪk`, `ðə`, `iː`, `ɑː`, `ɔː`. A large model hears through that (Piper's VITS is
+# word-perfect either way); a 1.46M-parameter student does not: sanoTTS amy went from 66.8% WER to 11.1%
+# on 30 LibriSpeech sentences when its input was folded to espeak's conventions, against 8.5% for
+# upstream's own espeak-style G2P (loom.cpp ADR-071).
+#
+# So a model DECLARES the style it was trained on (`loom.tts.phoneme_style`) and the text door folds the
+# G2P's output to it before encoding. Only text the door phonemized is folded: `phonemes=` from the
+# caller is taken as given, because a caller who brings their own G2P has already chosen conventions.
+
+_STRESS = "ˈˌ"
+_VOWELS = frozenset("aeiouæɑɒɔəɛɜɝɚɪʊʌɐᵻᵊAIWOY")
+
+
+def _stress_before_vowel(word: str) -> str:
+    """Move each stress mark from a syllable's onset to its vowel: `ˈkwɪk` -> `kwˈɪk`."""
+    out, pending = [], ""
+    for ch in word:
+        if ch in _STRESS:
+            pending = ch
+            continue
+        if pending and ch in _VOWELS:
+            out.append(pending)
+            pending = ""
+        out.append(ch)
+    if pending:
+        out.append(pending)
+    return "".join(out)
+
+
+def _replace_all(word: str, pairs) -> str:
+    for needle, replacement in pairs:
+        word = word.replace(needle, replacement)
+    return word
+
+
+# misaki's compressed symbols back to espeak's, and the two IPA spellings espeak never uses.
+_TO_ESPEAK = (("A", "eɪ"), ("I", "aɪ"), ("W", "aʊ"), ("O", "oʊ"), ("Y", "ɔɪ"), ("ʤ", "dʒ"), ("ʧ", "tʃ"),
+              ("ᵊl", "əl"), ("ᵊ", "ə"), ("T", "ɾ"), ("ɜɹ", "ɜː"), ("ʰ", ""), ("ɫ", "l"), ("r", "ɹ"))
+
+
+def _fold_espeak(phonemes: str, language: str) -> str:
+    english = language.lower().startswith("en")
+    words = []
+    for word in phonemes.split():
+        word = _replace_all(_stress_before_vowel(word), _TO_ESPEAK)
+        if english:
+            # espeak en-us: a stressed r-coloured vowel is `ɜː`, an unstressed one `ɚ`; a stressed
+            # schwa is `ʌ`; i/u/ɑ/ɔ/ɜ are long, except a word-final unstressed `i`.
+            word = re.sub(r"([ˈˌ])ɝ", r"\1ɜː", word).replace("ɝ", "ɚ")
+            word = re.sub(r"([ˈˌ])əɹ", r"\1ɜː", word).replace("əɹ", "ɚ")
+            word = re.sub(r"([ˈˌ])ə", r"\1ʌ", word)
+            word = word.replace("ɒ", "ɑ")
+            word = re.sub(r"ɔ(?![ːɪ])", "ɔː", word)
+            word = re.sub(r"ɑ(?!ː)", "ɑː", word)
+            word = re.sub(r"ɜ(?!ː)", "ɜː", word)
+            word = re.sub(r"u(?!ː)", "uː", word)
+            word = re.sub(r"i(?![ːə])", "iː", word)
+            # Shortened only when the word is stressed elsewhere: the mark sits right before the vowel
+            # it stresses, so a final `iː` it does not precede is unstressed. An unmarked word (`wiː`)
+            # keeps its length, as espeak gives it.
+            if word.endswith("iː") and any(c in word for c in _STRESS) and word[-3:-2] not in _STRESS:
+                word = word[:-1]
+        words.append(word)
+    return " ".join(words)
+
+
+# espeak/IPA spellings to misaki's (Kokoro's alphabet), after misaki's own `EspeakFallback.E2M`: the
+# diphthongs and affricates become one symbol, length is dropped, a bare `e` is `A`.
+_TO_MISAKI = (("aɪ", "I"), ("aʊ", "W"), ("dʒ", "ʤ"), ("eɪ", "A"), ("tʃ", "ʧ"), ("ɔɪ", "Y"), ("oʊ", "O"),
+              ("əʊ", "O"), ("ɚ", "əɹ"), ("ɝ", "ɜɹ"), ("ɜːɹ", "ɜɹ"), ("ɜː", "ɜɹ"), ("r", "ɹ"), ("ɐ", "ə"),
+              ("ɫ", "l"), ("ʰ", ""), ("ɒ", "ɑ"), ("ɪə", "iə"), ("ː", ""), ("e", "A"), ("o", "ɔ"),
+              ("ɾ", "T"))
+
+
+def _fold_misaki(phonemes: str, language: str) -> str:
+    return " ".join(_replace_all(_stress_before_vowel(w), _TO_MISAKI) for w in phonemes.split())
+
+
+#: `{style: fold(phonemes, language) -> phonemes}`, the styles a model may declare.
+STYLES: Dict[str, Callable[[str, str], str]] = {"espeak": _fold_espeak, "misaki": _fold_misaki}
+
+
+def fold(phonemes: str, style: str, *, language: str = "en") -> str:
+    """Rewrite a G2P's IPA into the conventions `style` names (see the note above). An unknown style is
+    refused rather than passed through: a model declaring one this package does not know would
+    otherwise get the unfolded string and sound wrong with nothing saying why."""
+    if not style:
+        return phonemes
+    if style not in STYLES:
+        raise LookupError(f"unknown phoneme style {style!r}; this loom-py folds to {sorted(STYLES)}. "
+                          f"Upgrade loom-py-rt, or pass phonemes= in the model's own conventions.")
+    return STYLES[style](phonemes, language)
 
 def _load_default(alphabet: str):
     """`orthography2ipa`, if it is installed and the alphabet is one it produces.

@@ -151,6 +151,7 @@ ASR_BASELINE = {
     # transformers' own generate on jfk.wav and on all 73 LibriSpeech-dummy utterances (2026-10-02).
     "moonshine-streaming-tiny":  0.00,
     "moonshine-streaming-small": 0.00,
+    "moonshine-tiny":            0.00,   # v1, measured 2026-10-10: jfk word-perfect at F32 and Q8_0
     # Word-perfect, punctuation and casing included; each matches its own reference id for id on jfk.wav
     # (Kyutai's moshi, at 24 kHz through the card's resample; liquid-audio's generate_sequential), 2026-10-02.
     "kyutai-stt-1b-en-fr":       0.00,
@@ -298,11 +299,20 @@ def localise(block: str, gguf: Path) -> str:
             return f"loom.Model.from_file({str(sibling)!r})"
         return match.group(0)
 
-    return re.sub(
+    block = re.sub(
         r"loom\.Model\.from_pretrained\(\s*['\"]([^'\"]+)['\"]\s*(?:,\s*['\"]([^'\"]+\.gguf)['\"]\s*)?\)",
         replace,
         block,
     )
+
+    # A data file the card loads from its OWN repo (sanoTTS's lexicons: `hf://loom-ai-org/<repo>/<path>`)
+    # is the staged copy too, for the same reason: the Hub holds the previous release, or nothing yet.
+    def replace_hf(match: "re.Match") -> str:
+        slug = match.group(1).removesuffix("-loom")
+        staged = gguf.parent.parent / slug / match.group(2)
+        return repr(str(staged)) if staged.is_file() else match.group(0)
+
+    return re.sub(r"['\"]hf://loom-ai-org/([^/'\"]+)/([^'\"]+)['\"]", replace_hf, block)
 
 
 def produced(ns, *attrs):
