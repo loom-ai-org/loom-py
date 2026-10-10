@@ -996,6 +996,55 @@ class TestText2Speech:
         assert seen == [("hello", "en")], "the raw text reaches the phonemizer, not ids"
         assert handle.calls[0]["tokens"] == [10.0, 11.0, 12.0], "its output is encoded by the model"
 
+    def test_a_declared_phoneme_style_folds_the_g2p_before_encoding(self):
+        """A model trained on espeak's IPA declares `tts.phoneme_style`, and the text door rewrites the
+        G2P's conventions to it before the table encodes them: sanoTTS amy went from 66.8% WER to 11.1%
+        through the door when its ipa-dict-style input was folded (loom.cpp ADR-071)."""
+        handle = _FakeHandle([[0.0]], contract=dict(_TTS_PHONEME_CONTRACT, text_frontend="phonemes"),
+                             hparams={"tts.phoneme_style": "espeak"})
+        loom.phonemizers.register("ipa", lambda text, language: "ˈðə ˈkwɪk ˈɫeɪzi ˈdɔɡ")
+        try:
+            _model(handle).text2speech.infer("the quick lazy dog", language="en-US")
+        finally:
+            loom.phonemizers._PROVIDERS.pop("ipa", None)
+        assert handle.encode_calls[-1] == "ðˈʌ kwˈɪk lˈeɪzi dˈɔːɡ"
+
+    def test_phonemes_from_the_caller_are_not_folded(self):
+        """A caller who brings their own G2P has chosen its conventions; only what the door phonemized
+        is folded."""
+        handle = _FakeHandle([[0.0]], contract=dict(_TTS_PHONEME_CONTRACT, text_frontend="phonemes"),
+                             hparams={"tts.phoneme_style": "espeak"})
+        _model(handle).text2speech.infer(phonemes="ˈkwɪk")
+        assert handle.encode_calls[-1] == "ˈkwɪk"
+
+    def test_a_model_declaring_no_style_is_encoded_as_phonemized(self):
+        handle = _FakeHandle([[0.0]], contract=dict(_TTS_PHONEME_CONTRACT, text_frontend="phonemes"))
+        loom.phonemizers.register("ipa", lambda text, language: "ˈkwɪk")
+        try:
+            _model(handle).text2speech.infer("quick", language="en")
+        finally:
+            loom.phonemizers._PROVIDERS.pop("ipa", None)
+        assert handle.encode_calls[-1] == "ˈkwɪk"
+
+    @pytest.mark.parametrize("style, ipa, folded", [
+        # stress to the vowel; length; a word-final unstressed i stays short; ɝ by stress
+        ("espeak", "ˈmɪstɝ ˈɹɛdəɫi ˈwɝk", "mˈɪstɚ ɹˈɛdəli wˈɜːk"),
+        # misaki's compressed symbols back to espeak's
+        ("espeak", "lˈAzi ʤˈʌmps ˈOvəɹ", "lˈeɪzi dʒˈʌmps ˈoʊvɚ"),
+        # outside English only the language-independent rules apply
+        ("espeak", "ˈhʊnt ˈɫaʊfən", "hˈʊnt lˈaʊfən"),
+        # to misaki: one symbol per diphthong and affricate, no length, the flap is T
+        ("misaki", "ˈɫeɪzi ˈdʒʌmps ˈoʊvɚ ˈwɔːtɚ", "lˈAzi ʤˈʌmps ˈOvəɹ wˈɔtəɹ"),
+        ("misaki", "lˈAzi ʤˈʌmps", "lˈAzi ʤˈʌmps"),     # already misaki: unchanged
+    ])
+    def test_the_folds(self, style, ipa, folded):
+        language = "de" if "ˈhʊnt" in ipa else "en-US"
+        assert loom.phonemizers.fold(ipa, style, language=language) == folded
+
+    def test_an_unknown_style_is_refused_not_passed_through(self):
+        with pytest.raises(LookupError, match="unknown phoneme style"):
+            loom.phonemizers.fold("ˈkwɪk", "arpabet-ish")
+
     def test_a_lexicon_is_named_once_and_stored_under_the_resolved_language(self):
         """`set_lexicon` exists because orthography2ipa cannot reach English by rule -- "time" is `tɪm`
         without one -- and because no PARAMETER fixes that: `search="beam"` returns the greedy string
