@@ -50,6 +50,8 @@ def stage(backend: str, dest: Path) -> None:
     shutil.copy2(REPO / "packaging" / "common" / "BackendPackage.cmake", cmake_dir)
     for module in engine_cmake.glob("*.cmake"):
         shutil.copy2(module, cmake_dir)
+    # GgmlPatches.cmake applies the patches beside itself, so they travel with it.
+    shutil.copytree(engine_cmake / "patches", cmake_dir / "patches")
 
     pin = (engine_cmake / "GgmlPin.cmake").read_text()
     tag = next((l for l in pin.splitlines() if "LOOM_GGML_TAG" in l and not l.startswith("#")), "?")
