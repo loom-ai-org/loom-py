@@ -93,6 +93,11 @@ function(loom_rt_backend_package)
     if(NOT ggml_POPULATED)
         FetchContent_Populate(ggml)
     endif()
+    # The engine's ggml patches, the same set the base wheel's libggml-base was built with. Missing from
+    # rc15 to rc17: every backend wheel was the pinned ggml as fetched, so ggml-0023..0028 (the GPU fixes)
+    # reached no user, and the CUDA wheel aborted Citrinet in the mmvf assert ggml-0026 removes.
+    include(${LOOM_ENGINE_CMAKE_DIR}/GgmlPatches.cmake)
+    loom_patch_ggml(${ggml_SOURCE_DIR})
     if(ARG_GGML_OPTION STREQUAL "GGML_VULKAN")
         find_package(Python3 COMPONENTS Interpreter REQUIRED)
         include(${LOOM_ENGINE_CMAKE_DIR}/VulkanToolchain.cmake)
