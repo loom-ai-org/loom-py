@@ -1,380 +1,56 @@
 <h1 align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-inline-dark.svg">
-    <img src="assets/logo-inline.svg" alt="" width="52" align="middle">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/loom-ai-org/loom-py/main/assets/logo-inline-dark.svg">
+    <img src="https://raw.githubusercontent.com/loom-ai-org/loom-py/main/assets/logo-inline.svg" alt="" width="52" align="middle">
   </picture>
   &nbsp;loom-py
 </h1>
 
+<p align="center">
+  <b>Speech, audio and language models in a few lines of Python, from a GPU down to a Raspberry Pi Zero.</b><br>
+  Python bindings for <a href="https://github.com/loom-ai-org/loom.cpp">loom.cpp</a> · published on PyPI as <code>loom-py-rt</code>
+</p>
+
+<p align="center">
+  <a href="https://pypi.org/project/loom-py-rt/"><img alt="PyPI" src="https://img.shields.io/pypi/v/loom-py-rt?include_prereleases&color=0969da"></a>
+  <img alt="Python 3.10 to 3.13" src="https://img.shields.io/badge/python-3.10%20%E2%80%93%203.13-3776ab">
+  <a href="https://huggingface.co/loom-ai-org"><img alt="Models on Hugging Face" src="https://img.shields.io/badge/%F0%9F%A4%97%20models-64-ffcc4d"></a>
+  <a href="https://github.com/loom-ai-org/loom-py/blob/main/LICENSE"><img alt="MIT licence" src="https://img.shields.io/badge/licence-MIT-1a7f37"></a>
+</p>
+
+---
+
 ```python
 import loom
 
-model = loom.Model.from_pretrained("loom-ai-org/gemma-3-270m-it-loom")
-print(model.text2text.chat("Who discovered Brazil?"))
-# 'The discovery of Brazil was made by **Hernán Cortés**.'   (one sample: this
-# checkpoint declares do_sample, so pass temperature=0.0 for the same answer twice)
+tts = loom.Model.from_pretrained("loom-ai-org/pocket-tts-loom", "pocket-tts-q8_0_pc.gguf")
+tts.text2speech.infer("Hello from a Raspberry Pi!").save("hello.wav")
 ```
 
-## Two APIs, and which one you want
+* **64 ready-to-run models** on [Hugging Face](https://huggingface.co/loom-ai-org): speech recognition,
+  text to speech, voice activity, speaker and language id, music, codecs and small language models.
+* **One call per task**, the same for every model that does it, with long audio, timestamps, voices
+  and chat templates handled for you.
+* **Fast on small boards.** On a Raspberry Pi 4, loom's int8 is 1.2x to 9.3x faster than onnxruntime's.
+  On a Pi Zero, wake-word features, VAD, tiny TTS voices and Citrinet ASR run faster than real time.
+* **No runtime dependencies.** Audio goes in as any sequence of floats: a `list`, a NumPy array or a
+  torch tensor.
 
-**The high-level API is one door per task, named for the modality pair it maps between.** Every model
-carries all of them; the ones it does not answer to say so when called, naming what it actually is.
-
-```python
-model.text2text.infer("The capital of France is")        # -> str, a raw completion
-model.text2text.chat("Who discovered Brazil?")           # -> str, asked inside a turn
-model.speech2text.infer(waveform, language="en")         # -> Transcription
-model.text2speech.infer("hello world")                   # -> Audio
-model.text2class.infer("Wolfgang lives in Berlin")       # -> Classification, a label per token
-model.text2codes.infer("[S1] Hello world.")              # -> codec tokens, frame-major
-model.codes2speech.infer(codes)                          # -> Audio, the other half of that pair
-model.speech2class.infer(waveform)                       # -> AudioClasses, per clip or per frame
-model.speech2embeddings.infer(waveform)                  # -> list[float] per clip, or FrameEmbeddings per frame
-```
-
-Which door a model answers is read off the file, not guessed from its name:
-
-```python
-model.task            # 'automatic-speech-recognition'
-model.capabilities    # ('speech2text',)
-model.text2speech.infer("hi")
-# UnsupportedTask: this model is speech2text (automatic-speech-recognition), not text2speech.
-```
-
-Each door does the whole job, including the parts you cannot do from outside. `speech2text` windows
-audio for a model whose graph is built at one clip length, decodes with the early stop armed, splits
-the output into timestamped segments and **seeks to where the model closed its last segment** — so an
-utterance straddling a window edge is re-decoded whole rather than arriving as two fragments:
-
-```python
-r = model.speech2text.infer(audio, language="en", timestamps=True)
-r.text                        # the joined transcript
-r.segments[0].start, .end     # seconds, whole-file
-r.timestamped                 # whether those are boundaries the model chose
-```
-
-`text2speech` returns audio with its rate attached, because a bare list of floats played at the wrong
-rate does not fail — it plays at the wrong speed:
-
-```python
-audio = model.text2speech.infer("hello world", steps=8, seed=1)
-audio.sample_rate             # 22050
-audio.save("out.wav")
-```
-
-`text2class` returns the labelled pieces beside the label set they came from, because neither is
-recoverable from the other — a WordPiece encode splits words, so joining the pieces back up is a rule
-only you can make:
-
-```python
-r = model.text2class.infer("Wolfgang lives in Berlin")
-r.labels                      # ['O', 'B-MISC', 'I-MISC', 'B-PER', ...] — every class the model has
-[(t.piece, t.label) for t in r]
-# [('Wolfgang', 'B-PER'), ('lives', 'O'), ('in', 'O'), ('Berlin', 'B-LOC')]
-```
-
-The framing tokens the encode added ([CLS]/[SEP]) are dropped for you, on the ids the file declares
-rather than on their spelling; `strip_special=False` keeps them if you want the raw alignment.
-
-`speech2class` returns the model's own distribution, not a decision — a VAD is thresholded and
-smoothed differently by every consumer, and a language id is read top-k — with the time each frame
-row starts at, read off the file:
-
-```python
-r = vad.speech2class.infer(audio)            # one row per 20 ms frame
-r.granularity, r.labels                      # 'frame', ['non_speech', 'speech']
-speech = r.probability("speech")             # the speech curve
-r.times[:3]                                  # [0.0, 0.02, 0.04] — seconds, frame starts
-lid.speech2class.infer(audio).top(3)         # [('th: Thai', 0.988), ('lo: Lao', 0.012), ...]
-```
-
-`speech2embeddings` returns the model's vector unnormalised; comparing two (cosine, for a speaker
-embedding) and choosing a threshold are yours. A frame-level embedder (WakeHuBERT) returns a
-`FrameEmbeddings` instead: `rows` (one vector per frame), `dim`, and `times`, each row's start in seconds.
-
-**A model that speaks through a codec is two files, and the codes are what joins them.** An
-autoregressive codec LM emits discrete tokens, not audio; a neural codec turns those tokens into a
-waveform. They stay separate because one codec serves many LMs, and because the codes are worth
-having on their own — cache them, stream them, decode them at a different rate:
-
-```python
-codes = dia.text2codes.infer("[S1] Hello world.")   # -> [[568, 778, ...], ...] frame-major rows
-audio = dac.codes2speech.infer(codes)              # -> Audio
-```
-
-Nothing goes between the two calls. Both files declare `loom.codec.n_codebooks`, so a pair that does
-not fit says so instead of producing audio of the wrong duration:
-
-```python
-dia.hparam("codec.n_codebooks", "u32") == dac.hparam("codec.n_codebooks", "u32")
-```
-
-`text2codes` counts `max_new_tokens` in **audio frames**, not decoder rows — the two differ by the
-model's delay pattern, which is an artefact of how codebooks are written rather than anything you
-asked for.
-
-**The low-level API is the driver's own entry point, and stays raw.** `infer` passes your arguments
-straight through, so which ones a model takes is a property of the model rather than of this package:
-
-```python
-model.tokenize("The capital of France is")   # [1, 1098, 5706, 803, 4481, 856]
-model.detokenize([1, 1098, 5706])            # '<|startoftext|>The capital'
-model.infer(tokens=[16, 40, 22, 30], n_steps=4, seed=1234)   # the driver's own inputs
-print(model.driver_source)                   # the Lua that will run, and what it accepts
-```
-
-Use it when you want a knob the high-level door does not name — VITS's `noise_scale_w`, a specific
-voice vector, a model's own second entry point. That is the boundary between the two: **a knob with no
-canonical role is reachable through `infer` and nowhere else.**
-
-## Text to speech, and the one step that is not in the file
-
-Every TTS model here takes text now, but two of them get there differently. Supertonic encodes
-graphemes itself. The other four consume *phoneme* ids — and the symbol table that turns phonemes into
-their ids ships in the GGUF, so `model.tokenizer` is a real vocabulary for all of them:
-
-```python
-model.tokenizer                      # <loom.Tokenizer 'phonemes' size=159>
-model.tokenize("h\u0259\u02c8lo\u028a")             # -> ids, with the model's own BOS/blank/EOS assembly
-```
-
-What is *not* in the file is grapheme-to-phoneme, because that is a property of the language rather
-than of any checkpoint. It is an optional extra:
+## Install
 
 ```sh
-pip install "loom-py-rt[phonemes]"
+pip install "loom-py-rt[hub]"          # + from_pretrained() from the Hugging Face Hub
 ```
 
-With it, `text2speech.infer("hello world")` works on all five. Without it, passing `phonemes=` or
-`tokens=` works exactly as before and only the text door is absent, with an error naming the install.
-`loom.phonemizers.register("ipa", fn)` substitutes your own.
-
-## Choosing a device
-
-A wheel built with a GPU backend uses it by default; one built without has only a CPU to find, so
-nothing changes.
-
-```python
-model = loom.Model.from_file("qwen3.gguf")                  # decide for me (or $LOOM_DEVICE)
-model = loom.Model.from_file("qwen3.gguf", device="cpu")    # pin it
-model = loom.Model.from_file("qwen3.gguf", device="gpu")    # demand one; raises if there is none
-model.device, model.device_description   # ('Vulkan0', 'AMD Radeon Vega 3 Graphics (RADV RAVEN2)')
-```
-
-`"gpu"` raises rather than falling back, because a caller who spelled it out is asking a question
-about the machine and a silent CPU run is how a large slowdown goes unnoticed. `"auto"` — the default
-— is the one that falls back.
-
-The base wheel is CPU-only, and an accelerator is a separate install rather than a different wheel:
-
-```sh
-pip install "loom-py-rt[vulkan]"
-```
-
-That adds one small package holding one `libggml-vulkan.so`, which this package finds at import;
-`device="auto"` then uses it and nothing about the base wheel changes. The reason it works this way —
-rather than a full wheel per accelerator, which is the more familiar shape — is that a Vulkan backend
-is 46.5 MB and CUDA is larger, so the per-accelerator matrix does not fit PyPI's 100 MB per-file
-ceiling. See [`packaging/README.md`](packaging/README.md).
-
-```python
-loom.devices()   # [{'name': 'Vulkan0', 'description': 'AMD Radeon Vega 3 Graphics (RADV RAVEN2)', ...}]
-```
-
-Worth calling after installing one, because a backend whose driver is too old — or which finds no
-supported device — loads without error and registers nothing, and the only other symptom is a model
-running at CPU speed. Note that with this build **every** backend is loaded at run time, the CPU
-included, so an empty device list means no backend library was found at all rather than no accelerator.
-
-Which ops fall back to the CPU, and why some always will, is documented in
-[loom.cpp's own build notes](https://github.com/loom-ai-org/loom.cpp#running-on-a-gpu).
-
-## Why there is so little API
-
-A loom GGUF carries its own graph topologies and its own driver script alongside its weights, so this
-package contains **no per-architecture code at all**. Loading a model registers whatever topologies
-the file declares and attaches a KV cache to the ones that say they need it; running one calls the
-driver the file shipped with. A model this library has never heard of works the day
-[loom-exporter](https://github.com/loom-ai-org/loom-exporter) can produce it.
-
-That is also why `infer` takes `**kwargs`: its arguments are the *driver's* arguments, and which ones
-a model takes is a property of the model. `model.driver_source` prints the Lua that will run, whose
-header comment documents its inputs — that is the authority.
-
-```python
-model = loom.Model.from_file("granite_speech_mil.gguf")
-model.architecture          # 'granite-speech'
-model.topologies            # ['encoder', 'embed', 'decoder', 'lm_head']
-model.hparam("samples_per_chunk")   # 192000
-print(model.driver_source)  # what infer() will run, and what it accepts
-```
-
-## Supported models
-
-Twenty-two, published at [huggingface.co/loom-ai-org](https://huggingface.co/loom-ai-org) and loadable
-by id with `from_pretrained` (needs the `[hub]` extra). This package has no per-architecture code, so
-the list is a property of [loom-exporter](https://github.com/loom-ai-org/loom-exporter), not of
-anything here.
-
-### Language models
-
-| Model | Exported from |
+| Extra | Adds |
 |---|---|
-| [`loom-ai-org/qwen3-0.6b-base-loom`](https://huggingface.co/loom-ai-org/qwen3-0.6b-base-loom) | [`Qwen/Qwen3-0.6B-Base`](https://huggingface.co/Qwen/Qwen3-0.6B-Base) |
-| [`loom-ai-org/lfm2-350m-monolithic-loom`](https://huggingface.co/loom-ai-org/lfm2-350m-monolithic-loom) | [`LiquidAI/LFM2-350M`](https://huggingface.co/LiquidAI/LFM2-350M) |
-| [`loom-ai-org/lfm2-350m-modular-loom`](https://huggingface.co/loom-ai-org/lfm2-350m-modular-loom) | [`LiquidAI/LFM2-350M`](https://huggingface.co/LiquidAI/LFM2-350M) |
-| [`loom-ai-org/smollm2-360m-instruct-loom`](https://huggingface.co/loom-ai-org/smollm2-360m-instruct-loom) | [`HuggingFaceTB/SmolLM2-360M-Instruct`](https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct) |
-| [`loom-ai-org/gemma-3-270m-it-loom`](https://huggingface.co/loom-ai-org/gemma-3-270m-it-loom) | [`google/gemma-3-270m-it`](https://huggingface.co/google/gemma-3-270m-it) |
+| `[hub]` | `loom.Model.from_pretrained(...)` |
+| `[phonemes]` | text input for the models that take phonemes (Kokoro, Piper VITS, sanoTTS, Vocetta2, Matcha, StyleTTS2) |
+| `[vulkan]` · `[cuda]` · `[metal]` | a GPU backend, as a small add-on package |
 
-These are the models `text2text` answers to; `model.generate(...)` is the same call under the name it
-shipped with.
-
-**`infer` and `chat` are different questions.** `infer` CONTINUES a prompt, which is what a base model
-does; `chat` puts the prompt inside a turn using the checkpoint's own chat template and asks for a
-reply. An instruction-tuned model handed a raw prompt behaves like a base model and continues in the
-prompt's own format, which reads exactly like it is repeating you back — so use `chat` for the
-instruction-tuned rows above, and `infer` for the base ones. `model.chat_roles` says which a file is:
-empty means it carries no template, and Gemma 3's is `['user', 'assistant']` because its template folds
-a system message into the first user turn rather than emitting a block for it.
-
-Decoding follows the checkpoint's own `generation_config.json` — Gemma 3 ships `top_k 64, top_p 0.95`
-and is sampled; everything else here is greedy. Name `temperature`, `top_k`, `top_p` or `seed` to
-override it.
-
-### Text to text, through an encoder-decoder
-
-| Model | Exported from |
-|---|---|
-| [`loom-ai-org/flan-t5-small-loom`](https://huggingface.co/loom-ai-org/flan-t5-small-loom) | [`google/flan-t5-small`](https://huggingface.co/google/flan-t5-small) |
-
-The same `model.text2text.infer(...)` door as the models above — a host asking for text and getting
-text back should not have to know whether one stack or two produced it — but the advice about `chat`
-does not apply. This one is instruction-tuned and carries no chat template: the instruction is part of
-the text, as in `"translate English to German: ..."` or `"Answer the following question. ..."`.
-`model.chat_roles` is empty, which is the file saying so.
-
-### Speech recognition
-
-| Model | Exported from |
-|---|---|
-| [`loom-ai-org/whisper-small-loom`](https://huggingface.co/loom-ai-org/whisper-small-loom) | [`openai/whisper-small`](https://huggingface.co/openai/whisper-small) |
-| [`loom-ai-org/conformer-ctc-small-loom`](https://huggingface.co/loom-ai-org/conformer-ctc-small-loom) | [`nvidia/stt_en_conformer_ctc_small`](https://huggingface.co/nvidia/stt_en_conformer_ctc_small) |
-| [`loom-ai-org/parakeet-tdt-0.6b-loom`](https://huggingface.co/loom-ai-org/parakeet-tdt-0.6b-loom) | [`nvidia/parakeet-tdt-0.6b-v3`](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) |
-| [`loom-ai-org/parakeet-rnnt-0.6b-loom`](https://huggingface.co/loom-ai-org/parakeet-rnnt-0.6b-loom) | [`nvidia/parakeet-rnnt-0.6b`](https://huggingface.co/nvidia/parakeet-rnnt-0.6b) |
-| [`loom-ai-org/gigaam-v3-rnnt-loom`](https://huggingface.co/loom-ai-org/gigaam-v3-rnnt-loom) | [`ai-sage/GigaAM-v3`](https://huggingface.co/ai-sage/GigaAM-v3) |
-| [`loom-ai-org/qwen3-asr-0.6b-loom`](https://huggingface.co/loom-ai-org/qwen3-asr-0.6b-loom) | [`Qwen/Qwen3-ASR-0.6B`](https://huggingface.co/Qwen/Qwen3-ASR-0.6B) |
-| [`loom-ai-org/granite-speech-4.0-1b-loom`](https://huggingface.co/loom-ai-org/granite-speech-4.0-1b-loom) | [`ibm-granite/granite-4.0-1b-speech`](https://huggingface.co/ibm-granite/granite-4.0-1b-speech) |
-
-`model.speech2text.infer(waveform, language="en")` — the mel frontend is inside the graph, so a raw
-waveform is the input, and long audio is windowed and seeked for you.
-
-### Speech synthesis
-
-| Model | Exported from |
-|---|---|
-| [`loom-ai-org/kokoro-82m-loom`](https://huggingface.co/loom-ai-org/kokoro-82m-loom) | [`hexgrad/Kokoro-82M`](https://huggingface.co/hexgrad/Kokoro-82M) |
-| [`loom-ai-org/matcha-tts-ljspeech-loom`](https://huggingface.co/loom-ai-org/matcha-tts-ljspeech-loom) | [Matcha-TTS (LJSpeech checkpoint)](https://github.com/shivammehta25/Matcha-TTS) |
-| [`loom-ai-org/supertonic-2-loom`](https://huggingface.co/loom-ai-org/supertonic-2-loom) | [`Supertone/supertonic-2`](https://huggingface.co/Supertone/supertonic-2) |
-| [`loom-ai-org/vits-piper-en-gb-miro-loom`](https://huggingface.co/loom-ai-org/vits-piper-en-gb-miro-loom) | [`OpenVoiceOS/pipertts_en-GB_miro`](https://huggingface.co/OpenVoiceOS/pipertts_en-GB_miro) |
-| [`loom-ai-org/styletts2-ljspeech-loom`](https://huggingface.co/loom-ai-org/styletts2-ljspeech-loom) | [`yl4579/StyleTTS2-LJSpeech`](https://huggingface.co/yl4579/StyleTTS2-LJSpeech) |
-
-All five take text through `model.text2speech.infer(...)`; the four phoneme-input ones need the
-`[phonemes]` extra for the G2P step (see above), and every one of them accepts `phonemes=` or `tokens=`
-without it. Kokoro and Supertonic ship a default voice, so a published file speaks on its own.
-`model.driver_source` is the authority on what each driver accepts.
-
-### Token classification
-
-| Model | Exported from |
-|---|---|
-| [`loom-ai-org/distilbert-ner-loom`](https://huggingface.co/loom-ai-org/distilbert-ner-loom) | [`dslim/distilbert-NER`](https://huggingface.co/dslim/distilbert-NER) |
-| [`loom-ai-org/punctuate-all-loom`](https://huggingface.co/loom-ai-org/punctuate-all-loom) | [`kredor/punctuate-all`](https://huggingface.co/kredor/punctuate-all) |
-
-`model.text2class.infer("My name is Wolfgang and I live in Berlin")` — one label per token, and the
-labels come back beside the PIECES the tokenizer produced rather than beside your words, since a
-vocabulary splits some of them. `result.labels` is every class the checkpoint can choose between.
-
-Both answer through that one door and what differs is entirely what a label MEANS. The NER row's
-classes are entity tags, so the labels are read as SPANS (`B-PER I-PER` is one person). The
-punctuation row's are the mark that follows the token across twelve languages, so they are read back
-into a SENTENCE — feed it text with the punctuation already removed, and take each word's mark from
-its LAST piece.
-
-### Text to codec tokens, and the codec that decodes them
-
-| Model | Exported from |
-|---|---|
-| [`loom-ai-org/dia-1.6b-loom`](https://huggingface.co/loom-ai-org/dia-1.6b-loom) | [`nari-labs/Dia-1.6B-0626`](https://huggingface.co/nari-labs/Dia-1.6B-0626) |
-| [`loom-ai-org/dac-44khz-loom`](https://huggingface.co/loom-ai-org/dac-44khz-loom) | [`descript/dac_44khz`](https://huggingface.co/descript/dac_44khz) |
-
-These two **compose**, and that is the point of the pair: `model.text2codes.infer(...)` turns a
-sentence into codec tokens, and `model.codes2speech.infer(...)` on the codec file turns those into a
-waveform. Neither is a speech model on its own — the first emits integers and the second takes them —
-which is why they declare `audio_codes` rather than `audio` on the side where they meet.
-
-## The three repos
-
-| | |
-|---|---|
-| [**loom.cpp**](https://github.com/loom-ai-org/loom.cpp) | the engine, vendored here as a submodule |
-| [**loom-exporter**](https://github.com/loom-ai-org/loom-exporter) | produces the GGUFs this runs |
-| [**loom-py**](https://github.com/loom-ai-org/loom-py) | this one |
-
-## Installing
-
-```sh
-pip install loom-py-rt           # once published -- `loom-py` on PyPI clashes with `loompy`,
-                                  # and `loom-engine` normalizes to the already-taken `loomengine`
-pip install loom-py-rt[hub]      # + from_pretrained()
-```
-
-### Supported platforms
-
-CPython 3.10–3.13, on:
-
-| Platform | Wheel tag | Covers |
-|---|---|---|
-| Linux x86-64, glibc ≥ 2.28 | `manylinux_2_28_x86_64` | anything not already EOL |
-| Linux aarch64, glibc ≥ 2.28 | `manylinux_2_28_aarch64` | **Raspberry Pi 4 and 5 on 64-bit Raspberry Pi OS**, Jetson/Grace, Graviton, Ampere |
-| macOS on Apple Silicon, ≥ 14.0 | `macosx_14_0_arm64` | M1 through M4, verified on an M1 Pro |
-| macOS on Apple Intel, ≥ 14.0 | `macosx_14_0_x86_64` | built and imported in CI — see below |
-| Linux ARMv6, glibc ≥ 2.36 | `linux_armv6l` | **Raspberry Pi Zero / Zero W / Pi 1** — a release asset, not a PyPI install; see below |
-
-There is no per-CPU choice to make. The wheel ships every `libggml-cpu-*.so` variant ggml builds for
-the architecture and picks one at import by scoring each against the CPU's own feature flags, so the
-same file serves the oldest and newest machine on its architecture. `loom.devices()` is how you check
-it worked.
-
-**Why macOS 14 and not 11.** It is not an arbitrary floor and it is not the newest thing that
-happened to build. ggml's BLAS backend is compiled against **Accelerate's new BLAS interface**, whose
-symbols arrive in macOS 13.3 — and that backend is worth **1.80x on whisper-small**, so dropping it
-was the worse trade. An 11.0-tagged wheel would install on macOS 11 or 12 and then quietly have no
-BLAS, because a backend that fails to `dlopen` is skipped silently. The floor is the honest version
-of what the binaries already require — 14 rather than 13.3 only because a wheel tag carries no minor
-version above macOS 11, so 13.3 is not a thing a wheel can say.
-
-**Apple Silicon and Apple Intel are not equally supported, and the table means two different things
-by "covers".** The arm64 wheel is built, installed and exercised on a real M1 Pro — the `apple_m1`
-rung, which is the *lowest* of ggml's three Apple rungs and so the one every arm64 wheel has to
-serve. Apple Intel is **CI-only**: it is built and imported by a runner and nobody here owns the
-hardware, so treat it as best-effort rather than as parity.
-
-**Metal is a separate package, not part of the macOS wheel** — `pip install "loom-py-rt[metal]"`.
-It is only 0.87 MB, so that split is not about size: a GPU outranks the CPU when you let the library
-choose a device, and on unified memory that ranking is not reliably right. Measured on an M1 Pro,
-whisper-small is **1.76x faster** on Metal and VITS is **1.79x slower** — so which way it goes still
-depends on the model, and asking for the package is how you opt into that trade. `loom.devices()`
-shows what you got.
-
-**Raspberry Pi.** Every model in the range is covered, by one of two different routes, and which one
-you are on is `uname -m`.
-
-`aarch64` — a Pi 3, 4, 5 or Zero 2 W on **64-bit** Raspberry Pi OS — is a plain
-`pip install loom-py-rt` and needs nothing else. This is the route to prefer wherever the board can
-take it: a Zero 2 W is ARMv8 hardware, and running it on the 32-bit image gives up NEON and every
-`__aarch64__` optimisation in the engine for nothing.
-
-`armv6l` — a **Pi Zero, Zero W or Pi 1** — has a wheel too, and it is *not* on PyPI:
+Wheels cover Linux x86-64 and ARM64 (Raspberry Pi 3/4/5 on 64-bit Raspberry Pi OS, Jetson, Graviton),
+and macOS on Apple Silicon and Intel, for CPython 3.10 to 3.13. The **Raspberry Pi Zero / Zero W / Pi 1**
+wheel is a release asset, because PyPI does not accept ARMv6 wheels:
 
 <!-- The version in the wheel filename below is derived from the repo-root `VERSION` file by
      `python packaging/version.py --set <version>`; tests/ci/test_version_consistency.py fails
@@ -383,104 +59,192 @@ take it: a Zero 2 W is ARMv8 hardware, and running it on the 32-bit image gives 
 pip install https://github.com/loom-ai-org/loom-py/releases/latest/download/loom_py_rt-1.0.0rc18-cp311-cp311-linux_armv6l.whl
 ```
 
-PyPI accepts only `manylinux*` and `musllinux*` platform tags for Linux and the manylinux policy's
-floor is armv7, so `linux_armv6l` is refused at upload — there is nothing to fix and no index to wait
-for. The wheel is a GitHub release asset instead, built on every release in an emulated Raspbian
-(`.github/docker/Dockerfile.armv6`) and checked under `QEMU_CPU=arm1176`, which is the Zero's own
-core. Verified on a real Pi Zero W, not only under emulation.
+Windows is not supported yet. Which CPU kernels a machine gets, and every platform detail, is in
+[docs/PLATFORMS.md](https://github.com/loom-ai-org/loom-py/blob/main/docs/PLATFORMS.md).
 
-**It is slow, and the Pi 4 numbers on this page do not transfer.** An ARM1176 is one ~1 GHz core with
-VFPv2 and no SIMD at all, so this rung runs the generic-C kernels: nothing in `libggml-cpu.so` here is
-vectorised, because there is nothing to vectorise with. The 512 MB of RAM is the harder limit — a
-small TTS model at Q4_0 is the shape that fits; the 0.6B ASR and LM models are not.
+## What you can do with it
 
-`armv7l` — a Pi 2/3/4 on **32-bit** Raspberry Pi OS — builds by the same path but has no published
-wheel and no board here to verify one on, so pip finds nothing and falls back to an sdist build.
-Install the 64-bit OS instead; the hardware is ARMv8 either way.
+Every model answers through a **door** named for what goes in and what comes out. A model carries all
+of them, and the ones it doesn't do say so, naming what it does.
 
-Which variant a board loads, verified under QEMU on every release by `raspberry-pi-check` in
-`.github/workflows/wheels.yml`:
+### 🗣️ Text to speech
 
-| Board | Core | Loads | Because |
+```python
+tts = loom.Model.from_pretrained("loom-ai-org/pocket-tts-loom", "pocket-tts-q8_0_pc.gguf")
+audio = tts.text2speech.infer("The quick brown fox jumps over the lazy dog.")
+audio.sample_rate, audio.duration      # (24000, 3.04)
+audio.save("fox.wav")
+
+tts.voices                             # ['alba', 'anna', 'azelma', 'bill_boerst', ...]
+tts.text2speech.infer("Good morning.", voice="marius").save("marius.wav")
+```
+
+### 🎙️ Speech recognition
+
+```python
+import soundfile
+audio, _ = soundfile.read("speech.wav")            # 16 kHz mono
+
+asr = loom.Model.from_pretrained("loom-ai-org/whisper-small-loom")
+result = asr.speech2text.infer(audio, language="en", timestamps=True)
+result.text
+for segment in result.segments:
+    print(segment.start, segment.end, segment.text)
+```
+
+Long recordings are windowed for you, and each window starts where the model closed its last segment,
+so a sentence on a window edge comes back whole.
+
+### 💬 Language models
+
+```python
+lm = loom.Model.from_pretrained("loom-ai-org/gemma-3-270m-it-loom")
+lm.text2text.chat("What is the capital of France?", temperature=0.0)
+# 'The capital of France is Paris.'
+
+base = loom.Model.from_pretrained("loom-ai-org/qwen3-0.6b-base-loom")
+base.text2text.infer("The capital of France is", max_new_tokens=16)   # a plain completion
+```
+
+Decoding follows each checkpoint's own generation settings. Pass `temperature`, `top_k`, `top_p` or
+`seed` to override them.
+
+### 🎧 Voice activity, language and speaker id
+
+```python
+vad = loom.Model.from_pretrained("loom-ai-org/silero-vad-loom")
+frames = vad.speech2class.infer(audio)            # one row per 32 ms frame
+speech = frames.probability("speech")             # the speech curve, yours to threshold
+frames.times[:3]                                  # [0.0, 0.032, 0.064]
+
+lid = loom.Model.from_pretrained("loom-ai-org/ecapa-voxlingua107-loom")
+lid.speech2class.infer(audio).top(3)              # [('en: English', 0.82), ('la: Latin', 0.03), ...]
+
+spk = loom.Model.from_pretrained("loom-ai-org/titanet-large-loom")
+embedding = spk.speech2embeddings.infer(audio)    # 192 floats; compare two with cosine similarity
+```
+
+### 🏷️ Text classification
+
+```python
+ner = loom.Model.from_pretrained("loom-ai-org/distilbert-ner-loom")
+[(t.piece, t.label) for t in ner.text2class.infer("Wolfgang lives in Berlin")]
+# [('Wolfgang', 'B-PER'), ('lives', 'O'), ('in', 'O'), ('Berlin', 'B-LOC')]
+```
+
+### 🎵 Codec models: dialogue, music and voice cloning
+
+Some models write codec tokens, and a second file turns those into audio:
+
+```python
+dia = loom.Model.from_pretrained("loom-ai-org/dia-1.6b-loom")
+dac = loom.Model.from_pretrained("loom-ai-org/dac-44khz-loom")
+codes = dia.text2codes.infer("[S1] Hello world.")
+dac.codes2speech.infer(codes).save("dialogue.wav")
+```
+
+MusicGen + EnCodec, Qwen3-TTS + its tokenizer and MOSS-TTS + its codec pair the same way.
+
+### 🔧 The layer underneath
+
+Each file embeds its own driver script, and `model.infer(...)` passes your arguments straight to it,
+for the knobs a door doesn't name:
+
+```python
+vits = loom.Model.from_pretrained("loom-ai-org/vits-piper-en-gb-miro-loom")
+vits.task, vits.capabilities       # ('text-to-speech', ('text2speech',))
+print(vits.driver_source)          # the driver, with a header documenting every argument it takes
+samples = vits.infer(tokens=vits.tokenize("həˈloʊ"), seed=1, noise_scale_w=0.8)
+```
+
+[docs/GUIDE.md](https://github.com/loom-ai-org/loom-py/blob/main/docs/GUIDE.md) covers every door in
+depth: what each returns, and why.
+
+## Models
+
+Every model on [huggingface.co/loom-ai-org](https://huggingface.co/loom-ai-org) loads by id. A few to
+start with:
+
+| Task | Door | Try | Also |
 |---|---|---|---|
-| Pi 4 / 400 / CM4 | Cortex-A72, ARMv8.0-A | `armv8.0_1` | no dotprod, no FP16 arithmetic, no SVE — the other seven variants score 0 |
-| Pi 5 / CM5 | Cortex-A76, ARMv8.2-A | `armv8.2_2` | dotprod + FP16, no SVE |
+| Speech recognition | `speech2text` | [whisper-small](https://huggingface.co/loom-ai-org/whisper-small-loom) (99 languages) | Parakeet, Canary, Nemotron, Qwen3-ASR, SenseVoice, Moonshine, Citrinet, ... (20) |
+| Text to speech | `text2speech` | [Pocket TTS](https://huggingface.co/loom-ai-org/pocket-tts-loom) (26 voices) | Kokoro, Piper VITS, sanoTTS, Vocetta2, CosyVoice3, VoxCPM2, Voxtral, ... (24) |
+| Language models | `text2text` | [Gemma 3 270M IT](https://huggingface.co/loom-ai-org/gemma-3-270m-it-loom) | Qwen3 0.6B, SmolLM2 360M, LFM2 350M, FLAN-T5 small |
+| Voice activity, diarization | `speech2class` | [Silero VAD](https://huggingface.co/loom-ai-org/silero-vad-loom) (4 MB) | MarbleNet VAD, pyannote segmentation |
+| Language id | `speech2class` | [ECAPA VoxLingua107](https://huggingface.co/loom-ai-org/ecapa-voxlingua107-loom) (107 languages) | |
+| Speaker and wake-word embeddings | `speech2embeddings` | [TitaNet-Large](https://huggingface.co/loom-ai-org/titanet-large-loom) | WakeHuBERT tiny |
+| Token classification | `text2class` | [DistilBERT NER](https://huggingface.co/loom-ai-org/distilbert-ner-loom) | Punctuate-All (12 languages) |
+| Codec tokens, music | `text2codes` + `codes2speech` | [MusicGen small](https://huggingface.co/loom-ai-org/musicgen-small-loom) + [EnCodec](https://huggingface.co/loom-ai-org/encodec-32khz-loom) | Dia + DAC, Qwen3-TTS, MOSS-TTS |
 
-Nothing extra is installed on a Pi: the CPU is the backend. `[vulkan]` does resolve on aarch64 and a
-Pi 5's V3D exposes Vulkan through Mesa, but no measurement here says that is worth doing — the CPU
-path is the supported one.
+**The full catalogue, with sizes and languages, is in the
+[loom.cpp README](https://github.com/loom-ai-org/loom.cpp#supported-models).** Each model card on the Hub
+has a ready-to-run example.
 
-**Windows has no wheels**, and a source install does not currently work there. macOS does: both
-Apple architectures build from a checkout as well as from a wheel — see *Supported platforms* above.
-([Epic-08](https://github.com/loom-ai-org/loom.cpp/blob/main/docs/epics/epic-08-packaging-and-release.md))
+## Performance on a Raspberry Pi
 
-From a checkout — note `--recursive`, since the engine is a submodule:
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/loom-ai-org/loom.cpp/main/assets/charts/pi4-vs-onnxruntime-dark.svg">
+  <img alt="Raspberry Pi 4: loom against onnxruntime. F32: VITS 1.34x, Pocket TTS 2.06x, Qwen3 1.06x, Moonshine 1.13x, whisper 1.00x, Citrinet 0.65x. Int8: VITS 5.03x, Pocket TTS 3.27x, Qwen3 3.45x, Moonshine 1.75x, whisper 1.17x, Citrinet 9.31x." src="https://raw.githubusercontent.com/loom-ai-org/loom.cpp/main/assets/charts/pi4-vs-onnxruntime-light.svg" width="760">
+</picture>
+
+| Raspberry Pi 4, 4 threads | loom F32 | onnxruntime FP32 | loom int8 | onnxruntime int8 |
+|---|---|---|---|---|
+| VITS Piper en-GB · TTS, 3.3 s of speech | **0.80 s** | 1.07 s | **0.82 s** | 4.12 s |
+| Pocket TTS · TTS, 4.8 s of speech¹ | **9.11 s** | 18.77 s | **4.25 s** | 13.88 s |
+| Qwen3-0.6B · 24 tokens | **16.6 s** | 17.6 s | **4.15 s** | 14.28 s |
+| Moonshine tiny · ASR, 11 s clip | **1.34 s** | 1.50 s | **0.85 s** | 1.49 s |
+| whisper-small · ASR, 11 s clip | 20.7 s | 20.6 s | **12.5 s** | 14.7 s |
+| Citrinet-256 · ASR, 11 s clip | 0.45 s | **0.29 s**² | **0.46 s** | 4.30 s² |
+
+Distilled Pocket TTS on a Pi 4 synthesises 4.8 s of speech in **0.59 s (2M)**, **1.07 s (7M)** and
+**1.44 s (18M)** at int8. The tiny models run faster than real time even on a Pi Zero:
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/loom-ai-org/loom.cpp/main/assets/charts/pi-zero-rtf-dark.svg">
+  <img alt="Raspberry Pi Zero W real-time factors: WakeHuBERT 0.19, Silero VAD 0.20, sanoTTS heartnano 0.28, sanoTTS heart 0.64, Citrinet-256 0.74, sanoTTS thorsten 0.79, Moonshine tiny 2.21, Conformer-CTC small 2.22." src="https://raw.githubusercontent.com/loom-ai-org/loom.cpp/main/assets/charts/pi-zero-rtf-light.svg" width="760">
+</picture>
+
+<sub>onnxruntime 1.28.0 (PyPI wheel), the same precision, thread count, inputs and output length on both sides;
+paired medians of five launches, cooled to 60 °C before each. ¹ Against the community ONNX export
+[KevinAHM/pocket-tts-onnx](https://huggingface.co/KevinAHM/pocket-tts-onnx), since there is no official one.
+² onnxruntime is timed from precomputed mel features; loom's time includes its front end. Every table,
+with protocol and provenance: loom.cpp's
+[docs/BENCHMARKS.md](https://github.com/loom-ai-org/loom.cpp/blob/main/docs/BENCHMARKS.md).</sub>
+
+## Choosing a device
+
+```python
+loom.Model.from_file("model.gguf")                 # the best device available (or $LOOM_DEVICE)
+loom.Model.from_file("model.gguf", device="cpu")   # pin the CPU
+loom.Model.from_file("model.gguf", device="gpu")   # require a GPU; raises if there is none
+loom.devices()                                     # what this install can reach
+```
+
+Install a GPU backend with `pip install "loom-py-rt[vulkan]"` (or `[cuda]`, `[metal]`). Anything a
+backend cannot run falls back to the CPU on its own.
+
+## Contributing
+
+Clone with `--recursive`, since the engine is a submodule:
 
 ```sh
 git clone --recursive https://github.com/loom-ai-org/loom-py
 cd loom-py && pip install -e .
+pytest tests/ci        # the Python layer, no model needed (what CI runs)
+pytest tests/gate      # end to end on a real GGUF: LOOM_TEST_MODEL=... (+ LOOM_TEST_MODEL_INPUTS as JSON)
 ```
 
-No runtime dependencies. Arrays cross the boundary as plain sequences of floats, so numpy is something
-you may use rather than something this package makes you install — `list`, `array.array`, numpy arrays
-and torch tensors all work.
+Design notes, decisions and open work for all three repos live in
+[loom.cpp's docs](https://github.com/loom-ai-org/loom.cpp/tree/main/docs). Packaging and wheels are in
+[packaging/README.md](https://github.com/loom-ai-org/loom-py/blob/main/packaging/README.md).
 
-## Testing
-
-```sh
-pytest tests/ci      # the Python layer: coercion and error paths. No model. What CI runs.
-pytest tests/gate    # a real exported GGUF, end to end.
-```
-
-```sh
-export LOOM_TEST_MODEL=~/loom-fixtures/matcha_mil.gguf
-export LOOM_TEST_MODEL_INPUTS='{"tokens":[16,40,22,30,12,3],"n_steps":4,"seed":1234}'
-pytest tests/gate -q
-```
-
-The gate suite is written against no particular architecture on purpose: it asserts the *shape* of
-what a loom model is, which is the whole of what this package knows. A test that expected one model's
-inputs would be this package learning about a model, which is the thing the design exists to avoid.
-
-## Roadmap
-
-Shared with [loom.cpp](https://github.com/loom-ai-org/loom.cpp), because three of the four are the
-engine's and this package inherits them by having no per-architecture code of its own.
-
-**1. GPUs and NPUs — the packaging is built; the backends beyond Vulkan are what remain.** The engine
-schedules a graph across a device backend and a CPU fallback, this package exposes the choice as
-`device=` (above), and the wheel shape that lets an accelerator ship at all now exists.
-
-The shape that is NOT wanted is a wheel per accelerator per architecture — PyPI's wheel tags have no
-accelerator dimension, so that is torch's `cu121` arrangement, and it multiplies every future backend by
-every existing platform. `GGML_BACKEND_DL` makes the better shape possible and this package is now
-built that way: **one arch-tagged base wheel, plus small backend packages that drop a `.so` where ggml
-looks for it**, so `pip install "loom-py-rt[cuda]"` means "also fetch that backend", `device="auto"`
-finds it, and a Raspberry Pi installs nothing extra. `packaging/rt-vulkan/` is the worked example; a
-CUDA package is that directory with two strings changed, waiting only on a machine with an NVIDIA GPU
-to build and test against. Tracked in [Epic-04](https://github.com/loom-ai-org/loom.cpp/blob/main/docs/epics/epic-04-backends-and-accelerators.md), along with which backends are
-reachable at all (CUDA, OpenVINO and Qualcomm's are already in the pinned ggml; CoreML and RKNPU2 are
-not).
-
-**2. Wheels for more platforms.** Linux x86-64 and aarch64 and both Apple architectures today — see
-*Supported platforms* above, which is what `pip install loom-py-rt` resolves to. **Windows** is what
-remains, and it is behind the same kind of work macOS needed: not a missing CI row, but a
-symbol-visibility rule, a linker-path spelling and a build-system assumption that each differ
-([Epic-08](https://github.com/loom-ai-org/loom.cpp/blob/main/docs/epics/epic-08-packaging-and-release.md),
-[Retro-024](https://github.com/loom-ai-org/loom.cpp/blob/main/docs/retros/retro-024-a-blocker-read-from-one-half-of-an-agreement.md)).
-
-**3. More models — [Epic-03](https://github.com/loom-ai-org/loom.cpp/blob/main/docs/epics/epic-03-model-coverage.md)**, ordered by coverage per unit of effort. BERT token
-classifiers (the smallest possible template, and the first non-audio task), codec decoders, text
-encoder-decoders, CNN+CTC and SANM encoders are all done; what is left is the remaining TTS families →
-small classifiers → music. Each lands here for free: a model this package has never heard of works the
-day the exporter can produce it.
-
-**4. The follow-ups the docs already name** —
-[`docs/backlog/active-index.md`](https://github.com/loom-ai-org/loom.cpp/blob/main/docs/backlog/active-index.md) is the ledger for all three
-repos and the authority. The ones that would show up in this API: a permissively-licensed phonemiser,
-which is what would give the four phoneme-input TTS models a `tokenize`; and the `KvCache` memory
-redesign and quantized KV cache, which decide how large a model this can run on a given machine.
+| | |
+|---|---|
+| [**loom.cpp**](https://github.com/loom-ai-org/loom.cpp) | the engine, vendored here as a submodule |
+| [**loom-py**](https://github.com/loom-ai-org/loom-py) | this one |
+| [**loom-exporter**](https://github.com/loom-ai-org/loom-exporter) | turns a PyTorch checkpoint into a GGUF this runs |
 
 ## Licence
 
-MIT — see [`LICENSE`](LICENSE).
+MIT, see [LICENSE](https://github.com/loom-ai-org/loom-py/blob/main/LICENSE). Each model on the Hub keeps the
+licence of the checkpoint it was exported from.
