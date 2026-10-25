@@ -223,8 +223,87 @@ def _fold_misaki(phonemes: str, language: str) -> str:
     return " ".join(_replace_all(_stress_before_vowel(w), _TO_MISAKI) for w in phonemes.split())
 
 
+# IPA to ARPAbet with stress digits, the alphabet g2p_en writes and CMUdict is in (AuroraTTS-100K's).
+# Unlike the two folds above this changes ALPHABET as well as conventions, so its output is a token
+# string the model's table spells: phonemes space-separated, words joined by `|` -- "DH AH0 | K W IH1 K".
+# The engine skips the separating spaces (no symbol holds one); with the boundary spelled as a space too,
+# `D HH` (adhere) and `DH` would read the same.
+#
+# It reads every spelling the door's lexicons and rules produce: ipa-dict's (stress before the onset,
+# `ɫ`, `ɝ`), misaki's compressed symbols, orthography2ipa's, espeak's length marks, and the CMUdict
+# lexicon the AuroraTTS card ships, which is written from CMUdict so that this fold returns every one of
+# its 135,166 entries exactly (it marks a syllable break with `.` wherever two phones would otherwise
+# spell a third: `AO IH0` against `OY`, `AH0 R` against `ER0`, `T SH` against `CH`). A vowel takes the
+# stress of the mark before it (1 for `ˈ`, 2 for `ˌ`) and 0 without one; a schwa is AH0 whatever marks
+# it, which is CMUdict's reading of orthography2ipa's stressed monosyllables (`ˈðə`, "the" = DH AH0).
+_ARPA_VOWELS = (("ɜːɹ", "ER"), ("ɜɹ", "ER"), ("əɹ", "ER0"), ("ɪə", "IH R"), ("ɛə", "EH R"), ("ʊə", "UH R"),
+                ("aɪ", "AY"), ("aʊ", "AW"), ("eɪ", "EY"), ("oʊ", "OW"), ("əʊ", "OW"), ("ɔɪ", "OY"),
+                ("ɜː", "ER"), ("iː", "IY"), ("uː", "UW"), ("ɑː", "AA"), ("ɔː", "AO"), ("ɝ", "ER"),
+                ("ɚ", "ER0"), ("ɜ", "ER"), ("i", "IY"), ("u", "UW"), ("ɑ", "AA"), ("ɒ", "AA"), ("ɔ", "AO"),
+                ("æ", "AE"), ("ɛ", "EH"), ("e", "EY"), ("ɪ", "IH"), ("ᵻ", "IH"), ("ʊ", "UH"), ("ʌ", "AH"),
+                ("ə", "AH0"), ("ɐ", "AH0"), ("ᵊ", "AH0"), ("a", "AA"), ("o", "OW"),
+                ("A", "EY"), ("I", "AY"), ("W", "AW"), ("O", "OW"), ("Y", "OY"))
+_ARPA_CONSONANTS = (("tʃ", "CH"), ("dʒ", "JH"), ("ʧ", "CH"), ("ʤ", "JH"), ("θ", "TH"), ("ð", "DH"),
+                    ("ʃ", "SH"), ("ʒ", "ZH"), ("ŋ", "NG"), ("ɹ", "R"), ("r", "R"), ("ɾ", "T"), ("T", "T"),
+                    ("ɫ", "L"), ("l", "L"), ("j", "Y"), ("ɡ", "G"), ("g", "G"), ("h", "HH"), ("b", "B"),
+                    ("d", "D"), ("f", "F"), ("k", "K"), ("m", "M"), ("n", "N"), ("p", "P"), ("s", "S"),
+                    ("t", "T"), ("v", "V"), ("w", "W"), ("z", "Z"))
+_ARPA_TABLE = sorted([(k, v, True) for k, v in _ARPA_VOWELS] + [(k, v, False) for k, v in _ARPA_CONSONANTS],
+                     key=lambda entry: -len(entry[0]))
+_ARPA_VOWEL_STARTS = frozenset(k[0] for k, _ in _ARPA_VOWELS)
+_SYLLABIC = "\u0329"
+
+
+def _arpabet_word(word: str) -> list:
+    phones, stress, i = [], "0", 0
+    while i < len(word):
+        ch = word[i]
+        if ch == ".":                    # a syllable break: no phone, and no digraph across it
+            i += 1
+            continue
+        if ch in _STRESS:
+            stress = "1" if ch == "ˈ" else "2"
+            i += 1
+            continue
+        if ch == _SYLLABIC:              # n̩, l̩: CMUdict spells a syllabic consonant AH0 + consonant
+            if phones and not phones[-1][-1].isdigit():
+                phones.insert(len(phones) - 1, "AH0")
+            i += 1
+            continue
+        for key, arpa, vowel in _ARPA_TABLE:
+            if not word.startswith(key, i):
+                continue
+            j = i + len(key)
+            # An r-coloured vowel's `ɹ` before another vowel is that syllable's onset ("arabia",
+            # `əɹˈeɪbiə` = AH0 R EY1 ...), so the vowel is matched without it.
+            if vowel and key.endswith("ɹ"):
+                k = j
+                while k < len(word) and word[k] in _STRESS:
+                    k += 1
+                if k < len(word) and word[k] in _ARPA_VOWEL_STARTS:
+                    continue
+            if vowel:
+                head, *tail = arpa.split()
+                phones.append(head if head[-1].isdigit() else head + stress)
+                phones.extend(tail)
+                stress = "0"
+            else:
+                phones.append(arpa)
+            i = j
+            break
+        else:
+            i += 1                       # length, aspiration, a glottal stop: no ARPAbet phone
+    return phones
+
+
+def _fold_arpabet(phonemes: str, language: str) -> str:
+    words = [_arpabet_word(w) for w in phonemes.split()]
+    return " | ".join(" ".join(w) for w in words if w)
+
+
 #: `{style: fold(phonemes, language) -> phonemes}`, the styles a model may declare.
-STYLES: Dict[str, Callable[[str, str], str]] = {"espeak": _fold_espeak, "misaki": _fold_misaki}
+STYLES: Dict[str, Callable[[str, str], str]] = {"espeak": _fold_espeak, "misaki": _fold_misaki,
+                                                "arpabet": _fold_arpabet}
 
 
 def fold(phonemes: str, style: str, *, language: str = "en") -> str:
