@@ -32,7 +32,8 @@ tts.text2speech.infer("Hello from a Raspberry Pi!").save("hello.wav")
 * **One call per task**, the same for every model that does it, with long audio, timestamps, voices
   and chat templates handled for you.
 * **Fast on small boards.** On a Raspberry Pi 4, loom's int8 is 1.2x to 9.3x faster than onnxruntime's.
-  On a Pi Zero, wake-word features, VAD, tiny TTS voices and Citrinet ASR run faster than real time.
+  On a Pi Zero, wake-word features, VAD, tiny TTS voices and Citrinet ASR run faster than real time,
+  and its GPU's 12 QPUs make them 1.1x to 3.4x faster still.
 * **No runtime dependencies.** Audio goes in as any sequence of floats: a `list`, a NumPy array or a
   torch tensor.
 
@@ -197,15 +198,18 @@ has a ready-to-run example.
 | Citrinet-256 · ASR, 11 s clip | 0.45 s | **0.29 s**² | **0.46 s** | 4.30 s² |
 
 Distilled Pocket TTS on a Pi 4 synthesises 4.8 s of speech in **0.59 s (2M)**, **1.07 s (7M)** and
-**1.44 s (18M)** at int8. The tiny models run faster than real time even on a Pi Zero:
+**1.44 s (18M)** at int8. The tiny models run faster than real time even on a Pi Zero, and its GPU speeds
+every one of them up: on a board booted without `vc4-kms-v3d`, `device="auto"` runs the convolutions and
+matrix products on its 12 QPUs and the rest on the CPU.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/loom-ai-org/loom.cpp/main/assets/charts/pi-zero-rtf-dark.svg">
-  <img alt="Raspberry Pi Zero W real-time factors: WakeHuBERT 0.19, Silero VAD 0.20, sanoTTS heartnano 0.28, sanoTTS heart 0.64, Citrinet-256 0.74, sanoTTS thorsten 0.79, Moonshine tiny 2.21, Conformer-CTC small 2.22." src="https://raw.githubusercontent.com/loom-ai-org/loom.cpp/main/assets/charts/pi-zero-rtf-light.svg" width="760">
+  <img alt="Raspberry Pi Zero W real-time factors, CPU then CPU plus VC4: WakeHuBERT 0.17, 0.12; Silero VAD 0.18, 0.16; sanoTTS heartnano 0.22, 0.19; sanoTTS heart 0.53, 0.29; Citrinet-256 0.65, 0.31; sanoTTS thorsten 0.72, 0.35; sanoTTS amy 2.29, 0.69; Moonshine tiny 1.80, 1.18; Conformer-CTC small 1.96, 1.39; VITS piper 5.85, 1.73." src="https://raw.githubusercontent.com/loom-ai-org/loom.cpp/main/assets/charts/pi-zero-rtf-light.svg" width="760">
 </picture>
 
-<sub>onnxruntime 1.28.0 (PyPI wheel), the same precision, thread count, inputs and output length on both sides;
-paired medians of five launches, cooled to 60 °C before each. ¹ Against the community ONNX export
+<sub>Pi Zero: each device's faster precision (F32 or Q8_0_PC), the median of three launches. onnxruntime 1.28.0
+(PyPI wheel), the same precision, thread count, inputs and output length on both sides; paired medians of five
+launches, cooled to 60 °C before each. ¹ Against the community ONNX export
 [KevinAHM/pocket-tts-onnx](https://huggingface.co/KevinAHM/pocket-tts-onnx), since there is no official one.
 ² onnxruntime is timed from precomputed mel features; loom's time includes its front end. Every table,
 with protocol and provenance: loom.cpp's
