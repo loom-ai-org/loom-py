@@ -308,14 +308,22 @@ def localise(block: str, gguf: Path) -> str:
         block,
     )
 
-    # A data file the card loads from its OWN repo (sanoTTS's lexicons: `hf://loom-ai-org/<repo>/<path>`)
-    # is the staged copy too, for the same reason: the Hub holds the previous release, or nothing yet.
+    # A data file the card loads from its OWN repo (sanoTTS's lexicons:
+    # `https://huggingface.co/loom-ai-org/<repo>/resolve/main/<path>`) is the staged copy too, for the same
+    # reason: the Hub holds the previous release, or nothing yet. Which means this gate never runs the
+    # fetch itself: the cards' former `hf://loom-ai-org/...` spelling passed here and 401'd for every user,
+    # because orthography2ipa's `hf://` looks in a DATASET repo. That form is still mapped, so an old card
+    # still gates, but the card's real URL has to be checked against the Hub after the upload.
     def replace_hf(match: "re.Match") -> str:
         slug = match.group(1).removesuffix("-loom")
         staged = gguf.parent.parent / slug / match.group(2)
         return repr(str(staged)) if staged.is_file() else match.group(0)
 
-    return re.sub(r"['\"]hf://loom-ai-org/([^/'\"]+)/([^'\"]+)['\"]", replace_hf, block)
+    return re.sub(
+        r"['\"](?:hf://|https://huggingface\.co/)loom-ai-org/([^/'\"]+)/(?:resolve/main/)?([^'\"]+)['\"]",
+        replace_hf,
+        block,
+    )
 
 
 def produced(ns, *attrs):
