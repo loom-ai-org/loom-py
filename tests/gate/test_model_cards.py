@@ -178,6 +178,10 @@ ASR_BASELINE = {
     # bookkeeping: left at 0.18 the ceiling stays 0.33, the markers cost about 0.18 to reinstate, and
     # the one regression this row exists to catch could come back and still pass.
     "qwen3-asr-0.6b":         0.00,
+    # Qwen3-ASR-1.7B distilled into two looped stacks, English only, with the language forced in the
+    # prompt -- so there is no preamble to leak. Its F32 transcripts are the checkpoint's own on 73 of 73
+    # LibriSpeech clips (2026-10-30), and jfk.wav comes back word for word.
+    "oruk-loop-153m":         0.00,
     # Family 4, and both rows are the checkpoint rather than the export. These are character-level CTC
     # models with no language model behind them, so what they produce is a phonetic spelling of what was
     # said, which is right and is not what a decoder would produce. HuBERT-Large gets the utterance
