@@ -57,7 +57,7 @@ wheel is a release asset, because PyPI does not accept ARMv6 wheels:
      `python packaging/version.py --set <version>`; tests/ci/test_version_consistency.py fails
      if it drifts. `releases/latest/download/` is stable, the filename is not. -->
 ```sh
-pip install https://github.com/loom-ai-org/loom-py/releases/latest/download/loom_py_rt-1.0.0rc19-cp311-cp311-linux_armv6l.whl
+pip install https://github.com/loom-ai-org/loom-py/releases/latest/download/loom_py_rt-1.0.0rc20-cp311-cp311-linux_armv6l.whl
 ```
 
 Windows is not supported yet. Which CPU kernels a machine gets, and every platform detail, is in
@@ -183,36 +183,31 @@ has a ready-to-run example.
 
 ## Performance on a Raspberry Pi
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/loom-ai-org/loom.cpp/main/assets/charts/pi4-vs-onnxruntime-dark.svg">
-  <img alt="Raspberry Pi 4: loom against onnxruntime. F32: VITS 1.34x, Pocket TTS 2.06x, Qwen3 1.06x, Moonshine 1.13x, whisper 1.00x, Citrinet 0.65x. Int8: VITS 5.03x, Pocket TTS 3.27x, Qwen3 3.45x, Moonshine 1.75x, whisper 1.17x, Citrinet 9.31x." src="https://raw.githubusercontent.com/loom-ai-org/loom.cpp/main/assets/charts/pi4-vs-onnxruntime-light.svg" width="760">
-</picture>
+Both engines were run on the same board, at the same precision, with the same thread count, inputs and
+output length. **A bar past the dashed line means loom is faster**:
 
-| Raspberry Pi 4, 4 threads | loom F32 | onnxruntime FP32 | loom int8 | onnxruntime int8 |
-|---|---|---|---|---|
-| VITS Piper en-GB · TTS, 3.3 s of speech | **0.80 s** | 1.07 s | **0.82 s** | 4.12 s |
-| Pocket TTS · TTS, 4.8 s of speech¹ | **9.11 s** | 18.77 s | **4.25 s** | 13.88 s |
-| Qwen3-0.6B · 24 tokens | **16.6 s** | 17.6 s | **4.15 s** | 14.28 s |
-| Moonshine tiny · ASR, 11 s clip | **1.34 s** | 1.50 s | **0.85 s** | 1.49 s |
-| whisper-small · ASR, 11 s clip | 20.7 s | 20.6 s | **12.5 s** | 14.7 s |
-| Citrinet-256 · ASR, 11 s clip | 0.45 s | **0.29 s**² | **0.46 s** | 4.30 s² |
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/loom-ai-org/loom.cpp/14ea65edccc05cbe376fa6f0c2634d6685c4b378/assets/charts/pi4-vs-onnxruntime-dark.svg">
+  <img alt="Raspberry Pi 4: loom against onnxruntime. F32: VITS 1.34x, Pocket TTS 2.06x, Qwen3 1.06x, Moonshine 1.13x, whisper 1.00x, Citrinet 0.65x. Int8: VITS 5.03x, Pocket TTS 3.27x, Qwen3 3.45x, Moonshine 1.75x, whisper 1.17x, Citrinet 9.31x." src="https://raw.githubusercontent.com/loom-ai-org/loom.cpp/14ea65edccc05cbe376fa6f0c2634d6685c4b378/assets/charts/pi4-vs-onnxruntime-light.svg" width="760">
+</picture>
 
 Distilled Pocket TTS on a Pi 4 synthesises 4.8 s of speech in **0.59 s (2M)**, **1.07 s (7M)** and
 **1.44 s (18M)** at int8. The tiny models run faster than real time even on a Pi Zero, and its GPU speeds
 every one of them up: on a board booted without `vc4-kms-v3d`, `device="auto"` runs the convolutions and
-matrix products on its 12 QPUs and the rest on the CPU.
+matrix products on its 12 QPUs
+([ggml-vc4](https://github.com/loom-ai-org/loom.cpp/tree/main/backends/ggml-vc4)) and the rest on the CPU.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/loom-ai-org/loom.cpp/main/assets/charts/pi-zero-rtf-dark.svg">
-  <img alt="Raspberry Pi Zero W real-time factors, CPU then CPU plus VC4: WakeHuBERT 0.17, 0.12; Silero VAD 0.18, 0.16; sanoTTS heartnano 0.22, 0.19; sanoTTS heart 0.54, 0.29; Citrinet-256 0.65, 0.31; sanoTTS thorsten 0.72, 0.35; sanoTTS amy 2.30, 0.69; Moonshine tiny 1.80, 1.17; Conformer-CTC small 1.90, 1.39; Pocket TTS 2m 1.84, 1.39; VITS piper 5.83, 1.74; Pocket TTS 7m 3.94, 2.92; Pocket TTS 18m 4.85, 3.82." src="https://raw.githubusercontent.com/loom-ai-org/loom.cpp/main/assets/charts/pi-zero-rtf-light.svg" width="760">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/loom-ai-org/loom.cpp/14ea65edccc05cbe376fa6f0c2634d6685c4b378/assets/charts/pi-zero-rtf-dark.svg">
+  <img alt="Raspberry Pi Zero W real-time factors, CPU then CPU plus VC4: WakeHuBERT 0.17, 0.12; Silero VAD 0.18, 0.16; sanoTTS heartnano 0.22, 0.19; sanoTTS heart 0.54, 0.29; Citrinet-256 0.65, 0.31; sanoTTS thorsten 0.72, 0.35; sanoTTS amy 2.30, 0.69; Moonshine tiny 1.80, 1.17; Conformer-CTC small 1.90, 1.39; Pocket TTS 2m 1.84, 1.39; VITS piper 5.83, 1.74; Pocket TTS 7m 3.94, 2.92; Pocket TTS 18m 4.85, 3.82." src="https://raw.githubusercontent.com/loom-ai-org/loom.cpp/14ea65edccc05cbe376fa6f0c2634d6685c4b378/assets/charts/pi-zero-rtf-light.svg" width="760">
 </picture>
 
-<sub>Pi Zero: each device's faster precision (F32 or Q8_0_PC), the median of three launches. onnxruntime 1.28.0
-(PyPI wheel), the same precision, thread count, inputs and output length on both sides; paired medians of five
-launches, cooled to 60 °C before each. ¹ Against the community ONNX export
-[KevinAHM/pocket-tts-onnx](https://huggingface.co/KevinAHM/pocket-tts-onnx), since there is no official one.
-² onnxruntime is timed from precomputed mel features; loom's time includes its front end. Every table,
-with protocol and provenance: loom.cpp's
+<sub>Pi Zero: each device's faster precision (F32 or Q8_0_PC), the median of three launches with the order
+reversed every round; the same outputs on every launch. Pi 4: onnxruntime 1.28.0 (PyPI wheel), paired medians
+of five launches, with the board cooled to 60 °C before each one; both engines did the same work. Pocket TTS is
+measured against the community ONNX export [KevinAHM/pocket-tts-onnx](https://huggingface.co/KevinAHM/pocket-tts-onnx),
+since there is no official one, and Citrinet's onnxruntime time starts from precomputed mel features where
+loom's includes its front end. Every number, with its protocol and provenance: loom.cpp's
 [docs/BENCHMARKS.md](https://github.com/loom-ai-org/loom.cpp/blob/main/docs/BENCHMARKS.md).</sub>
 
 ## Choosing a device
