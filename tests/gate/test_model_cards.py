@@ -165,6 +165,9 @@ ASR_BASELINE = {
     # to transformers' generate (sdpa) on jfk.wav and on a 60 s clip (2026-10-10). Its `<en-US>` tags
     # are control ids, so they do not reach `text` to be counted as words.
     "nemotron-3.5-asr-streaming-0.6b": 0.00,
+    # The unified offline/streaming sibling, offline mode: NeMo's own decode token for token on jfk.wav
+    # under `auto`, which is what the card's first call uses (2026-10-30).
+    "nemotron-labs-unified-asr-0.6b": 0.00,
     "parakeet-tdt-0.6b":      0.00,
     "whisper-small":          0.00,
     # Russian-first (it declares `ru, en`), so English costs it. The transcript is unmistakably the
