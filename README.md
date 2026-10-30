@@ -57,7 +57,7 @@ wheel is a release asset, because PyPI does not accept ARMv6 wheels:
      `python packaging/version.py --set <version>`; tests/ci/test_version_consistency.py fails
      if it drifts. `releases/latest/download/` is stable, the filename is not. -->
 ```sh
-pip install https://github.com/loom-ai-org/loom-py/releases/latest/download/loom_py_rt-1.0.0rc19-cp311-cp311-linux_armv6l.whl
+pip install https://github.com/loom-ai-org/loom-py/releases/latest/download/loom_py_rt-1.0.0rc20-cp311-cp311-linux_armv6l.whl
 ```
 
 Windows is not supported yet. Which CPU kernels a machine gets, and every platform detail, is in
