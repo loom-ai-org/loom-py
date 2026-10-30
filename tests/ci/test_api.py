@@ -1009,6 +1009,18 @@ class TestText2Speech:
             loom.phonemizers._PROVIDERS.pop("ipa", None)
         assert handle.encode_calls[-1] == "ðˈʌ kwˈɪk lˈeɪzi dˈɔːɡ"
 
+    def test_an_arpabet_model_is_handed_tokens_its_table_spells(self):
+        """AuroraTTS-100K's table is ARPAbet: the door's IPA becomes space-separated phonemes with `|`
+        between words, which the engine encodes symbol by symbol (it skips the spaces)."""
+        handle = _FakeHandle([[0.0]], contract=dict(_TTS_PHONEME_CONTRACT, text_frontend="phonemes"),
+                             hparams={"tts.phoneme_style": "arpabet"})
+        loom.phonemizers.register("ipa", lambda text, language: "ðə ˈkwɪk")
+        try:
+            _model(handle).text2speech.infer("the quick", language="en-US")
+        finally:
+            loom.phonemizers._PROVIDERS.pop("ipa", None)
+        assert handle.encode_calls[-1] == "DH AH0 | K W IH1 K"
+
     def test_phonemes_from_the_caller_are_not_folded(self):
         """A caller who brings their own G2P has chosen its conventions; only what the door phonemized
         is folded."""
@@ -1036,6 +1048,14 @@ class TestText2Speech:
         # to misaki: one symbol per diphthong and affricate, no length, the flap is T
         ("misaki", "ˈɫeɪzi ˈdʒʌmps ˈoʊvɚ ˈwɔːtɚ", "lˈAzi ʤˈʌmps ˈOvəɹ wˈɔtəɹ"),
         ("misaki", "lˈAzi ʤˈʌmps", "lˈAzi ʤˈʌmps"),     # already misaki: unchanged
+        # to ARPAbet (g2p_en's, AuroraTTS-100K's): stress digits on the vowels, `|` between words, a
+        # schwa is AH0 whatever marks it, and the onset `ɹ` of "arabia" is not an r-coloured vowel
+        ("arpabet", "ˈðə ˈkwɪk ˈbɹaʊn", "DH AH0 | K W IH1 K | B R AW1 N"),
+        ("arpabet", "həˈɫoʊ ˈwɝɫd ədˈhɪɹ", "HH AH0 L OW1 | W ER1 L D | AH0 D HH IH1 R"),
+        ("arpabet", "əɹˈeɪbiə ˈpɑtˌhoʊɫ bˈʌtn̩", "AH0 R EY1 B IY0 AH0 | P AA1 T HH OW2 L | B AH1 T AH0 N"),
+        # misaki's compressed symbols, and the CMUdict lexicon's syllable breaks
+        ("arpabet", "lˈAzi wˈɜɹld", "L EY1 Z IY0 | W ER1 L D"),
+        ("arpabet", "klˈɔ.ɪŋ nˈʌt.ʃˌɛl", "K L AO1 IH0 NG | N AH1 T SH EH2 L"),
     ])
     def test_the_folds(self, style, ipa, folded):
         language = "de" if "ˈhʊnt" in ipa else "en-US"
