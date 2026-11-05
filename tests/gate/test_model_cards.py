@@ -169,6 +169,8 @@ ASR_BASELINE = {
     # under `auto`, which is what the card's first call uses (2026-10-30).
     "nemotron-labs-unified-asr-0.6b": 0.00,
     "parakeet-tdt-0.6b":      0.00,
+    # Mixed-case on this clip, unlike most English it writes; the gate's normalisation folds that.
+    "zipformer-small":        0.00,
     "whisper-small":          0.00,
     # Russian-first (it declares `ru, en`), so English costs it. The transcript is unmistakably the
     # right utterance -- "my fellow americans ... your country can do for you" -- spelled through a
