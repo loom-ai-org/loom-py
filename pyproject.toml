@@ -129,7 +129,8 @@ manylinux-aarch64-image = "manylinux_2_28"
 # (arm64) and a `macos-15-intel` (x86_64) row, and `ci.yml` builds and runs `pytest tests/ci` on
 # `macos-15` on every push -- which is where a macOS regression should be caught, rather than at a
 # release. The arm64 wheel has also been built, installed and run on a real M1 Pro, which is a
-# stronger statement than either. Windows is still out of scope and stays behind this.
+# stronger statement than either. Windows x64 builds with MSVC (loom.cpp ADR-096) but has no row here
+# yet, so no Windows wheel is published.
 
 # The `[test]` extra, rather than a second copy of its contents. This was `test-requires =
 # ["pytest>=7"]`, which was that copy -- and it drifted: `tests/ci/test_vocab_dispatch.py` writes a

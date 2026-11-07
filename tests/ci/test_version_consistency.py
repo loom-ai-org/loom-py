@@ -42,7 +42,7 @@ TOOL = _tool()
 
 
 def test_version_file_holds_a_version_the_tool_accepts():
-    version = (REPO / "VERSION").read_text().strip()
+    version = (REPO / "VERSION").read_text(encoding="utf-8").strip()
     assert TOOL.READABLE.match(version), (
         f"VERSION holds {version!r}; packaging/version.py cannot derive a PEP 440 pin from it"
     )
@@ -51,8 +51,8 @@ def test_version_file_holds_a_version_the_tool_accepts():
 @pytest.mark.parametrize("site", TOOL.SITES, ids=lambda s: f"{s.path}:{s.what}")
 def test_every_derived_copy_agrees_with_the_version_file(site):
     """One assertion per place the version is written, so a failure names the file and the reason."""
-    version = (REPO / "VERSION").read_text().strip()
-    text = (REPO / site.path).read_text()
+    version = (REPO / "VERSION").read_text(encoding="utf-8").strip()
+    text = (REPO / site.path).read_text(encoding="utf-8")
     found = list(re.finditer(site.pattern, text))
 
     # ZERO MATCHES IS THE INTERESTING FAILURE, not a nuisance one: it means the file changed shape

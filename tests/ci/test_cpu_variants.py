@@ -46,11 +46,25 @@ PACKAGE_DIR = pathlib.Path(loom.__file__).resolve().parent
 # is not a compromise baseline the way `armv8.0_1` is -- it covers M1 through M4, and an M1 Pro is
 # what actually runs it (Epic-08 §4). Apple Intel takes the `x86_64` row above: ggml resolves it to
 # `GGML_SYSTEM_ARCH == "x86"`, whose ladder starts at the same true `x64` baseline.
+#
+# `AMD64` IS WINDOWS SPELLING x86_64, and the name differs as well as the key: a Windows DLL has no
+# `lib` prefix, and ggml's loader looks for `ggml-cpu-*.dll` there (`backend_filename_prefix()`).
+# Under MSVC ggml's x86 ladder is shorter -- nine rungs, no zen4/sapphirerapids/ivybridge/piledriver/
+# cooperlake -- but it starts at the same `x64`.
 BASELINE_VARIANT = {
     "x86_64": "libggml-cpu-x64.so",
     "aarch64": "libggml-cpu-armv8.0_1.so",
     "arm64": "libggml-cpu-apple_m1.so",
+    "AMD64": "ggml-cpu-x64.dll",
 }
+
+# What a backend library is called on this platform: `libggml-cpu-<variant>.so` everywhere ggml uses a
+# MODULE suffix of `.so` (Linux and macOS, see shipped_variants), `ggml-cpu-<variant>.dll` on Windows.
+if sys.platform == "win32":
+    LIB_PREFIX, LIB_SUFFIX = "", ".dll"
+else:
+    LIB_PREFIX, LIB_SUFFIX = "lib", ".so"
+VARIANT_RE = re.compile(rf"{LIB_PREFIX}ggml-cpu-[\w.]+?{re.escape(LIB_SUFFIX)}")
 
 
 def shipped_variants() -> list[str]:
@@ -68,7 +82,7 @@ def shipped_variants() -> list[str]:
     So this function passing on macOS is not incidental: it is the regression test for a build that
     starts emitting `.dylib` backends, which would otherwise show up as an empty `loom.devices()`.
     """
-    return sorted(p.name for p in PACKAGE_DIR.glob("libggml-cpu-*.so"))
+    return sorted(p.name for p in PACKAGE_DIR.glob(f"{LIB_PREFIX}ggml-cpu-*{LIB_SUFFIX}"))
 
 
 def mapped_variants() -> list[str] | None:
@@ -81,7 +95,7 @@ def mapped_variants() -> list[str] | None:
     """
     maps = pathlib.Path("/proc/self/maps")
     if maps.exists():
-        return sorted(set(re.findall(r"libggml-cpu-[\w.]+\.so", maps.read_text())))
+        return sorted(set(VARIANT_RE.findall(maps.read_text())))
 
     if sys.platform == "darwin":
         libc = ctypes.CDLL(None)
@@ -92,9 +106,35 @@ def mapped_variants() -> list[str] | None:
             libc._dyld_get_image_name(i).decode("utf-8", "replace")
             for i in range(libc._dyld_image_count())
         ]
-        return sorted({m for image in images for m in re.findall(r"libggml-cpu-[\w.]+\.so", image)})
+        return sorted({m for image in images for m in VARIANT_RE.findall(image)})
+
+    if sys.platform == "win32":
+        return sorted({m for path in _windows_module_paths() for m in VARIANT_RE.findall(pathlib.Path(path).name)})
 
     return None
+
+
+def _windows_module_paths() -> list[str]:
+    """Every module mapped into this process, through psapi's EnumProcessModules -- the Windows
+    counterpart of /proc/self/maps. kernel32 exports it as K32EnumProcessModules, so no new DLL."""
+    from ctypes import wintypes
+
+    k32 = ctypes.WinDLL("kernel32")
+    k32.GetCurrentProcess.restype = wintypes.HANDLE
+    k32.K32EnumProcessModules.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.HMODULE),
+                                          wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    k32.K32GetModuleFileNameExW.argtypes = [wintypes.HANDLE, wintypes.HMODULE, wintypes.LPWSTR, wintypes.DWORD]
+    proc = k32.GetCurrentProcess()
+    needed = wintypes.DWORD(0)
+    mods = (wintypes.HMODULE * 1024)()
+    if not k32.K32EnumProcessModules(proc, mods, ctypes.sizeof(mods), ctypes.byref(needed)):
+        return []
+    paths = []
+    buf = ctypes.create_unicode_buffer(32768)
+    for i in range(min(needed.value // ctypes.sizeof(wintypes.HMODULE), len(mods))):
+        if k32.K32GetModuleFileNameExW(proc, mods[i], buf, len(buf)):
+            paths.append(buf.value)
+    return paths
 
 
 def test_a_baseline_cpu_variant_is_shipped():
@@ -117,7 +157,7 @@ def test_a_baseline_cpu_variant_is_shipped():
         # `pytest.skip("no baseline recorded for ...")`, which meant an architecture absent from
         # BASELINE_VARIANT -- exactly the 32-bit ones -- skipped out before anything was checked and
         # a wheel with no CPU backend in it at all would have passed.
-        assert (PACKAGE_DIR / "libggml-cpu.so").exists(), (
+        assert (PACKAGE_DIR / f"{LIB_PREFIX}ggml-cpu{LIB_SUFFIX}").exists(), (
             f"no CPU backend library at all in {PACKAGE_DIR} -- with GGML_BACKEND_DL that is a "
             "package with no devices, not one without an accelerator"
         )
@@ -182,10 +222,14 @@ def test_the_mapped_variant_is_exactly_one_the_cpu_supports():
     # holds one CPU device, and `haswell` is the variant a Mac Xeon would win with (no Apple Intel
     # part has AMX, which is what `sapphirerapids` is built for). The surviving loser is dyld
     # declining to unmap, not ggml choosing twice -- so the honest assertions are the two above, and
-    # counting is left to the platform whose loader guarantees it.
-    if sys.platform.startswith("linux"):
+    # counting is left to the platforms whose loader guarantees it.
+    #
+    # WINDOWS IS ONE OF THEM: FreeLibrary unmaps a DLL when its reference count reaches zero, and
+    # ggml's loader holds none on a loser. Measured on a Celeron N4100 (SSE4.2, no AVX): nine shipped,
+    # exactly `ggml-cpu-sse42.dll` resident.
+    if sys.platform.startswith("linux") or sys.platform == "win32":
         assert len(mapped) == 1, (
-            f"expected exactly one CPU variant mapped after selection on Linux, got {mapped}. More "
+            f"expected exactly one CPU variant mapped after selection on {sys.platform}, got {mapped}. More "
             f"than one means the losing candidates are being kept alive -- ggml dlopens each to "
             f"score it and dlcloses all but the winner. Shipped: {shipped_variants()}"
         )
