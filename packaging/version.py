@@ -98,7 +98,7 @@ SITES = (
 def read_version() -> str:
     if not VERSION_FILE.is_file():
         sys.exit(f"{VERSION_FILE} is missing -- it is the version, so there is nothing to derive from")
-    readable = VERSION_FILE.read_text().strip()
+    readable = VERSION_FILE.read_text(encoding="utf-8").strip()
     if not READABLE.match(readable):
         sys.exit(
             f"{VERSION_FILE} holds {readable!r}, which is not `N.N.N` or `N.N.N-rcN` -- see the "
@@ -111,7 +111,7 @@ def _matches(site: Site) -> list[re.Match[str]]:
     path = REPO / site.path
     if not path.is_file():
         sys.exit(f"{site.path} does not exist, but packaging/version.py still expects to write {site.what} into it")
-    found = list(re.finditer(site.pattern, path.read_text()))
+    found = list(re.finditer(site.pattern, path.read_text(encoding="utf-8")))
     if len(found) != 1:
         sys.exit(
             f"{site.path}: expected exactly one match for {site.what} ({len(found)} found).\n"
@@ -152,16 +152,16 @@ def set_version(readable: str) -> int:
     if not READABLE.match(readable):
         sys.exit(f"{readable!r} is not `N.N.N` or `N.N.N-rcN`")
 
-    VERSION_FILE.write_text(readable + "\n")
+    VERSION_FILE.write_text(readable + "\n", encoding="utf-8", newline="")
     for site in SITES:
         path = REPO / site.path
         match = _matches(site)[0]
         wanted = site.wanted(readable)
         if match.group("v") == wanted:
             continue
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
         start, end = match.span("v")
-        path.write_text(text[:start] + wanted + text[end:])
+        path.write_text(text[:start] + wanted + text[end:], encoding="utf-8", newline="")
         print(f"   {site.path:<36} {match.group('v'):>12} -> {wanted:<12} {site.what}")
 
     print(f"\nVERSION is {readable}; every derived copy rewritten. Commit them TOGETHER -- a tree "

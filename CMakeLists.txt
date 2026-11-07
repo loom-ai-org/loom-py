@@ -117,9 +117,15 @@ set(GGML_METAL OFF CACHE BOOL "" FORCE)
 # Every shared library this build produces goes to one directory, so the install rule below is a
 # directory copy rather than a list of target names -- GGML_CPU_ALL_VARIANTS creates its per-variant
 # targets in a loop, and there is no fixed set of names to enumerate.
+#
+# The `$<0:>` is an empty generator expression, and it is there for the Visual Studio generator, which
+# is what scikit-build-core uses on Windows by default. A multi-config generator appends a
+# per-configuration subdirectory (`runtime/Release/`) to these paths UNLESS they contain a generator
+# expression -- and then the install rule below, which copies `runtime/`, ships no DLLs at all. On a
+# single-config generator (Ninja, Makefiles) it expands to nothing.
 set(LOOM_RUNTIME_DIR ${CMAKE_BINARY_DIR}/runtime)
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${LOOM_RUNTIME_DIR})
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${LOOM_RUNTIME_DIR})
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${LOOM_RUNTIME_DIR}$<0:>)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${LOOM_RUNTIME_DIR}$<0:>)
 
 # `$ORIGIN` on everything: `_loom.so` finds libloom_engine.so beside it, and that finds libggml-base.so
 # beside it, wherever site-packages happens to be. BUILD_WITH_INSTALL_RPATH so the libraries in the
@@ -200,7 +206,7 @@ target_link_libraries(_loom PRIVATE loom_engine)
 # source tree without an install step.
 install(TARGETS _loom LIBRARY DESTINATION loom)
 set_target_properties(_loom PROPERTIES
-    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/loom
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/loom$<0:>
 )
 
 # libloom_engine.so and the ggml family, into the package directory beside `_loom` -- which is both
@@ -217,11 +223,18 @@ set_target_properties(_loom PROPERTIES
 #
 # Listing both patterns unconditionally rather than under `if(APPLE)`: a Linux build produces no
 # `.dylib` for the second pattern to match, so it costs nothing and there is one rule to read.
+#
+# And `.dll` for Windows, where SHARED and MODULE targets alike come out `.dll` (ggml's loader looks for
+# `ggml-*.dll` there, with no `lib` prefix). Their import libraries (`.lib`) go to the ARCHIVE directory,
+# not this one, so a wheel carries none of them. No RPATH equivalent is needed either: Python loads an
+# extension with LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, so `_loom.pyd` finds `loom_engine.dll` beside it,
+# and a backend module loaded later resolves `ggml-base.dll` to the copy already in the process.
 install(DIRECTORY ${LOOM_RUNTIME_DIR}/
     DESTINATION loom
     FILES_MATCHING
         PATTERN "*.so*"
         PATTERN "*.dylib"
+        PATTERN "*.dll"
 )
 
 # The same libraries into the source tree, so a development build (`cmake --build build`) leaves a
