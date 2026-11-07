@@ -53,7 +53,7 @@ def stage(backend: str, dest: Path) -> None:
     # GgmlPatches.cmake applies the patches beside itself, so they travel with it.
     shutil.copytree(engine_cmake / "patches", cmake_dir / "patches")
 
-    pin = (engine_cmake / "GgmlPin.cmake").read_text()
+    pin = (engine_cmake / "GgmlPin.cmake").read_text(encoding="utf-8")
     tag = next((l for l in pin.splitlines() if "LOOM_GGML_TAG" in l and not l.startswith("#")), "?")
     print(f"staged rt-{backend} -> {dest}")
     print(f"  ggml pin taken from the submodule: {tag.strip()}")

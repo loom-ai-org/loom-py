@@ -83,8 +83,14 @@ Nothing extra is installed on a Pi: the CPU is the backend. `[vulkan]` does reso
 Pi 5's V3D exposes Vulkan through Mesa, but no measurement here says that is worth doing — the CPU
 path is the supported one.
 
-**Windows has no wheels**, and a source install does not currently work there. macOS does: both
-Apple architectures build from a checkout as well as from a wheel — see *Supported platforms* above.
+**Windows has no published wheels yet, but x64 builds from a checkout** with the Visual Studio 2022
+Build Tools ("Desktop development with C++") and Git on the PATH. `python -m build --wheel` works from a
+plain prompt (no developer prompt needed), and the wheel it writes installs with `pip`. The wheel ships
+`ggml-cpu-*.dll` for nine x86 variants and picks one at import, as on Linux. `packaging/rt-vulkan`
+builds the same way once the LunarG Vulkan SDK is installed. Verified on a Celeron N4100 under Windows
+10 22H2, where `tests/ci` passes
+([ADR-096](https://github.com/loom-ai-org/loom.cpp/blob/main/docs/adrs/adr-096-windows-builds-with-msvc-and-luajit-is-built-by-cmake.md)).
+macOS builds from a checkout as well as from a wheel — see *Supported platforms* above.
 ([Epic-08](https://github.com/loom-ai-org/loom.cpp/blob/main/docs/epics/epic-08-packaging-and-release.md))
 
 From a checkout — note `--recursive`, since the engine is a submodule:

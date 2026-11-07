@@ -276,7 +276,7 @@ def wer(reference: str, hypothesis: str) -> float:
 
 
 def python_blocks(readme: Path):
-    return re.findall(r"```python\n(.*?)```", readme.read_text(), re.S)
+    return re.findall(r"```python\n(.*?)```", readme.read_text(encoding="utf-8"), re.S)
 
 
 def localise(block: str, gguf: Path) -> str:
@@ -668,7 +668,7 @@ def _hear_codec_lm_card(name, oracle, jfk, tmp_path, monkeypatch, *, music):
 def card_makes_music(readme: Path) -> bool:
     """Whether the card's Hub `pipeline_tag` is text-to-audio (music), not text-to-speech. Read from the
     card's front matter, the same published declaration the Hub files it under."""
-    match = re.search(r"^pipeline_tag:\s*(\S+)\s*$", readme.read_text(), re.MULTILINE)
+    match = re.search(r"^pipeline_tag:\s*(\S+)\s*$", readme.read_text(encoding="utf-8"), re.MULTILINE)
     return bool(match) and match.group(1) == "text-to-audio"
 
 
@@ -679,7 +679,7 @@ def card_sentence(readme: Path) -> str:
     recogniser transcribes them, so they are not part of what the oracle should hear. Read out of the
     card rather than declared here for the reason the assertion above gives.
     """
-    match = re.search(r"text2codes\.infer\(\s*[\"']([^\"']+)[\"']", readme.read_text())
+    match = re.search(r"text2codes\.infer\(\s*[\"']([^\"']+)[\"']", readme.read_text(encoding="utf-8"))
     if not match:
         return ""
     return re.sub(r"\[S\d\]", " ", match.group(1)).strip()
