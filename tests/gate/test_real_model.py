@@ -111,3 +111,34 @@ def test_the_tokenizer_describes_itself(model):
     assert tokenizer.kind in {"gpt2", "bert", "byt5", "llama", "t5", "ctc", "phonemes",
                               "supertonic"}, tokenizer.kind
     assert tokenizer.size > 0
+
+
+def test_a_live_stream_transcribes_what_one_pass_does(model):
+    """The live door (loom.cpp ADR-098), on whatever streaming ASR model is configured: the same
+    transcript as `transcribe`, however the audio is cut into pieces, with two streams open at once.
+    Skips for a file with no live path -- every file exported before streaming."""
+    if not model.can_stream:
+        pytest.skip(f"{model.architecture} has no live path (stream_open / stream_feed / stream_finish)")
+    import math
+    import wave
+    rate = int(model.contract.get("sample_rate") or 16000)
+    if os.environ.get("LOOM_TEST_WAV"):
+        # Real speech, 16-bit mono at the model's rate: a transcript long enough to cross many chunks.
+        with wave.open(os.environ["LOOM_TEST_WAV"]) as w:
+            assert w.getframerate() == rate and w.getnchannels() == 1 and w.getsampwidth() == 2
+            raw = w.readframes(w.getnframes())
+        clip = [int.from_bytes(raw[i:i + 2], "little", signed=True) / 32768.0 for i in range(0, len(raw), 2)]
+    else:
+        # A rising tone with an envelope: not speech, but a deterministic input the encoder answers.
+        clip = [0.3 * math.sin(2 * math.pi * (200 + 400 * t / (3 * rate)) * t / rate)
+                * math.sin(math.pi * t / (3 * rate)) for t in range(3 * rate)]
+    want = model.transcribe(clip).text
+    assert want, "an empty transcript would make the comparison below vacuous"
+    a, b = model.speech2text.stream(), model.speech2text.stream()
+    for at in range(0, len(clip), 1999):
+        a.push(clip[at:at + 1999])
+        if at % (2 * 1999) == 0:
+            b.push(clip[at:at + 2 * 1999])
+    a.finish()
+    b.finish()
+    assert a.text == want and b.text == want
