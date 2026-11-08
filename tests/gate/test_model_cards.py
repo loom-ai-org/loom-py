@@ -171,6 +171,9 @@ ASR_BASELINE = {
     "parakeet-tdt-0.6b":      0.00,
     # Mixed-case on this clip, unlike most English it writes; the gate's normalisation folds that.
     "zipformer-small":        0.00,
+    # Word-perfect on jfk.wav, and upstream's own streaming decode token for token there and on all 73
+    # LibriSpeech-dummy utterances (2026-11-08).
+    "zipformer-small-streaming": 0.00,
     "whisper-small":          0.00,
     # Russian-first (it declares `ru, en`), so English costs it. The transcript is unmistakably the
     # right utterance -- "my fellow americans ... your country can do for you" -- spelled through a
