@@ -37,7 +37,7 @@ from ._interfaces import (ALL_INTERFACES, Audio, AudioClasses, Classification, C
                           FrameEmbeddings, Interface, Speech2Class, Speech2Embeddings, Speech2Text,
                           Text2Class, Text2Codes, Text2Speech, Text2Text, TokenClass, UnsupportedTask)
 
-__all__ = ["Model", "Voice", "Tokenizer", "Transcription", "Segment", "Audio", "Classification", "TokenClass",
+__all__ = ["Model", "Voice", "Tokenizer", "Transcription", "TranscriptStream", "TranscriptUpdate", "Segment", "Audio", "Classification", "TokenClass",
            "AudioClasses", "FrameEmbeddings",
            "Interface", "UnsupportedTask", "Text2Text", "Speech2Text", "Text2Speech", "Text2Class",
            "Text2Codes", "Codes2Speech", "Speech2Class", "Speech2Embeddings",
@@ -601,6 +601,27 @@ class Model:
             timestamped=bool(raw["timestamped"]),
         )
 
+    @property
+    def can_stream(self) -> bool:
+        """Whether this file's driver has a live path (`stream_open` / `stream_feed` /
+        `stream_finish`), which `stream()` needs. False for every file exported before streaming, whose
+        one-pass doors are unchanged."""
+        return bool(self._handle.can_stream())
+
+    def stream(self) -> "TranscriptStream":
+        """Open a live transcription: push audio as it arrives, read the transcript as it grows.
+
+        The engine's own `TranscriptionStream`, the same one `loom_cli --stream` runs. Each stream's
+        state -- caches, cursors, audio not yet decoded -- is the engine's and belongs to that stream
+        alone (loom.cpp ADR-098), so several streams on one `Model` are independent, and a one-pass
+        `transcribe` between two pushes disturbs none of them.
+
+        Raises `RuntimeError` when the file has no live path; `can_stream` asks first.
+        """
+        # A file exported before the contract carried a rate was read at 16 kHz, as `transcribe` assumes.
+        rate = int(self.contract.get("sample_rate") or 0) or 16000
+        return TranscriptStream(self._handle.open_stream(), sample_rate=rate)
+
     def classify(self, tokens: Sequence[int], *, strip_special: bool = True,
                  **driver_inputs: Any) -> "Classification":
         """Label already-encoded tokens, one declared class each.
@@ -698,6 +719,72 @@ class Transcription:
     segments: list[Segment]
     windows: int
     timestamped: bool
+
+
+@dataclass(frozen=True)
+class TranscriptUpdate:
+    """What one `TranscriptStream.push` or `finish` returns.
+
+    `delta` is the text this call added and `text` the whole transcript so far. `revised` is set when
+    earlier text changed, and `delta` is then the whole of `text`; a transducer's emissions are final, so
+    it is False for every streaming file today. `tokens` are the ids this call decoded; `seconds` is the
+    audio pushed so far.
+    """
+    text: str
+    delta: str
+    tokens: list[int]
+    revised: bool
+    seconds: float
+
+
+class TranscriptStream:
+    """A live transcription, from `Model.stream()` or `model.speech2text.stream()`.
+
+        stream = model.speech2text.stream()
+        for piece in microphone():   # mono floats at contract["sample_rate"], any length
+            print(stream.push(piece).delta, end="", flush=True)
+        print(stream.finish().delta)
+
+    A piece can be any length, down to a single sample; the model decodes a chunk once the audio it
+    needs has arrived, so where the pieces break never changes the transcript.
+    """
+
+    def __init__(self, handle: "_loom.Stream", sample_rate: int):
+        self._handle = handle
+        self._rate = sample_rate
+
+    def push(self, samples: Sequence[float]) -> TranscriptUpdate:
+        """Add audio and decode every chunk it completes."""
+        return self._update(self._handle.push([float(x) for x in samples]))
+
+    def finish(self) -> TranscriptUpdate:
+        """End the input: decode what is left. Takes no push afterwards until `reset`."""
+        return self._update(self._handle.finish())
+
+    def reset(self) -> None:
+        """Drop everything and start again on the same model."""
+        self._handle.reset()
+
+    @property
+    def text(self) -> str:
+        return self._handle.text()
+
+    @property
+    def tokens(self) -> list[int]:
+        return list(self._handle.tokens())
+
+    @property
+    def finished(self) -> bool:
+        return bool(self._handle.finished())
+
+    @property
+    def state_bytes(self) -> int:
+        """What this stream's state holds, on the device and on the host."""
+        return int(self._handle.state_bytes())
+
+    def _update(self, raw: dict) -> TranscriptUpdate:
+        return TranscriptUpdate(text=raw["text"], delta=raw["delta"], tokens=[int(t) for t in raw["tokens"]],
+                                revised=bool(raw["revised"]), seconds=int(raw["samples"]) / self._rate)
 
 
 class Tokenizer:
