@@ -32,6 +32,8 @@ class TestPackage:
             # `text2speech.stream()` and `speech2text.stream()` return, and what each push hands back.
             "TextStream",
             "SpeechStream",
+            "CodesStream",
+            "CodecStream",
             "TranscriptStream",
             "TranscriptUpdate",
             "Segment",
@@ -329,6 +331,10 @@ class _FakeHandle:
     # -- the audio-out door (loom.cpp ADR-100) -------------------------------------------------------
     def can_stream_speech(self): return bool(self._contract.get("can_stream_speech"))
 
+    def open_codec_stream(self, inputs):
+        self.codec_stream = _FakeCodecStream()
+        return self.codec_stream
+
     def open_speech_stream(self, inputs):
         self.calls.append(dict(inputs))
         self.speech_stream = _FakeSpeechStream(self._returns.pop(0) if self._returns else [])
@@ -416,6 +422,27 @@ class _FakeSpeechStream:
     def pieces_total(self): return len(self._pieces)
     def samples(self): return self._samples
     def state_bytes(self): return 512
+
+
+class _FakeCodecStream:
+    """The binding's `CodecStream`: records each push, and decodes an id to one sample of its value."""
+
+    def __init__(self):
+        self.pushes, self._finished, self._samples = [], False, 0
+
+    def push(self, codes):
+        self.pushes.append(list(codes))
+        self._samples += len(codes)
+        return [float(c) for c in codes]
+
+    def finish(self):
+        self._finished = True
+        return []
+
+    def reset(self): self.__init__()
+    def finished(self): return self._finished
+    def samples(self): return self._samples
+    def state_bytes(self): return 256
 
 
 class _FakeTokenStream:
@@ -1215,6 +1242,56 @@ class TestSpeechStream:
     def test_split_sentences(self, text, want):
         from loom._interfaces import split_sentences
         assert split_sentences(text) == want
+
+
+class TestPairStream:
+    """`text2codes.stream` and `codes2speech.stream`: ADR-022's two calls, each streaming (ADR-102)."""
+
+    def _lm(self, pieces, width=3):
+        return _FakeHandle([pieces], contract=dict(_CODES_LM_CONTRACT, can_stream_speech=True),
+                           hparams={"codec.n_codebooks": width})
+
+    def _codec(self, **hparams):
+        return _FakeHandle([], contract=dict(_CODEC_CONTRACT, can_stream_speech=True),
+                           hparams={"codec.n_codebooks": 3, **hparams})
+
+    def test_an_lm_hands_back_rows_as_it_draws_them(self):
+        lm = self._lm([[1, 2, 3], [], [4, 5, 6]])
+        stream = _model(lm).text2codes.stream("hello", max_new_tokens=5, seed=2)
+        assert list(stream) == [[[1, 2, 3]], [[4, 5, 6]]]
+        assert lm.calls[0]["tokens"] == [10.0, 11.0, 12.0] and lm.calls[0]["max_new_tokens"] == 5.0
+        assert stream.finished
+
+    def test_a_file_without_stream_functions_is_refused(self):
+        lm = _FakeHandle([], contract=_CODES_LM_CONTRACT, hparams={"codec.n_codebooks": 3})
+        with pytest.raises(RuntimeError, match="no live path"):
+            _model(lm).text2codes.stream("hello")
+        with pytest.raises(RuntimeError, match="no live path"):
+            _model(_FakeHandle([], contract=_CODEC_CONTRACT)).codes2speech.stream()
+
+    def test_pushes_grow_from_one_frame_and_a_count_fixes_them(self):
+        frames = [[[f, f, f]] for f in range(1, 8)]
+        codec = self._codec()
+        audio = list(_model(codec).codes2speech.stream(iter(frames)))
+        assert [len(p) // 3 for p in codec.codec_stream.pushes] == [1, 2, 4]
+        assert [a.samples for a in audio][0] == [1.0, 1.0, 1.0]
+        assert all(a.sample_rate == 44100 for a in audio)
+        codec = self._codec()
+        list(_model(codec).codes2speech.stream(iter(frames), frames_per_push=3))
+        assert [len(p) // 3 for p in codec.codec_stream.pushes] == [3, 3, 1]
+
+    def test_a_push_is_widened_with_the_codecs_absent_id(self):
+        codec = self._codec(**{"codec.absent_code": 9})
+        stream = _model(codec).codes2speech.stream()
+        assert stream.push([[1, 2], [3, 4]]).samples == [1.0, 2.0, 9.0, 3.0, 4.0, 9.0]
+        assert stream.finish().samples == [] and stream.finished
+        with pytest.raises(TypeError, match="without frames"):
+            list(stream)
+
+    def test_the_pair_composes(self):
+        lm, codec = self._lm([[1, 2, 3], [4, 5, 6], [7, 8, 9]]), self._codec()
+        audio = list(_model(codec).codes2speech.stream(_model(lm).text2codes.stream("hello")))
+        assert [s for a in audio for s in a.samples] == [float(i) for i in range(1, 10)]
 
 
 class TestText2Speech:
