@@ -261,6 +261,103 @@ class SpeechStream:
         return int(self._handle.state_bytes())
 
 
+class CodesStream:
+    """A text-to-codes model's frames handed back as they are drawn, from `text2codes.stream`. Iterating
+    yields each piece's frames as rows, `n_codebooks` wide; a `codes2speech.stream` takes the stream as
+    it is."""
+
+    def __init__(self, handle, interface: "Text2Codes"):
+        self._handle = handle
+        self._interface = interface
+
+    def __iter__(self):
+        while not self.finished:
+            frames = self.next()
+            if frames:
+                yield frames
+
+    def next(self) -> list[list[int]]:
+        """The next piece's frames; [] once finished."""
+        return self._interface._as_frames(self._handle.next())
+
+    def reset(self) -> None:
+        self._handle.reset()
+
+    @property
+    def finished(self) -> bool:
+        return bool(self._handle.finished())
+
+    @property
+    def state_bytes(self) -> int:
+        return int(self._handle.state_bytes())
+
+
+class CodecStream:
+    """A codec decoding codes as they arrive, from `codes2speech.stream`. `push(codes)` returns their
+    `Audio`; `finish()` whatever is left. Iterating it pushes each item of the `frames` it was given."""
+
+    #: What a push grows to when `frames_per_push` is not given (ADR-102).
+    GROWN = 8
+
+    def __init__(self, handle, interface: "Codes2Speech", sample_rate: int, channels: int, frames=None,
+                 frames_per_push: int | None = None):
+        if frames_per_push is not None and frames_per_push < 1:
+            raise ValueError(f"frames_per_push is at least one frame, not {frames_per_push}")
+        self._handle = handle
+        self._interface = interface
+        self.sample_rate = int(sample_rate)
+        self.channels = int(channels)
+        self._frames = frames
+        self._per_push = frames_per_push
+
+    def _audio(self, samples) -> Audio:
+        return Audio(samples=[float(s) for s in samples], sample_rate=self.sample_rate, channels=self.channels)
+
+    def push(self, codes) -> Audio:
+        """`codes` -- rows or a flat frame-major run, whole frames -- decoded after everything pushed
+        before them."""
+        rows = self._interface._as_matrix(codes)
+        return self._audio(self._handle.push([int(c) for row in rows for c in row]))
+
+    def finish(self) -> Audio:
+        return self._audio(self._handle.finish())
+
+    def reset(self) -> None:
+        self._handle.reset()
+
+    def __iter__(self):
+        if self._frames is None:
+            raise TypeError("this stream was opened without frames to decode: call push() with codes instead")
+        pending, pushes = [], 0
+        for codes in self._frames:
+            pending += self._interface._as_matrix(codes)
+            want = self._per_push or min(self.GROWN, 2 ** pushes)
+            if len(pending) >= want:
+                audio = self.push(pending)
+                pending, pushes = [], pushes + 1
+                if len(audio.samples):
+                    yield audio
+        if pending:
+            audio = self.push(pending)
+            if len(audio.samples):
+                yield audio
+        tail = self.finish()
+        if len(tail.samples):
+            yield tail
+
+    @property
+    def finished(self) -> bool:
+        return bool(self._handle.finished())
+
+    @property
+    def seconds(self) -> float:
+        return int(self._handle.samples()) / self.channels / self.sample_rate
+
+    @property
+    def state_bytes(self) -> int:
+        return int(self._handle.state_bytes())
+
+
 # A sentence ends at a run of terminal marks (with any closing quote or bracket) followed by white space,
 # at a CJK terminal mark, or at a line break. Generic on purpose: this is the cut for models whose own
 # driver does not cut, and "Dr. Smith" becomes two pieces, which costs a pause and nothing else.
@@ -821,6 +918,21 @@ class Text2Codes(Interface):
         `loom_exporter.moss_tts_voices`. Its inputs go to the driver, and one you pass explicitly still
         wins.
         """
+        inputs = self._inputs(text, tokens=tokens, max_new_tokens=max_new_tokens, language=language,
+                              voice=voice, **driver_inputs)
+        flat = self._model.infer(**inputs)
+        if not isinstance(flat, list):
+            raise TypeError(
+                f"this model's driver returned {type(flat).__name__} rather than a run of codes. Its "
+                f"declared output kind is audio_codes, so either the export or the driver is wrong -- "
+                f"`model.driver_source` documents what `infer` actually returns."
+            )
+        return self._as_frames(flat)
+
+    def _inputs(self, text: str | None = None, *, tokens: Sequence[int] | None = None,
+                max_new_tokens: int | None = None, language: str | None = None, voice: Any = None,
+                **driver_inputs) -> dict[str, Any]:
+        """The driver inputs `_infer` documents, built and not yet run -- shared with `stream`."""
         if (text is None) == (tokens is None):
             raise TypeError(
                 "give exactly one of text= or tokens=. They are two depths of the same input, not "
@@ -845,14 +957,26 @@ class Text2Codes(Interface):
             inputs["max_new_tokens"] = float(max_new_tokens)
         if language is not None:
             inputs["language"] = float(self._language_index(language))
-        flat = self._model.infer(**inputs)
-        if not isinstance(flat, list):
-            raise TypeError(
-                f"this model's driver returned {type(flat).__name__} rather than a run of codes. Its "
-                f"declared output kind is audio_codes, so either the export or the driver is wrong -- "
-                f"`model.driver_source` documents what `infer` actually returns."
+        return inputs
+
+    def stream(self, text: str | None = None, **options) -> "CodesStream":
+        """`infer`, handed back as it is drawn: iterate the result for each piece's frames (a list of
+        rows, one frame per piece for Qwen3-TTS), or hand it straight to the codec --
+
+            for audio in codec.codes2speech.stream(lm.text2codes.stream("Hello there.")):
+                play(audio)
+
+        -- which is ADR-022's two calls, each streaming (loom.cpp ADR-102). Takes `infer`'s arguments; a
+        file whose driver has no stream functions raises, and runs through `infer` as before.
+        """
+        if not self.supported:
+            raise self._unsupported()
+        if not self._model.can_stream_speech:
+            raise RuntimeError(
+                f"{self._model.path.name}'s driver has no live path (stream_open / stream_feed / "
+                f"stream_finish): it was exported before streaming. `infer` runs it as before."
             )
-        return self._as_frames(flat)
+        return CodesStream(self._model._open_speech_stream(self._inputs(text, **options)), self)
 
     def _language_index(self, language: str) -> int:
         """`language` as the driver's `language` input: its 1-based position in the languages the
@@ -934,6 +1058,31 @@ class Codes2Speech(Interface):
         return Audio(samples=[float(s) for s in samples],
                      sample_rate=declared or int(sample_rate) or 24000,
                      channels=int(self._model.contract.get("channels") or 1))
+
+    def stream(self, frames=None, *, frames_per_push: int | None = None, sample_rate: int = 0,
+               **driver_inputs) -> "CodecStream":
+        """A live decode (loom.cpp ADR-102): `push` codes as they arrive and get their audio back, then
+        `finish`. Given `frames` -- any iterable of codes, such as a `text2codes.stream()` -- iterating the
+        result pushes each item in turn and yields its `Audio`. The audio is what one `infer` over every
+        frame pushed would give, while that is one of the codec's own chunks (300 frames for Qwen3-TTS's
+        12 Hz codec); past it, `infer` is the reference's chunked decode and the stream is not.
+
+        Iterating gathers `frames` into pushes that GROW -- 1 frame, then 2, 4 and 8 from then on -- so
+        the first audio waits for one frame and the rest pays little for the cut: on the dev box one
+        frame per push decoded at RTF 2.56 and four or more beat the one-pass decode (1.82 against
+        1.90). `frames_per_push` fixes the count.
+        """
+        if not self.supported:
+            raise self._unsupported()
+        if not self._model.can_stream_speech:
+            raise RuntimeError(
+                f"{self._model.path.name}'s driver has no live path (stream_open / stream_feed / "
+                f"stream_finish): it was exported before streaming. `infer` decodes it as before."
+            )
+        declared = int(self._model.contract.get("sample_rate") or 0)
+        return CodecStream(self._model._open_codec_stream(driver_inputs), self,
+                           declared or int(sample_rate) or 24000,
+                           int(self._model.contract.get("channels") or 1), frames, frames_per_push)
 
     def _absent_code(self):
         """The id this codec decodes as "codebook not in the row", or None when it declares none.
