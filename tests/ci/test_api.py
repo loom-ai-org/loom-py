@@ -28,10 +28,11 @@ class TestPackage:
             "Voice",
             "Tokenizer",
             "Transcription",
-            # The live door (loom.cpp ADR-098): what `model.speech2text.stream()` returns, and what each
-            # of its pushes hands back.
+            # The live doors (loom.cpp ADR-098/-099/-100): what `text2text.stream()`,
+            # `text2speech.stream()` and `speech2text.stream()` return, and what each push hands back.
             "TextStream",
-    "TranscriptStream",
+            "SpeechStream",
+            "TranscriptStream",
             "TranscriptUpdate",
             "Segment",
             # The end-to-end layer. The result types and the eight implemented interfaces are exported
@@ -325,6 +326,14 @@ class _FakeHandle:
         self.token_stream = _FakeTokenStream(self._returns.pop(0) if self._returns else [])
         return self.token_stream
 
+    # -- the audio-out door (loom.cpp ADR-100) -------------------------------------------------------
+    def can_stream_speech(self): return bool(self._contract.get("can_stream_speech"))
+
+    def open_speech_stream(self, inputs):
+        self.calls.append(dict(inputs))
+        self.speech_stream = _FakeSpeechStream(self._returns.pop(0) if self._returns else [])
+        return self.speech_stream
+
     # Same reasoning as `transcribe`: the framing-token strip and the label lookup are the ENGINE's
     # (loom/core/text_classify.h), so what a double can pin is the marshalling either side. It records
     # what it was handed and returns one entry per token it was given.
@@ -385,6 +394,28 @@ class _FakeStream:
     def tokens(self): return list(self._ids)
     def finished(self): return self._finished
     def state_bytes(self): return 1024
+
+
+class _FakeSpeechStream:
+    """The binding's `SpeechStream`: hands back canned pieces of samples, one per `next`."""
+
+    def __init__(self, pieces):
+        self._pieces, self._done, self._samples = [list(p) for p in pieces], 0, 0
+
+    def next(self):
+        if self.finished():
+            return []
+        piece = self._pieces[self._done]
+        self._done += 1
+        self._samples += len(piece)
+        return piece
+
+    def reset(self): self._done, self._samples = 0, 0
+    def finished(self): return self._done == len(self._pieces)
+    def pieces_done(self): return self._done
+    def pieces_total(self): return len(self._pieces)
+    def samples(self): return self._samples
+    def state_bytes(self): return 512
 
 
 class _FakeTokenStream:
@@ -1127,6 +1158,63 @@ class TestInterfacesAreTheModalityPair:
                                            output_kind="text", interface="text2text"))
         model = _model(handle)
         assert model.text2text.infer("anything") == model.generate("anything") == "7|8"
+
+
+class TestSpeechStream:
+    """`text2speech.stream`: the driver's own pieces when the file streams, sentences cut here when not."""
+
+    def test_a_streaming_driver_gets_what_infer_would_and_its_pieces_come_back_as_audio(self):
+        handle = _FakeHandle([[0.0], [[0.1, 0.2], [], [0.3]]],
+                             contract=dict(_TTS_TEXT_CONTRACT, can_stream_speech=True))
+        model = _model(handle)
+        assert model.can_stream_speech
+        model.text2speech.infer("Hello there. How are you?", seed=3)
+        stream = model.text2speech.stream("Hello there. How are you?", seed=3)
+        # One open with infer's own inputs: the stream is the driver's, not a host loop.
+        assert handle.calls[1] == handle.calls[0]
+        assert stream.exact and stream.pieces_total == 3
+        pieces = list(stream)
+        assert [p.samples for p in pieces] == [[0.1, 0.2], [0.3]], "an empty piece is skipped"
+        assert all(p.sample_rate == 22050 for p in pieces)
+        assert stream.finished and stream.pieces_done == 3
+        assert stream.seconds == pytest.approx(3 / 22050)
+        stream.reset()
+        assert [p.samples for p in stream] == [[0.1, 0.2], [0.3]]
+
+    def test_any_other_tts_is_cut_into_sentences_one_infer_each(self):
+        handle = _FakeHandle([[0.1], [0.2, 0.2], [0.3]], contract=_TTS_TEXT_CONTRACT)
+        model = _model(handle)
+        assert not model.can_stream_speech
+        stream = model.text2speech.stream("One fish.  Two fish! Red fish", seed=5)
+        assert not stream.exact and stream.pieces_total == 3 and handle.calls == []
+        assert [p.samples for p in stream] == [[0.1], [0.2, 0.2], [0.3]]
+        assert handle.encode_calls == ["One fish.", "Two fish!", "Red fish"]
+        assert [c["seed"] for c in handle.calls] == [5.0, 5.0, 5.0]
+        assert stream.pieces_done == 3 and stream.state_bytes == 0
+
+    def test_ids_have_no_sentences_to_cut_so_they_are_one_piece(self):
+        handle = _FakeHandle([[0.5, 0.5]], contract=_TTS_PHONEME_CONTRACT)
+        stream = _model(handle).text2speech.stream(phonemes=[1, 2, 3])
+        assert stream.pieces_total == 1
+        assert [p.samples for p in stream] == [[0.5, 0.5]]
+        assert handle.calls[0]["tokens"] == [1.0, 2.0, 3.0]
+
+    def test_a_model_that_is_not_a_tts_has_no_speech_stream(self):
+        with pytest.raises(loom.UnsupportedTask):
+            _model(_FakeHandle([], contract=_ASR_CONTRACT)).text2speech.stream("hello")
+
+    @pytest.mark.parametrize("text, want", [
+        ("One. Two? Three!", ["One.", "Two?", "Three!"]),
+        ('He said "Stop." Then left.', ['He said "Stop."', "Then left."]),
+        ("Wait... what?! Fine", ["Wait...", "what?!", "Fine"]),
+        ("Line one\nLine two", ["Line one", "Line two"]),
+        ("\u7b2c\u4e00\u53e5\u3002\u7b2c\u4e8c\u53e5\uff01", ["\u7b2c\u4e00\u53e5\u3002", "\u7b2c\u4e8c\u53e5\uff01"]),
+        ("3.14 is pi", ["3.14 is pi"]),
+        ("no ending at all", ["no ending at all"]),
+    ])
+    def test_split_sentences(self, text, want):
+        from loom._interfaces import split_sentences
+        assert split_sentences(text) == want
 
 
 class TestText2Speech:
