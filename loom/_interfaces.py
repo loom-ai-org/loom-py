@@ -209,9 +209,10 @@ class SpeechStream:
     """A TTS's audio handed back a piece at a time, from `text2speech.stream`. Iterate it for one
     :class:`Audio` per piece, in order; a piece that made no sound is skipped.
 
-    `exact` says how it was cut. True: by the model's own driver (loom.cpp ADR-100), and the pieces joined
-    are `infer`'s waveform. False: here, a sentence of the text per `infer` call, which differs from one
-    call over the whole text at the joins.
+    `exact` says how it was cut. True: by the model's own driver (loom.cpp ADR-100, ADR-101), and the pieces
+    joined are `infer`'s waveform, to within f32 rounding where the driver decodes a frame at a time. False:
+    here, a sentence of the text per `infer` call, which differs from one call over the whole text at the
+    joins.
     """
 
     def __init__(self, handle, sample_rate: int, exact: bool):
@@ -565,8 +566,11 @@ class Text2Speech(Interface):
         Takes exactly `infer`'s arguments. **Two ways it can be cut, and `exact` says which:**
 
         * A file whose driver streams (`model.can_stream_speech`: Pocket-TTS, Soprano, re-exported) is
-          cut by the driver, one sentence chunk per piece. Those references make each chunk from a fresh
-          state, so the pieces joined are `infer`'s waveform, sample for sample. `exact` is True.
+          cut by the driver, and the pieces joined are `infer`'s waveform. `exact` is True. Soprano cuts
+          at its sentences, which its reference makes from a fresh state, so the join is sample for
+          sample. Pocket-TTS cuts at its latent frames, decoded with the decoder's state carried between
+          calls -- 80 ms of audio first, then pieces growing to 640 ms (`piece_frames=` fixes the count,
+          0 is a sentence chunk) -- and the join is within f32 rounding (~1e-6) of `infer`.
         * Any other model is cut HERE, by splitting `text` into sentences and calling `infer` on each.
           Each piece is that sentence's own audio, and the pieces joined differ from one `infer` over
           the whole text wherever the model would have carried prosody across a sentence boundary.
