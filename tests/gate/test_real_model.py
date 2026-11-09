@@ -87,10 +87,13 @@ def test_inference_runs_and_is_deterministic(model):
 def test_a_text_model_goes_from_a_string_to_a_string(model):
     """The end-to-end claim, on whatever real model is configured.
 
-    Skips for a model with no embedded vocabulary -- which is not a gap in the model but a fact about
-    it: the TTS families take phoneme ids a phonemiser produces outside the engine, so there is no
-    text door to test.
+    Skips for a model that does not declare `text2text`. A vocabulary is not the test: it was when this
+    was written, but most TTS files carry one now (Pocket-TTS, Soprano, Chatterbox...), and `generate` on
+    one of those hands back its audio samples as "ids". The declared interface is what says text comes
+    out, as it is for every other door here.
     """
+    if not model.text2text.supported:
+        pytest.skip(f"{model.architecture} is not a text model ({model.contract.get('interface') or 'no interface'})")
     if model.tokenizer is None:
         pytest.skip(f"{model.architecture} embeds no vocabulary; its driver takes ids directly")
 
@@ -108,8 +111,11 @@ def test_the_tokenizer_describes_itself(model):
     if model.tokenizer is None:
         pytest.skip(f"{model.architecture} embeds no vocabulary")
     tokenizer = model.tokenizer
-    assert tokenizer.kind in {"gpt2", "bert", "byt5", "llama", "t5", "ctc", "phonemes",
-                              "supertonic"}, tokenizer.kind
+    # No list of kinds: the binding builds a Tokenizer only for a `tokenizer.ggml.model` tag it dispatches
+    # (an unknown one is no tokenizer, never a failed load), so a list here could only repeat that dispatch
+    # -- and the one that was here did, until six newer kinds (pocket_tts, soprano, ...) fell outside it.
+    assert isinstance(tokenizer.kind, str) and tokenizer.kind, tokenizer.kind
+    assert tokenizer.kind in repr(model)
     assert tokenizer.size > 0
 
 
