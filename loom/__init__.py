@@ -35,11 +35,12 @@ from . import _loom
 from . import phonemizers
 from ._hub import download, list_files
 from ._interfaces import (ALL_INTERFACES, Audio, AudioClasses, Classification, Codes2Speech,
-                          FrameEmbeddings, Interface, SpeechStream, Speech2Class, Speech2Embeddings,
+                          CodecStream, CodesStream, FrameEmbeddings, Interface, SpeechStream,
+                          Speech2Class, Speech2Embeddings,
                           Speech2Text, Text2Class, Text2Codes, Text2Speech, Text2Text, TokenClass,
                           UnsupportedTask)
 
-__all__ = ["Model", "Voice", "Tokenizer", "Transcription", "TextStream", "SpeechStream", "TranscriptStream", "TranscriptUpdate", "Segment", "Audio", "Classification", "TokenClass",
+__all__ = ["Model", "Voice", "Tokenizer", "Transcription", "TextStream", "SpeechStream", "CodesStream", "CodecStream", "TranscriptStream", "TranscriptUpdate", "Segment", "Audio", "Classification", "TokenClass",
            "AudioClasses", "FrameEmbeddings",
            "Interface", "UnsupportedTask", "Text2Text", "Speech2Text", "Text2Speech", "Text2Class",
            "Text2Codes", "Codes2Speech", "Speech2Class", "Speech2Embeddings",
@@ -660,6 +661,9 @@ class Model:
         """Whether this file's driver hands its audio back a piece at a time (loom.cpp ADR-100), so
         `text2speech.stream` is cut by the model and exact. Without it the stream is cut by sentence."""
         return bool(self._handle.can_stream_speech())
+
+    def _open_codec_stream(self, inputs: Mapping[str, Any]):
+        return self._handle.open_codec_stream({k: _as_value(k, v) for k, v in inputs.items()})
 
     def _open_speech_stream(self, inputs: Mapping[str, Any]):
         return self._handle.open_speech_stream({k: _as_value(k, v) for k, v in inputs.items()})

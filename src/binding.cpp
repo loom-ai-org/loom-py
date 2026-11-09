@@ -317,6 +317,26 @@ private:
     loom::audio::SpeechStream stream_;
 };
 
+// The codec half of a streamed pair (loom.cpp ADR-102): codes pushed as an LM makes them, samples back.
+class CodecStream {
+public:
+    CodecStream(loom::LoomLuaBridge& bridge, loom::audio::CodecStream::Inputs inputs)
+        : stream_(bridge, std::move(inputs)) {}
+
+    std::vector<float> push(const std::vector<int32_t>& codes) { return stream_.push(codes); }
+    std::vector<float> finish() { return stream_.finish(); }
+    void reset() { stream_.reset(); }
+    bool finished() const { return stream_.finished(); }
+    size_t samples() const { return stream_.samples(); }
+    size_t state_bytes() const {
+        const loom::StreamState& s = stream_.state();
+        return s.tensor_bytes() + s.value_bytes() + s.parked_bytes() + s.cache_bytes();
+    }
+
+private:
+    loom::audio::CodecStream stream_;
+};
+
 class Model {
 public:
     // `device` is a loom device spec -- "" (which defers to $LOOM_DEVICE, then autodetection), "auto",
@@ -502,6 +522,19 @@ public:
             args.emplace(key, to_value(key, item.second));
         }
         return std::make_unique<SpeechStream>(*bridge_, std::move(args));
+    }
+
+    // A codec stream over the codec's own inputs (none, for every codec today).
+    std::unique_ptr<CodecStream> open_codec_stream(const py::dict& inputs) {
+        if (driver_.empty()) {
+            throw std::runtime_error("this GGUF carries no driver script, so there is nothing to stream.");
+        }
+        loom::audio::CodecStream::Inputs args;
+        for (auto item : inputs) {
+            const std::string key = item.first.cast<std::string>();
+            args.emplace(key, to_value(key, item.second));
+        }
+        return std::make_unique<CodecStream>(*bridge_, std::move(args));
     }
 
     bool can_stream_speech() const {
@@ -868,6 +901,14 @@ PYBIND11_MODULE(_loom, m) {
         .def("samples", &SpeechStream::samples)
         .def("state_bytes", &SpeechStream::state_bytes);
 
+    py::class_<CodecStream>(m, "CodecStream")
+        .def("push", &CodecStream::push, py::arg("codes"))
+        .def("finish", &CodecStream::finish)
+        .def("reset", &CodecStream::reset)
+        .def("finished", &CodecStream::finished)
+        .def("samples", &CodecStream::samples)
+        .def("state_bytes", &CodecStream::state_bytes);
+
     py::class_<TokenStream>(m, "TokenStream")
         .def("next", &TokenStream::next, py::arg("max_tokens"))
         .def("reset", &TokenStream::reset)
@@ -918,6 +959,7 @@ PYBIND11_MODULE(_loom, m) {
         .def("open_stream", &Model::open_stream, py::keep_alive<0, 1>())
         .def("can_stream_speech", &Model::can_stream_speech)
         .def("open_speech_stream", &Model::open_speech_stream, py::arg("inputs"), py::keep_alive<0, 1>())
+        .def("open_codec_stream", &Model::open_codec_stream, py::arg("inputs"), py::keep_alive<0, 1>())
         .def("can_stream_tokens", &Model::can_stream_tokens)
         .def("open_token_stream", &Model::open_token_stream, py::arg("tokens"), py::arg("max_new_tokens"),
              py::arg("eos_token"), py::arg("extra_inputs"), py::arg("temperature"), py::arg("top_k"),
