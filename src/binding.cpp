@@ -295,6 +295,28 @@ private:
     loom::text::GenerationStream stream_;
 };
 
+// Audio out (loom.cpp ADR-100): a TTS's waveform a piece at a time. The inputs are `infer`'s, marshalled
+// once at open.
+class SpeechStream {
+public:
+    SpeechStream(loom::LoomLuaBridge& bridge, loom::audio::SpeechStream::Inputs inputs)
+        : stream_(bridge, std::move(inputs)) {}
+
+    std::vector<float> next() { return stream_.next(); }
+    void reset() { stream_.reset(); }
+    bool finished() const { return stream_.finished(); }
+    size_t pieces_done() const { return stream_.pieces_done(); }
+    size_t pieces_total() const { return stream_.pieces_total(); }
+    size_t samples() const { return stream_.samples(); }
+    size_t state_bytes() const {
+        const loom::StreamState& s = stream_.state();
+        return s.tensor_bytes() + s.value_bytes() + s.parked_bytes() + s.cache_bytes();
+    }
+
+private:
+    loom::audio::SpeechStream stream_;
+};
+
 class Model {
 public:
     // `device` is a loom device spec -- "" (which defers to $LOOM_DEVICE, then autodetection), "auto",
@@ -467,6 +489,23 @@ public:
         return std::make_unique<TokenStream>(*bridge_, *model_, tokens,
                                              generate_options(max_new_tokens, eos_token, extra_inputs,
                                                               temperature, top_k, top_p, seed));
+    }
+
+    // A speech stream over `infer`'s inputs. Raises when the file's driver has no stream functions.
+    std::unique_ptr<SpeechStream> open_speech_stream(const py::dict& inputs) {
+        if (driver_.empty()) {
+            throw std::runtime_error("this GGUF carries no driver script, so there is nothing to stream.");
+        }
+        loom::audio::SpeechStream::Inputs args;
+        for (auto item : inputs) {
+            const std::string key = item.first.cast<std::string>();
+            args.emplace(key, to_value(key, item.second));
+        }
+        return std::make_unique<SpeechStream>(*bridge_, std::move(args));
+    }
+
+    bool can_stream_speech() const {
+        return bridge_ && !driver_.empty() && loom::audio::SpeechStream::supported(*bridge_);
     }
 
     bool can_stream_tokens() const {
@@ -820,6 +859,15 @@ PYBIND11_MODULE(_loom, m) {
         return out;
     }, "Every ggml device visible to this process, in registration order.");
 
+    py::class_<SpeechStream>(m, "SpeechStream")
+        .def("next", &SpeechStream::next)
+        .def("reset", &SpeechStream::reset)
+        .def("finished", &SpeechStream::finished)
+        .def("pieces_done", &SpeechStream::pieces_done)
+        .def("pieces_total", &SpeechStream::pieces_total)
+        .def("samples", &SpeechStream::samples)
+        .def("state_bytes", &SpeechStream::state_bytes);
+
     py::class_<TokenStream>(m, "TokenStream")
         .def("next", &TokenStream::next, py::arg("max_tokens"))
         .def("reset", &TokenStream::reset)
@@ -868,6 +916,8 @@ PYBIND11_MODULE(_loom, m) {
         .def("transcribe", &Model::transcribe, py::arg("waveform"), py::arg("options"))
         .def("can_stream", &Model::can_stream)
         .def("open_stream", &Model::open_stream, py::keep_alive<0, 1>())
+        .def("can_stream_speech", &Model::can_stream_speech)
+        .def("open_speech_stream", &Model::open_speech_stream, py::arg("inputs"), py::keep_alive<0, 1>())
         .def("can_stream_tokens", &Model::can_stream_tokens)
         .def("open_token_stream", &Model::open_token_stream, py::arg("tokens"), py::arg("max_new_tokens"),
              py::arg("eos_token"), py::arg("extra_inputs"), py::arg("temperature"), py::arg("top_k"),
