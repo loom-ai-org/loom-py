@@ -142,3 +142,29 @@ def test_a_live_stream_transcribes_what_one_pass_does(model):
     a.finish()
     b.finish()
     assert a.text == want and b.text == want
+
+
+def test_a_token_stream_is_what_generate_returns(model):
+    """The tokens-out door (loom.cpp ADR-099), on whatever LM is configured: the pieces join to
+    `generate`'s text, greedy and seeded, and two streams pulled in turn -- with a one-pass `generate`
+    between their pulls -- each give their own, under both cache modes. Skips for a model that is not
+    text2text, or a file whose loop has no stream functions."""
+    if not model.text2text.supported or not model.can_stream_tokens:
+        pytest.skip(f"{model.architecture} has no token stream")
+    prompt_a, prompt_b = "The history of the city of Rome begins", "A recipe for bread needs"
+    want_a = model.generate(prompt_a, max_new_tokens=24, temperature=0.0)
+    want_b = model.generate(prompt_b, max_new_tokens=24, temperature=0.8, top_k=40, seed=7)
+    assert want_a, "an empty generation would make the comparison below vacuous"
+    assert "".join(model.text2text.stream(prompt_a, max_new_tokens=24, temperature=0.0)) == want_a
+    for mode in ("park", "per-stream"):
+        model.stream_caches = mode
+        a = iter(model.generate_stream(prompt_a, max_new_tokens=24, temperature=0.0, per_pull=3))
+        b = iter(model.generate_stream(prompt_b, max_new_tokens=24, temperature=0.8, top_k=40, seed=7))
+        got_a, got_b = [], []
+        for _ in range(64):
+            got_a.append(next(a, ""))
+            assert model.generate("The three primary colours are", max_new_tokens=4, temperature=0.0)
+            got_b.append(next(b, ""))
+        assert "".join(got_a) == want_a, mode
+        assert "".join(got_b) == want_b, mode
+    model.stream_caches = "auto"

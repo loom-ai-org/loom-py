@@ -272,6 +272,29 @@ private:
     loom::audio::TranscriptionStream stream_;
 };
 
+// One token stream on a loaded model: the engine's `GenerationStream` (ADR-099), the same ids
+// `generate` returns, handed back as they are drawn. Like `Stream`, its state is its own and it keeps
+// the Model alive.
+class TokenStream {
+public:
+    TokenStream(loom::LoomLuaBridge& bridge, const loom::GgufModel& model, std::vector<int32_t> prompt,
+                loom::text::GenerateOptions options)
+        : stream_(bridge, model, std::move(prompt), std::move(options)) {}
+
+    std::vector<int32_t> next(uint32_t max_tokens) { return stream_.next(max_tokens); }
+    void reset() { stream_.reset(); }
+    std::vector<int32_t> tokens() const { return stream_.tokens(); }
+    bool finished() const { return stream_.finished(); }
+    bool stopped_on_eos() const { return stream_.stopped_on_eos(); }
+    size_t state_bytes() const {
+        const loom::StreamState& s = stream_.state();
+        return s.tensor_bytes() + s.value_bytes() + s.parked_bytes() + s.cache_bytes();
+    }
+
+private:
+    loom::text::GenerationStream stream_;
+};
+
 class Model {
 public:
     // `device` is a loom device spec -- "" (which defers to $LOOM_DEVICE, then autodetection), "auto",
@@ -425,6 +448,45 @@ public:
             throw std::runtime_error(
                 "this GGUF carries no driver script, so there is nothing to generate with.");
         }
+        return loom::text::generate(*bridge_, *model_, tokens,
+                                    generate_options(max_new_tokens, eos_token, extra_inputs, temperature,
+                                                     top_k, top_p, seed));
+    }
+
+    // A token stream over the same options `generate` takes. Raises when the file's driver loops inside
+    // one call and has no stream functions.
+    std::unique_ptr<TokenStream> open_token_stream(const std::vector<int32_t>& tokens, uint32_t max_new_tokens,
+                                                   int32_t eos_token, const py::dict& extra_inputs,
+                                                   const std::optional<float>& temperature,
+                                                   const std::optional<int32_t>& top_k,
+                                                   const std::optional<float>& top_p,
+                                                   const std::optional<uint32_t>& seed) {
+        if (driver_.empty()) {
+            throw std::runtime_error("this GGUF carries no driver script, so there is nothing to stream.");
+        }
+        return std::make_unique<TokenStream>(*bridge_, *model_, tokens,
+                                             generate_options(max_new_tokens, eos_token, extra_inputs,
+                                                              temperature, top_k, top_p, seed));
+    }
+
+    bool can_stream_tokens() const {
+        return bridge_ && !driver_.empty() && loom::text::GenerationStream::supported(*bridge_);
+    }
+
+    // ADR-099: how streams keep their rows of the model's caches apart. Set before opening streams.
+    void set_stream_caches(const std::string& mode) {
+        if (mode == "auto") bridge_->set_stream_caches(loom::StreamCaches::Auto);
+        else if (mode == "park") bridge_->set_stream_caches(loom::StreamCaches::Park);
+        else if (mode == "per-stream") bridge_->set_stream_caches(loom::StreamCaches::PerStream);
+        else throw std::invalid_argument("stream_caches is 'auto', 'park' or 'per-stream', not '" + mode + "'");
+    }
+
+    loom::text::GenerateOptions generate_options(uint32_t max_new_tokens, int32_t eos_token,
+                                                 const py::dict& extra_inputs,
+                                                 const std::optional<float>& temperature,
+                                                 const std::optional<int32_t>& top_k,
+                                                 const std::optional<float>& top_p,
+                                                 const std::optional<uint32_t>& seed) {
         loom::text::GenerateOptions options;
         options.max_new_tokens = max_new_tokens;
         options.eos_token = eos_token;
@@ -442,7 +504,7 @@ public:
             const auto key = item.first.cast<std::string>();
             options.extra_inputs[key] = to_value(key, item.second);
         }
-        return loom::text::generate(*bridge_, *model_, tokens, options);
+        return options;
     }
     // -- the chat door (P4.23) --------------------------------------------------------------------
     //
@@ -758,6 +820,14 @@ PYBIND11_MODULE(_loom, m) {
         return out;
     }, "Every ggml device visible to this process, in registration order.");
 
+    py::class_<TokenStream>(m, "TokenStream")
+        .def("next", &TokenStream::next, py::arg("max_tokens"))
+        .def("reset", &TokenStream::reset)
+        .def("tokens", &TokenStream::tokens)
+        .def("finished", &TokenStream::finished)
+        .def("stopped_on_eos", &TokenStream::stopped_on_eos)
+        .def("state_bytes", &TokenStream::state_bytes);
+
     py::class_<Stream>(m, "Stream")
         .def("push", &Stream::push, py::arg("samples"))
         .def("finish", &Stream::finish)
@@ -789,10 +859,20 @@ PYBIND11_MODULE(_loom, m) {
         .def("tokenizer_default_lang", &Model::tokenizer_default_lang)
         .def("encode", &Model::encode, py::arg("text"), py::arg("lang") = std::string{})
         .def("decode", &Model::decode, py::arg("ids"))
+        // The same bytes before UTF-8 decoding: a token stream stops between any two tokens, and a
+        // byte-level BPE token can end inside a character, which `decode`'s strict str would refuse.
+        .def("decode_bytes", [](const Model& self, const std::vector<int32_t>& ids) {
+            return py::bytes(self.decode(ids));
+        }, py::arg("ids"))
         .def("call", &Model::call, py::arg("fn_name"), py::arg("inputs"))
         .def("transcribe", &Model::transcribe, py::arg("waveform"), py::arg("options"))
         .def("can_stream", &Model::can_stream)
         .def("open_stream", &Model::open_stream, py::keep_alive<0, 1>())
+        .def("can_stream_tokens", &Model::can_stream_tokens)
+        .def("open_token_stream", &Model::open_token_stream, py::arg("tokens"), py::arg("max_new_tokens"),
+             py::arg("eos_token"), py::arg("extra_inputs"), py::arg("temperature"), py::arg("top_k"),
+             py::arg("top_p"), py::arg("seed"), py::keep_alive<0, 1>())
+        .def("set_stream_caches", &Model::set_stream_caches, py::arg("mode"))
         .def("classify", &Model::classify, py::arg("tokens"), py::arg("strip_special"),
              py::arg("extra_inputs"))
         .def("classify_audio", &Model::classify_audio, py::arg("waveform"))

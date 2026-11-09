@@ -277,6 +277,18 @@ class Text2Text(Interface):
         """
         return self._model.chat(messages, max_new_tokens=max_new_tokens, **options)
 
+    def stream(self, prompt, max_new_tokens: int = 64, **options):
+        """`infer`, handed back as it is drawn (`Model.generate_stream`): iterate it for the text."""
+        if not self.supported:
+            raise self._unsupported()
+        return self._model.generate_stream(prompt, max_new_tokens=max_new_tokens, **options)
+
+    def chat_stream(self, messages, max_new_tokens: int = 256, **options):
+        """`chat`, handed back as it is drawn (`Model.chat_stream`)."""
+        if not self.supported:
+            raise self._unsupported()
+        return self._model.chat_stream(messages, max_new_tokens=max_new_tokens, **options)
+
     def ids(self, tokens: Sequence[int], max_new_tokens: int = 64,
             eos_token: int | None = None, **driver_inputs) -> list[int]:
         """The generated ids, without the encode/decode either side -- sometimes the ids are the answer.
