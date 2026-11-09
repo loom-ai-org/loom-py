@@ -30,7 +30,8 @@ class TestPackage:
             "Transcription",
             # The live door (loom.cpp ADR-098): what `model.speech2text.stream()` returns, and what each
             # of its pushes hands back.
-            "TranscriptStream",
+            "TextStream",
+    "TranscriptStream",
             "TranscriptUpdate",
             "Segment",
             # The end-to-end layer. The result types and the eight implemented interfaces are exported
@@ -303,6 +304,27 @@ class _FakeHandle:
         self.stream_handle = _FakeStream()
         return self.stream_handle
 
+    # -- the tokens-out door (loom.cpp ADR-099) ---------------------------------------------------
+    # A byte table rather than `decode`'s "|"-joined ids, so a token can end inside a character.
+    _TOKEN_BYTES = {1: b"h", 2: b"\xc3", 3: b"\xa9", 4: b"!"}
+
+    def decode_bytes(self, ids): return b"".join(self._TOKEN_BYTES[i] for i in ids)
+    def can_stream_tokens(self): return True
+
+    def set_stream_caches(self, mode):
+        if mode not in ("auto", "park", "per-stream"):
+            raise ValueError(f"stream_caches is 'auto', 'park' or 'per-stream', not '{mode}'")
+        self.stream_caches = mode
+
+    def open_token_stream(self, tokens, max_new_tokens, eos_token, extra_inputs, temperature, top_k,
+                          top_p, seed):
+        self.generate_calls.append(
+            {"tokens": list(tokens), "max_new_tokens": max_new_tokens, "eos_token": eos_token,
+             "extra_inputs": dict(extra_inputs), "temperature": temperature, "top_k": top_k,
+             "top_p": top_p, "seed": seed})
+        self.token_stream = _FakeTokenStream(self._returns.pop(0) if self._returns else [])
+        return self.token_stream
+
     # Same reasoning as `transcribe`: the framing-token strip and the label lookup are the ENGINE's
     # (loom/core/text_classify.h), so what a double can pin is the marshalling either side. It records
     # what it was handed and returns one entry per token it was given.
@@ -363,6 +385,81 @@ class _FakeStream:
     def tokens(self): return list(self._ids)
     def finished(self): return self._finished
     def state_bytes(self): return 1024
+
+
+class _FakeTokenStream:
+    """The binding's `TokenStream`: hands back a canned id list, `max_tokens` at a time."""
+
+    def __init__(self, ids):
+        self._all, self._ids, self.pulls = list(ids), [], []
+
+    def next(self, max_tokens):
+        self.pulls.append(max_tokens)
+        out = self._all[len(self._ids):len(self._ids) + max_tokens]
+        self._ids += out
+        return out
+
+    def reset(self): self._ids, self.pulls = [], []
+    def tokens(self): return list(self._ids)
+    def finished(self): return len(self._ids) == len(self._all)
+    def stopped_on_eos(self): return True
+    def state_bytes(self): return 2048
+
+
+class TestTextStream:
+    """`model.text2text.stream()`: the Python side of the engine's tokens-out door."""
+
+    def _model(self, ids):
+        return _model(_FakeHandle([ids], contract=dict(task="text-generation", input_kind="text",
+                                                        output_kind="token_ids", interface="text2text",
+                                                        declared=True)))
+
+    def test_pieces_never_end_inside_a_character(self):
+        model = self._model([1, 2, 3, 4])
+        stream = model.text2text.stream("hi", max_new_tokens=9, seed=3)
+        # Token 2 is the first byte of "é": nothing is yielded for it, and the next piece completes it.
+        assert list(stream) == ["h", "é", "!"]
+        assert stream.text == "hé!" and stream.tokens == [1, 2, 3, 4] and stream.finished
+        call = model._handle.generate_calls[-1]
+        assert call["tokens"] == [10, 11, 12] and call["max_new_tokens"] == 9
+        assert call["eos_token"] == -2 and call["seed"] == 3 and call["temperature"] is None
+
+    def test_per_pull_and_ids(self):
+        model = self._model([1, 4, 1])
+        stream = model.generate_stream([5, 6], per_pull=2)
+        assert list(stream) == ["h!", "h"]
+        assert model._handle.token_stream.pulls == [2, 2]
+        assert model._handle.generate_calls[-1]["tokens"] == [5, 6]
+        with pytest.raises(ValueError):
+            model.generate_stream("x", per_pull=0)
+
+    def test_reset_starts_the_text_again(self):
+        stream = self._model([1, 4]).generate_stream("x")
+        assert "".join(stream) == "h!"
+        stream.reset()
+        assert stream.text == "" and stream.tokens == []
+
+    def test_stream_caches_is_checked_and_kept(self):
+        model = self._model([])
+        assert model.stream_caches == "auto"
+        model.stream_caches = "per-stream"
+        assert model.stream_caches == "per-stream" and model._handle.stream_caches == "per-stream"
+        with pytest.raises(ValueError):
+            model.stream_caches = "both"
+
+    def test_an_lm_with_stream_functions_is_not_a_transcript_stream(self):
+        handle = _FakeHandle([], contract=dict(task="text-generation", input_kind="text",
+                                               output_kind="token_ids", interface="text2text",
+                                               declared=True, can_stream=True))
+        model = _model(handle)
+        assert not model.can_stream and model.can_stream_tokens
+        with pytest.raises(loom.UnsupportedTask):
+            model.stream()
+
+    def test_a_speech_model_is_refused_by_the_text_door(self):
+        handle = _FakeHandle([], contract=_ASR_CONTRACT)
+        with pytest.raises(loom.UnsupportedTask):
+            _model(handle).text2text.stream("x")
 
 
 class TestTranscriptStream:

@@ -23,6 +23,7 @@ table and tokenizes here like any other.
 """
 from __future__ import annotations
 
+import codecs
 import os
 import sys
 import warnings
@@ -37,7 +38,7 @@ from ._interfaces import (ALL_INTERFACES, Audio, AudioClasses, Classification, C
                           FrameEmbeddings, Interface, Speech2Class, Speech2Embeddings, Speech2Text,
                           Text2Class, Text2Codes, Text2Speech, Text2Text, TokenClass, UnsupportedTask)
 
-__all__ = ["Model", "Voice", "Tokenizer", "Transcription", "TranscriptStream", "TranscriptUpdate", "Segment", "Audio", "Classification", "TokenClass",
+__all__ = ["Model", "Voice", "Tokenizer", "Transcription", "TextStream", "TranscriptStream", "TranscriptUpdate", "Segment", "Audio", "Classification", "TokenClass",
            "AudioClasses", "FrameEmbeddings",
            "Interface", "UnsupportedTask", "Text2Text", "Speech2Text", "Text2Speech", "Text2Class",
            "Text2Codes", "Codes2Speech", "Speech2Class", "Speech2Embeddings",
@@ -601,12 +602,78 @@ class Model:
             timestamped=bool(raw["timestamped"]),
         )
 
+    def generate_stream(
+        self,
+        prompt: str | Sequence[int],
+        max_new_tokens: int = 64,
+        eos_token: int | None = None,
+        *,
+        temperature: float | None = None,
+        top_k: int | None = None,
+        top_p: float | None = None,
+        seed: int | None = None,
+        per_pull: int = 1,
+        **inputs: float | int | Sequence[float],
+    ) -> "TextStream":
+        """`generate`, handed back as it is drawn: iterate it for each new piece of text.
+
+            for piece in model.generate_stream("Once upon a time"):
+                print(piece, end="", flush=True)
+
+        The engine's `GenerationStream` (loom.cpp ADR-099): greedy or seeded, the ids are exactly
+        `generate`'s with the same arguments. `prompt` may be text or token ids. `per_pull` is how many
+        tokens each step of the iteration draws. Each stream is independent of the others on this
+        model and of one-pass calls between its steps; how their caches are kept apart is
+        `stream_caches`.
+
+        Raises `RuntimeError` on a file whose loop runs inside one call and has no stream functions --
+        one exported before them; `can_stream_tokens` asks first.
+        """
+        tokens = self.tokenize(prompt) if isinstance(prompt, str) else [int(t) for t in prompt]
+        handle = self._handle.open_token_stream(
+            tokens, int(max_new_tokens), -2 if eos_token is None else int(eos_token),
+            {k: _as_value(k, v) for k, v in inputs.items()},
+            None if temperature is None else float(temperature),
+            None if top_k is None else int(top_k),
+            None if top_p is None else float(top_p),
+            None if seed is None else int(seed))
+        decode = self._handle.decode_bytes if self.tokenizer is not None else None
+        return TextStream(handle, decode, per_pull=int(per_pull))
+
+    def chat_stream(self, messages: str | Sequence[tuple[str, str]] | Sequence[dict],
+                    max_new_tokens: int = 256, **options) -> "TextStream":
+        """`chat`, streamed: the template applied, then `generate_stream`."""
+        if isinstance(messages, str):
+            messages = [("user", messages)]
+        return self.generate_stream(self.apply_chat_template(messages, add_generation_prompt=True),
+                                    max_new_tokens=max_new_tokens, **options)
+
+    @property
+    def can_stream_tokens(self) -> bool:
+        """Whether `generate_stream` can run this file: its driver has the stream functions, or draws
+        one token per call already."""
+        return bool(self._handle.can_stream_tokens())
+
+    @property
+    def stream_caches(self) -> str:
+        return getattr(self, "_stream_caches", "auto")
+
+    @stream_caches.setter
+    def stream_caches(self, mode: str) -> None:
+        """How streams on this model keep their rows of its KV and conv caches apart (loom.cpp ADR-099):
+        ``"park"`` copies a stream's rows out while another runs, ``"per-stream"`` gives each stream a
+        cache of its own, ``"auto"`` (the default) does the second on a discrete GPU and the first
+        elsewhere. Set it before opening streams."""
+        self._handle.set_stream_caches(str(mode))
+        self._stream_caches = str(mode)
+
     @property
     def can_stream(self) -> bool:
         """Whether this file's driver has a live path (`stream_open` / `stream_feed` /
         `stream_finish`), which `stream()` needs. False for every file exported before streaming, whose
-        one-pass doors are unchanged."""
-        return bool(self._handle.can_stream())
+        one-pass doors are unchanged, and for a model that is not speech2text: an LM has the same three
+        functions for its token stream (`can_stream_tokens`)."""
+        return bool(self._handle.can_stream()) and self.speech2text.supported
 
     def stream(self) -> "TranscriptStream":
         """Open a live transcription: push audio as it arrives, read the transcript as it grows.
@@ -618,6 +685,9 @@ class Model:
 
         Raises `RuntimeError` when the file has no live path; `can_stream` asks first.
         """
+        if not self.speech2text.supported:
+            # An LM has `stream_open` too, for its tokens; the transcript door would feed it audio.
+            raise self.speech2text._unsupported()
         # A file exported before the contract carried a rate was read at 16 kHz, as `transcribe` assumes.
         rate = int(self.contract.get("sample_rate") or 0) or 16000
         return TranscriptStream(self._handle.open_stream(), sample_rate=rate)
@@ -785,6 +855,81 @@ class TranscriptStream:
     def _update(self, raw: dict) -> TranscriptUpdate:
         return TranscriptUpdate(text=raw["text"], delta=raw["delta"], tokens=[int(t) for t in raw["tokens"]],
                                 revised=bool(raw["revised"]), seconds=int(raw["samples"]) / self._rate)
+
+
+class TextStream:
+    """A generation handed back as it is drawn, from `Model.generate_stream` or `chat_stream`.
+
+    Iterating yields each new piece of text (the ids, for a file without a vocabulary). A piece never
+    ends inside a character: a byte-level token that does is held until the next one completes it.
+    `next(n)` draws up to n more ids directly.
+    """
+
+    def __init__(self, handle: "_loom.TokenStream", decode, per_pull: int = 1):
+        if per_pull < 1:
+            raise ValueError(f"per_pull draws at least one token, not {per_pull}")
+        self._handle = handle
+        self._decode = decode
+        self._per_pull = per_pull
+        self._restart()
+
+    def _restart(self) -> None:
+        self._bytes = b""
+        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        self._text = ""
+
+    def __iter__(self):
+        while not self.finished:
+            ids = self.next(self._per_pull)
+            if self._decode is None:
+                yield from ids
+                continue
+            piece = self._advance()
+            if piece:
+                yield piece
+
+    def next(self, max_tokens: int = 1) -> list[int]:
+        """Up to `max_tokens` more ids; [] once finished."""
+        return [int(t) for t in self._handle.next(int(max_tokens))]
+
+    def _advance(self) -> str:
+        raw = bytes(self._decode(self._handle.tokens()))
+        if not raw.startswith(self._bytes):
+            # A vocabulary whose spelling of a token depends on what follows it; never seen on a
+            # byte-level BPE, and the honest answer is the whole text again.
+            self._restart()
+        new, self._bytes = raw[len(self._bytes):], raw
+        piece = self._decoder.decode(new, final=self.finished)
+        self._text += piece
+        return piece
+
+    def reset(self) -> None:
+        """Back to the prompt, nothing generated."""
+        self._handle.reset()
+        self._restart()
+
+    @property
+    def text(self) -> str:
+        """What has been handed back so far."""
+        return self._text
+
+    @property
+    def tokens(self) -> list[int]:
+        return [int(t) for t in self._handle.tokens()]
+
+    @property
+    def finished(self) -> bool:
+        return bool(self._handle.finished())
+
+    @property
+    def stopped_on_eos(self) -> bool:
+        """Whether it ended on a stop token (dropped from `tokens`) rather than at `max_new_tokens`."""
+        return bool(self._handle.stopped_on_eos())
+
+    @property
+    def state_bytes(self) -> int:
+        """What this stream holds: its values, any rows parked on the host, any caches of its own."""
+        return int(self._handle.state_bytes())
 
 
 class Tokenizer:
