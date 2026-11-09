@@ -177,10 +177,12 @@ def test_a_token_stream_is_what_generate_returns(model):
 
 
 def test_a_speech_stream_is_what_infer_returns(model):
-    """The audio-out door (loom.cpp ADR-100), on whatever TTS is configured: a file whose driver streams
-    hands back pieces that join to `infer`'s waveform sample for sample, and two streams pulled in turn
-    -- with a one-pass `infer` between their pieces -- each give their own. Skips for a model that is not
-    text2speech, or a file whose driver does not stream (that one is cut by sentence, not exactly)."""
+    """The audio-out door (loom.cpp ADR-100, ADR-101), on whatever TTS is configured: a file whose driver
+    streams hands back pieces that join to `infer`'s waveform -- the same sample count, and the same values
+    to within f32 summation order (Pocket-TTS decodes a frame at a time through a state-carrying step,
+    ~1e-6 from its one-call decode; Soprano's sentences are bit for bit). Two streams pulled in turn, with a
+    one-pass `infer` between their pieces, each give exactly what they gave alone. Skips for a model that is
+    not text2speech, or a file whose driver does not stream (that one is cut by sentence, not exactly)."""
     if not model.text2speech.supported or not model.can_stream_speech:
         pytest.skip(f"{model.architecture} has no speech stream")
     text_a = ("The history of the city of Rome begins on the Palatine hill, where shepherds built their "
@@ -192,12 +194,15 @@ def test_a_speech_stream_is_what_infer_returns(model):
     stream = model.text2speech.stream(text_a, seed=11)
     assert stream.exact
     pieces = [p.samples for p in stream]
-    assert len(pieces) >= 2 and sum(pieces, []) == want_a
+    alone_a = sum(pieces, [])
+    assert len(pieces) >= 2 and len(alone_a) == len(want_a)
+    assert max(abs(x - y) for x, y in zip(alone_a, want_a)) <= 1e-4
+    alone_b = sum((p.samples for p in model.text2speech.stream(text_b, seed=12)), [])
     a = iter(model.text2speech.stream(text_a, seed=11))
     b = iter(model.text2speech.stream(text_b, seed=12))
     got_a, got_b = [], []
-    for _ in range(16):
+    for _ in range(64):
         got_a += next(a, loom.Audio(samples=[], sample_rate=1)).samples
         assert model.text2speech.infer(text_b, seed=12).samples == want_b
         got_b += next(b, loom.Audio(samples=[], sample_rate=1)).samples
-    assert got_a == want_a and got_b == want_b
+    assert got_a == alone_a and got_b == alone_b
