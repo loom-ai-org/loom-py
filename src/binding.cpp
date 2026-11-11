@@ -272,6 +272,42 @@ private:
     loom::audio::TranscriptionStream stream_;
 };
 
+// One frame stream on a loaded model: the engine's `FrameStream` (ADR-106) -- a frame classifier's or
+// frame embedder's rows, each handed back once its audio has arrived. The rows stay flat here; the
+// Python side cuts them by `width`, which the engine has already checked divides them.
+class FrameStream {
+public:
+    FrameStream(loom::LoomLuaBridge& bridge, const loom::GgufModel& model) : stream_(bridge, model) {}
+
+    py::dict push(const std::vector<float>& samples) { return update(stream_.push(samples)); }
+    py::dict finish() { return update(stream_.finish()); }
+    void reset() { stream_.reset(); }
+    bool finished() const { return stream_.finished(); }
+    uint32_t rows() const { return stream_.rows(); }
+    py::dict layout() const {
+        py::dict d;
+        d["kind"] = stream_.output_kind();
+        d["labels"] = stream_.labels();
+        d["width"] = stream_.width();
+        d["frame_rate"] = stream_.frame_rate();
+        d["frame_offset"] = stream_.frame_offset();
+        return d;
+    }
+    size_t state_bytes() const { return stream_.state().tensor_bytes() + stream_.state().value_bytes(); }
+
+private:
+    static py::dict update(const loom::audio::FrameUpdate& u) {
+        py::dict d;
+        d["values"] = u.values;
+        d["first_row"] = u.first_row;
+        d["n_rows"] = u.n_rows;
+        d["samples"] = u.samples;
+        return d;
+    }
+
+    loom::audio::FrameStream stream_;
+};
+
 // One token stream on a loaded model: the engine's `GenerationStream` (ADR-099), the same ids
 // `generate` returns, handed back as they are drawn. Like `Stream`, its state is its own and it keeps
 // the Model alive.
@@ -750,6 +786,13 @@ public:
         return std::make_unique<Stream>(*bridge_, *model_);
     }
 
+    std::unique_ptr<FrameStream> open_frame_stream() {
+        if (driver_.empty()) {
+            throw std::runtime_error("this GGUF carries no driver script, so there is nothing to stream.");
+        }
+        return std::make_unique<FrameStream>(*bridge_, *model_);
+    }
+
     py::object call(const std::string& fn_name, const py::dict& inputs) {
         if (driver_.empty()) {
             throw std::runtime_error(
@@ -926,6 +969,15 @@ PYBIND11_MODULE(_loom, m) {
         .def("finished", &Stream::finished)
         .def("state_bytes", &Stream::state_bytes);
 
+    py::class_<FrameStream>(m, "FrameStream")
+        .def("push", &FrameStream::push, py::arg("samples"))
+        .def("finish", &FrameStream::finish)
+        .def("reset", &FrameStream::reset)
+        .def("finished", &FrameStream::finished)
+        .def("rows", &FrameStream::rows)
+        .def("layout", &FrameStream::layout)
+        .def("state_bytes", &FrameStream::state_bytes);
+
     py::class_<Model>(m, "Model")
         .def(py::init<const std::string&, const std::string&>(), py::arg("path"),
               py::arg("device") = std::string{})
@@ -957,6 +1009,7 @@ PYBIND11_MODULE(_loom, m) {
         .def("transcribe", &Model::transcribe, py::arg("waveform"), py::arg("options"))
         .def("can_stream", &Model::can_stream)
         .def("open_stream", &Model::open_stream, py::keep_alive<0, 1>())
+        .def("open_frame_stream", &Model::open_frame_stream, py::keep_alive<0, 1>())
         .def("can_stream_speech", &Model::can_stream_speech)
         .def("open_speech_stream", &Model::open_speech_stream, py::arg("inputs"), py::keep_alive<0, 1>())
         .def("open_codec_stream", &Model::open_codec_stream, py::arg("inputs"), py::keep_alive<0, 1>())

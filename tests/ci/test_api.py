@@ -34,6 +34,7 @@ class TestPackage:
             "SpeechStream",
             "CodesStream",
             "CodecStream",
+            "FrameStream",
             "TranscriptStream",
             "TranscriptUpdate",
             "Segment",
@@ -328,6 +329,16 @@ class _FakeHandle:
         self.token_stream = _FakeTokenStream(self._returns.pop(0) if self._returns else [])
         return self.token_stream
 
+    # -- the audio-in rows-out door (loom.cpp ADR-106) ----------------------------------------------
+    def open_frame_stream(self):
+        if not self.can_stream():
+            raise RuntimeError("this model's driver has no live path")
+        c = self._contract
+        width = len(c["labels"]) if c["output_kind"] == "class" else c["embedding_dim"]
+        self.frame_stream = _FakeFrameStream(c["output_kind"], c["labels"], width, c["frame_rate"],
+                                             c["frame_offset"])
+        return self.frame_stream
+
     # -- the audio-out door (loom.cpp ADR-100) -------------------------------------------------------
     def can_stream_speech(self): return bool(self._contract.get("can_stream_speech"))
 
@@ -400,6 +411,40 @@ class _FakeStream:
     def tokens(self): return list(self._ids)
     def finished(self): return self._finished
     def state_bytes(self): return 1024
+
+
+class _FakeFrameStream:
+    """The binding's `FrameStream`: one row per two samples, its values the row's index then 0.5s, so
+    the rows' order and first_row are visible; the engine's checks are its own (test_frame_stream)."""
+
+    def __init__(self, kind, labels, width, frame_rate, frame_offset):
+        self._layout = {"kind": kind, "labels": list(labels), "width": width, "frame_rate": frame_rate,
+                        "frame_offset": frame_offset}
+        self.pushes, self._pending, self._rows, self._samples, self._finished = [], 0, 0, 0, False
+
+    def _update(self, n):
+        w = self._layout["width"]
+        values = [v for r in range(self._rows, self._rows + n) for v in [float(r)] + [0.5] * (w - 1)]
+        out = {"values": values, "first_row": self._rows, "n_rows": n, "samples": self._samples}
+        self._rows += n
+        return out
+
+    def push(self, samples):
+        self.pushes.append(list(samples))
+        self._samples += len(samples)
+        have = self._pending + len(samples)
+        self._pending = have % 2
+        return self._update(have // 2)
+
+    def finish(self):
+        self._finished = True
+        return self._update(self._pending)
+
+    def reset(self): self.__init__(**{k: self._layout[k] for k in self._layout})
+    def finished(self): return self._finished
+    def rows(self): return self._rows
+    def layout(self): return dict(self._layout)
+    def state_bytes(self): return 128
 
 
 class _FakeSpeechStream:
@@ -1242,6 +1287,53 @@ class TestSpeechStream:
     def test_split_sentences(self, text, want):
         from loom._interfaces import split_sentences
         assert split_sentences(text) == want
+
+
+class TestFrameStream:
+    """`speech2class.stream()` and `speech2embeddings.stream()`: a frame model's rows as the audio
+    arrives (loom.cpp ADR-106), each push answered with what `infer` answers, at stream times."""
+
+    def test_a_vad_answers_each_push_with_its_frames_at_stream_times(self):
+        handle = _FakeHandle([], contract=dict(_VAD_CONTRACT, can_stream=True))
+        model = _model(handle)
+        assert model.can_stream_frames
+        stream = model.speech2class.stream()
+        first = stream.push([0.0, 0.25, 0.5])
+        assert isinstance(first, loom.AudioClasses) and first.granularity == "frame"
+        assert first.labels == ["non_speech", "speech"] and first.probabilities == [[0.0, 0.5]]
+        assert first.times == [0.01]
+        second = stream.push([1.0, 2.0, 3.0, 4.0])
+        assert second.probabilities == [[1.0, 0.5], [2.0, 0.5]]
+        assert second.times == [0.01 + 1 / 50.0, 0.01 + 2 / 50.0]
+        assert second.probability("speech") == [0.5, 0.5]
+        assert handle.frame_stream.pushes[1] == [1.0, 2.0, 3.0, 4.0]
+        last = stream.finish()
+        assert last.probabilities == [[3.0, 0.5]] and last.times == [0.01 + 3 / 50.0]
+        assert stream.rows == 4 and stream.finished and stream.state_bytes == 128
+        stream.reset()
+        assert stream.rows == 0 and stream.push([0.0, 0.0]).times == [0.01]
+
+    def test_a_frame_embedder_answers_frame_embeddings(self):
+        handle = _FakeHandle([], contract=dict(_FRAME_EMBEDDER_CONTRACT, can_stream=True))
+        model = _model(handle)
+        assert model.can_stream_frames
+        stream = model.speech2embeddings.stream()
+        stream.push([0.0, 0.0])
+        got = stream.push([0.0, 0.0])
+        assert isinstance(got, loom.FrameEmbeddings) and got.dim == 3
+        assert got.rows == [[1.0, 0.5, 0.5]] and got.times == [1 / 50.0]
+
+    def test_what_cannot_stream_says_so(self):
+        # A clip model is never a frame stream, whatever its driver exports.
+        assert not _model(_FakeHandle([], contract=dict(_LID_CONTRACT, can_stream=True))).can_stream_frames
+        # A frame model exported before the live path.
+        model = _model(_FakeHandle([], contract=_VAD_CONTRACT))
+        assert not model.can_stream_frames
+        with pytest.raises(RuntimeError, match="no live path"):
+            model.speech2class.stream()
+        # The wrong door.
+        with pytest.raises(loom.UnsupportedTask):
+            _model(_FakeHandle([], contract=dict(_VAD_CONTRACT, can_stream=True))).speech2embeddings.stream()
 
 
 class TestPairStream:
