@@ -589,7 +589,8 @@ class Speech2Text(Interface):
 
     def stream(self, **options):
         """A live transcription (`Model.stream`): push audio as it arrives, read text as it grows.
-        `options` go to the driver (`update_seconds` for a re-decoding file). Raises `UnsupportedTask` on a
+        `language` is a name, as `transcribe` takes it; `options` go to the driver (`update_seconds` for a
+        re-decoding file). Raises `UnsupportedTask` on a
         model that is not speech2text, and `RuntimeError` on one whose file has no live path yet
         (`model.can_stream`)."""
         if not self.supported:

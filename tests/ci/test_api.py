@@ -302,10 +302,11 @@ class _FakeHandle:
     def can_stream(self):
         return bool(self._contract.get("can_stream"))
 
-    def open_stream(self, inputs=None):
+    def open_stream(self, inputs=None, language=""):
         if not self.can_stream():
             raise RuntimeError("this model's driver has no live path")
         self.stream_inputs = dict(inputs or {})
+        self.stream_language = language
         self.stream_handle = _FakeStream()
         return self.stream_handle
 
@@ -591,7 +592,14 @@ class TestTranscriptStream:
         _model(handle).speech2text.stream(update_seconds=1.0)
         assert handle.stream_inputs == {"update_seconds": 1.0}
         _model(handle).speech2text.stream()
-        assert handle.stream_inputs == {}
+        assert handle.stream_inputs == {} and handle.stream_language == ""
+
+    def test_a_stream_language_is_a_name_the_engine_resolves(self):
+        """`language` goes to the binding as the NAME (the engine's `language_input`, loom.cpp ADR-109
+        turns it into the driver's id), never through `_as_value`, which refuses strings."""
+        handle = _FakeHandle([], contract=dict(_ASR_CONTRACT, can_stream=True))
+        _model(handle).speech2text.stream(language="de-DE")
+        assert handle.stream_language == "de-DE" and handle.stream_inputs == {}
 
     def test_a_file_without_a_live_path_says_so(self):
         model = _model(_FakeHandle([], contract=_ASR_CONTRACT))

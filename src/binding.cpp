@@ -781,7 +781,9 @@ public:
     bool can_stream() const { return bridge_ && !driver_.empty() && loom::audio::TranscriptionStream::supported(*bridge_); }
 
     // A new live transcription. Raises when the file's driver has no live path.
-    std::unique_ptr<Stream> open_stream(const py::dict& inputs) {
+    // `language` is a NAME, resolved as `transcribe` resolves it (the engine's `language_input`, ADR-109);
+    // empty leaves the driver its default.
+    std::unique_ptr<Stream> open_stream(const py::dict& inputs, const std::string& language) {
         if (driver_.empty()) {
             throw std::runtime_error("this GGUF carries no driver script, so there is nothing to stream.");
         }
@@ -789,6 +791,9 @@ public:
         for (auto item : inputs) {
             const std::string key = item.first.cast<std::string>();
             args.emplace(key, to_value(key, item.second));
+        }
+        if (!language.empty()) {
+            args["language"] = loom::audio::TranscriptionStream::language_input(*model_, language);
         }
         return std::make_unique<Stream>(*bridge_, *model_, std::move(args));
     }
@@ -1015,7 +1020,8 @@ PYBIND11_MODULE(_loom, m) {
         .def("call", &Model::call, py::arg("fn_name"), py::arg("inputs"))
         .def("transcribe", &Model::transcribe, py::arg("waveform"), py::arg("options"))
         .def("can_stream", &Model::can_stream)
-        .def("open_stream", &Model::open_stream, py::arg("inputs") = py::dict(), py::keep_alive<0, 1>())
+        .def("open_stream", &Model::open_stream, py::arg("inputs") = py::dict(), py::arg("language") = "",
+             py::keep_alive<0, 1>())
         .def("open_frame_stream", &Model::open_frame_stream, py::keep_alive<0, 1>())
         .def("can_stream_speech", &Model::can_stream_speech)
         .def("open_speech_stream", &Model::open_speech_stream, py::arg("inputs"), py::keep_alive<0, 1>())
