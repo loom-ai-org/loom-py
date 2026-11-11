@@ -205,6 +205,67 @@ class FrameEmbeddings:
         return [self.frame_offset + i / self.frame_rate for i in range(len(self.rows))]
 
 
+class FrameStream:
+    """A frame classifier's or frame embedder's rows as the audio arrives, from `speech2class.stream()` or
+    `speech2embeddings.stream()` (loom.cpp ADR-106).
+
+        vad = model.speech2class.stream()
+        for piece in microphone():   # mono floats at contract["sample_rate"], any length
+            for t, p in zip(*(u := vad.push(piece)).times, u.probability("speech")):
+                ...
+        vad.finish()
+
+    Each `push` returns what one `infer` call returns -- an `AudioClasses` or a `FrameEmbeddings` -- for the
+    frames that push completed, with `frame_offset` set to the first one's time in the stream, so `.times`
+    are stream times. The rows of every call joined are `infer`'s rows over the whole audio: where the
+    pieces break never changes them. The cut into rows and their times are the engine's.
+    """
+
+    def __init__(self, handle):
+        self._handle = handle
+        layout = handle.layout()
+        self.kind = str(layout["kind"])
+        self.labels = list(layout["labels"])
+        self.width = int(layout["width"])
+        self.frame_rate = float(layout["frame_rate"])
+        self.frame_offset = float(layout["frame_offset"])
+
+    def push(self, samples: Sequence[float]) -> "AudioClasses | FrameEmbeddings":
+        """Add audio and answer every frame it completes."""
+        return self._answer(self._handle.push([float(x) for x in samples]))
+
+    def finish(self) -> "AudioClasses | FrameEmbeddings":
+        """End the input: answer what is left. Takes no push afterwards until `reset`."""
+        return self._answer(self._handle.finish())
+
+    def reset(self) -> None:
+        """Drop everything and start again on the same model."""
+        self._handle.reset()
+
+    @property
+    def rows(self) -> int:
+        """Frames answered so far."""
+        return int(self._handle.rows())
+
+    @property
+    def finished(self) -> bool:
+        return bool(self._handle.finished())
+
+    @property
+    def state_bytes(self) -> int:
+        """What this stream's state holds, on the device and on the host."""
+        return int(self._handle.state_bytes())
+
+    def _answer(self, raw: dict):
+        flat, w = raw["values"], self.width
+        rows = [list(flat[r * w:(r + 1) * w]) for r in range(int(raw["n_rows"]))]
+        offset = self.frame_offset + int(raw["first_row"]) / self.frame_rate
+        if self.kind == "class":
+            return AudioClasses(granularity="frame", labels=list(self.labels), probabilities=rows,
+                                frame_rate=self.frame_rate, frame_offset=offset)
+        return FrameEmbeddings(rows=rows, dim=w, frame_rate=self.frame_rate, frame_offset=offset)
+
+
 class SpeechStream:
     """A TTS's audio handed back a piece at a time, from `text2speech.stream`. Iterate it for one
     :class:`Audio` per piece, in order; a piece that made no sound is skipped.
@@ -548,6 +609,15 @@ class Speech2Class(Interface):
         """
         return self._model.classify_audio(waveform)
 
+    def stream(self) -> FrameStream:
+        """Classify live (`FrameStream`): push audio as it arrives, read each frame's distribution once its
+        audio is in. Per-frame models only -- a clip's one row needs the whole clip. Raises
+        `UnsupportedTask` on a model that is not speech2class, and `RuntimeError` on one whose file has no
+        live path (`model.can_stream_frames`)."""
+        if not self.supported:
+            raise self._unsupported()
+        return self._model.frame_stream()
+
 
 class Speech2Embeddings(Interface):
     name = "speech2embeddings"
@@ -566,6 +636,12 @@ class Speech2Embeddings(Interface):
         of the application.
         """
         return self._model.embed(waveform)
+
+    def stream(self) -> FrameStream:
+        """Embed live (`FrameStream`), for a frame embedder: each frame's vector once its audio is in."""
+        if not self.supported:
+            raise self._unsupported()
+        return self._model.frame_stream()
 
 
 class Text2Speech(Interface):

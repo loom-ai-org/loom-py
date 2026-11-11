@@ -35,12 +35,13 @@ from . import _loom
 from . import phonemizers
 from ._hub import download, list_files
 from ._interfaces import (ALL_INTERFACES, Audio, AudioClasses, Classification, Codes2Speech,
-                          CodecStream, CodesStream, FrameEmbeddings, Interface, SpeechStream,
+                          CodecStream, CodesStream, FrameEmbeddings, FrameStream, Interface,
+                          SpeechStream,
                           Speech2Class, Speech2Embeddings,
                           Speech2Text, Text2Class, Text2Codes, Text2Speech, Text2Text, TokenClass,
                           UnsupportedTask)
 
-__all__ = ["Model", "Voice", "Tokenizer", "Transcription", "TextStream", "SpeechStream", "CodesStream", "CodecStream", "TranscriptStream", "TranscriptUpdate", "Segment", "Audio", "Classification", "TokenClass",
+__all__ = ["Model", "Voice", "Tokenizer", "Transcription", "TextStream", "SpeechStream", "CodesStream", "CodecStream", "FrameStream", "TranscriptStream", "TranscriptUpdate", "Segment", "Audio", "Classification", "TokenClass",
            "AudioClasses", "FrameEmbeddings",
            "Interface", "UnsupportedTask", "Text2Text", "Speech2Text", "Text2Speech", "Text2Class",
            "Text2Codes", "Codes2Speech", "Speech2Class", "Speech2Embeddings",
@@ -688,6 +689,21 @@ class Model:
         one-pass doors are unchanged, and for a model that is not speech2text: an LM has the same three
         functions for its token stream (`can_stream_tokens`)."""
         return bool(self._handle.can_stream()) and self.speech2text.supported
+
+    @property
+    def can_stream_frames(self) -> bool:
+        """Whether `speech2class.stream()` / `speech2embeddings.stream()` can open (loom.cpp ADR-106): the
+        driver has its live path and the file answers per frame."""
+        if not (bool(self._handle.can_stream()) and self.contract.get("input_kind") == "audio"):
+            return False
+        return self.contract.get("output_granularity") == "frame" and (
+            self.speech2class.supported or self.speech2embeddings.supported)
+
+    def frame_stream(self) -> "FrameStream":
+        """A live frame classifier or embedder (`FrameStream`); `speech2class.stream()` and
+        `speech2embeddings.stream()` land here. The engine's `FrameStream` refuses a clip model, a file
+        without a declared row width and one with no live path, each by name."""
+        return FrameStream(self._handle.open_frame_stream())
 
     def stream(self) -> "TranscriptStream":
         """Open a live transcription: push audio as it arrives, read the transcript as it grows.
