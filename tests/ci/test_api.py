@@ -302,9 +302,10 @@ class _FakeHandle:
     def can_stream(self):
         return bool(self._contract.get("can_stream"))
 
-    def open_stream(self):
+    def open_stream(self, inputs=None):
         if not self.can_stream():
             raise RuntimeError("this model's driver has no live path")
+        self.stream_inputs = dict(inputs or {})
         self.stream_handle = _FakeStream()
         return self.stream_handle
 
@@ -583,6 +584,14 @@ class TestTranscriptStream:
         assert stream.finish().delta == ""
         assert stream.finished and stream.text == "1 2" and stream.tokens == [1, 2]
         assert stream.state_bytes == 1024
+
+    def test_stream_options_reach_the_driver(self):
+        """A re-decoding file's cadence (loom.cpp ADR-106) is a `stream_open` input, passed as given."""
+        handle = _FakeHandle([], contract=dict(_ASR_CONTRACT, can_stream=True))
+        _model(handle).speech2text.stream(update_seconds=1.0)
+        assert handle.stream_inputs == {"update_seconds": 1.0}
+        _model(handle).speech2text.stream()
+        assert handle.stream_inputs == {}
 
     def test_a_file_without_a_live_path_says_so(self):
         model = _model(_FakeHandle([], contract=_ASR_CONTRACT))
