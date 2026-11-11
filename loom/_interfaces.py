@@ -587,13 +587,14 @@ class Speech2Text(Interface):
             waveform, language=language, task=task, target_language=target_language,
             timestamps=timestamps, condition_on_previous=condition_on_previous)
 
-    def stream(self):
+    def stream(self, **options):
         """A live transcription (`Model.stream`): push audio as it arrives, read text as it grows.
-        Raises `UnsupportedTask` on a model that is not speech2text, and `RuntimeError` on one whose
-        file has no live path yet (`model.can_stream`)."""
+        `options` go to the driver (`update_seconds` for a re-decoding file). Raises `UnsupportedTask` on a
+        model that is not speech2text, and `RuntimeError` on one whose file has no live path yet
+        (`model.can_stream`)."""
         if not self.supported:
             raise self._unsupported()
-        return self._model.stream()
+        return self._model.stream(**options)
 
 
 class Speech2Class(Interface):

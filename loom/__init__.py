@@ -705,8 +705,12 @@ class Model:
         without a declared row width and one with no live path, each by name."""
         return FrameStream(self._handle.open_frame_stream())
 
-    def stream(self) -> "TranscriptStream":
+    def stream(self, **options: Any) -> "TranscriptStream":
         """Open a live transcription: push audio as it arrives, read the transcript as it grows.
+
+        `options` go to the driver's `stream_open`: a re-decoding file takes `update_seconds`, how much new
+        audio waits for each decode (Moonshine streaming: 0.5 s by default). It is a cost knob -- the
+        transcript at `finish` does not depend on it -- and a file ignores an option it does not read.
 
         The engine's own `TranscriptionStream`, the same one `loom_cli --stream` runs. Each stream's
         state -- caches, cursors, audio not yet decoded -- is the engine's and belongs to that stream
@@ -720,7 +724,8 @@ class Model:
             raise self.speech2text._unsupported()
         # A file exported before the contract carried a rate was read at 16 kHz, as `transcribe` assumes.
         rate = int(self.contract.get("sample_rate") or 0) or 16000
-        return TranscriptStream(self._handle.open_stream(), sample_rate=rate)
+        return TranscriptStream(self._handle.open_stream({k: _as_value(k, v) for k, v in options.items()}),
+                                sample_rate=rate)
 
     def classify(self, tokens: Sequence[int], *, strip_special: bool = True,
                  **driver_inputs: Any) -> "Classification":
@@ -826,9 +831,10 @@ class TranscriptUpdate:
     """What one `TranscriptStream.push` or `finish` returns.
 
     `delta` is the text this call added and `text` the whole transcript so far. `revised` is set when
-    earlier text changed, and `delta` is then the whole of `text`; a transducer's emissions are final, so
-    it is False for every streaming file today. `tokens` are the ids this call decoded; `seconds` is the
-    audio pushed so far.
+    earlier text changed, and `delta` is then the whole of `text`. A transducer's emissions are final, so
+    it is False for those files; an encoder-decoder that re-decodes as audio arrives (Moonshine streaming,
+    loom.cpp ADR-106) revises, and its text at `finish` is the one-pass transcript. `tokens` are the ids
+    this call decoded -- for a re-decoding file, the whole hypothesis; `seconds` is the audio pushed so far.
     """
     text: str
     delta: str

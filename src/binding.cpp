@@ -248,7 +248,9 @@ loom::LoomLuaBridge::Value to_value(const std::string& key, const py::handle& va
 // as long as a stream of it is (`keep_alive` below), since the stream holds its bridge by reference.
 class Stream {
 public:
-    Stream(loom::LoomLuaBridge& bridge, const loom::GgufModel& model) : stream_(bridge, model) {}
+    Stream(loom::LoomLuaBridge& bridge, const loom::GgufModel& model,
+           loom::audio::TranscriptionStream::Inputs inputs)
+        : stream_(bridge, model, std::move(inputs)) {}
 
     py::dict push(const std::vector<float>& samples) { return update(stream_.push(samples)); }
     py::dict finish() { return update(stream_.finish()); }
@@ -779,11 +781,16 @@ public:
     bool can_stream() const { return bridge_ && !driver_.empty() && loom::audio::TranscriptionStream::supported(*bridge_); }
 
     // A new live transcription. Raises when the file's driver has no live path.
-    std::unique_ptr<Stream> open_stream() {
+    std::unique_ptr<Stream> open_stream(const py::dict& inputs) {
         if (driver_.empty()) {
             throw std::runtime_error("this GGUF carries no driver script, so there is nothing to stream.");
         }
-        return std::make_unique<Stream>(*bridge_, *model_);
+        loom::audio::TranscriptionStream::Inputs args;
+        for (auto item : inputs) {
+            const std::string key = item.first.cast<std::string>();
+            args.emplace(key, to_value(key, item.second));
+        }
+        return std::make_unique<Stream>(*bridge_, *model_, std::move(args));
     }
 
     std::unique_ptr<FrameStream> open_frame_stream() {
@@ -1008,7 +1015,7 @@ PYBIND11_MODULE(_loom, m) {
         .def("call", &Model::call, py::arg("fn_name"), py::arg("inputs"))
         .def("transcribe", &Model::transcribe, py::arg("waveform"), py::arg("options"))
         .def("can_stream", &Model::can_stream)
-        .def("open_stream", &Model::open_stream, py::keep_alive<0, 1>())
+        .def("open_stream", &Model::open_stream, py::arg("inputs") = py::dict(), py::keep_alive<0, 1>())
         .def("open_frame_stream", &Model::open_frame_stream, py::keep_alive<0, 1>())
         .def("can_stream_speech", &Model::can_stream_speech)
         .def("open_speech_stream", &Model::open_speech_stream, py::arg("inputs"), py::keep_alive<0, 1>())
