@@ -705,8 +705,12 @@ class Model:
         without a declared row width and one with no live path, each by name."""
         return FrameStream(self._handle.open_frame_stream())
 
-    def stream(self, **options: Any) -> "TranscriptStream":
+    def stream(self, *, language: str | None = None, **options: Any) -> "TranscriptStream":
         """Open a live transcription: push audio as it arrives, read the transcript as it grows.
+
+        `language` is a name, as `transcribe` takes it (Nemotron 3.5 ASR: `"de-DE"`, `"auto"`); the
+        engine resolves it from the file's declared table and refuses one the file does not declare.
+        Omitted, the file decodes with its own default.
 
         `options` go to the driver's `stream_open`: a re-decoding file takes `update_seconds`, how much new
         audio waits for each decode (Moonshine streaming: 0.5 s by default). It is a cost knob -- the
@@ -724,7 +728,8 @@ class Model:
             raise self.speech2text._unsupported()
         # A file exported before the contract carried a rate was read at 16 kHz, as `transcribe` assumes.
         rate = int(self.contract.get("sample_rate") or 0) or 16000
-        return TranscriptStream(self._handle.open_stream({k: _as_value(k, v) for k, v in options.items()}),
+        return TranscriptStream(self._handle.open_stream({k: _as_value(k, v) for k, v in options.items()},
+                                                         language or ""),
                                 sample_rate=rate)
 
     def classify(self, tokens: Sequence[int], *, strip_special: bool = True,
