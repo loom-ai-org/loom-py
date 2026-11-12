@@ -715,6 +715,9 @@ class Model:
         `options` go to the driver's `stream_open`: a re-decoding file takes `update_seconds`, how much new
         audio waits for each decode (Moonshine streaming: 0.5 s by default). It is a cost knob -- the
         transcript at `finish` does not depend on it -- and a file ignores an option it does not read.
+        Nemotron-Labs-Unified-ASR takes its streaming mode's `left_seconds`, `chunk_seconds` and
+        `right_seconds` (5.6, 0.56, 0.56 by default; latency is chunk + right, from 0.16 s): those do
+        change the transcript, as they do in NeMo's own streaming.
 
         The engine's own `TranscriptionStream`, the same one `loom_cli --stream` runs. Each stream's
         state -- caches, cursors, audio not yet decoded -- is the engine's and belongs to that stream
