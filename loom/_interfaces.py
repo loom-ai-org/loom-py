@@ -740,12 +740,15 @@ class Text2Speech(Interface):
 
         Takes exactly `infer`'s arguments. **Two ways it can be cut, and `exact` says which:**
 
-        * A file whose driver streams (`model.can_stream_speech`: Pocket-TTS, Soprano, re-exported) is
-          cut by the driver, and the pieces joined are `infer`'s waveform. `exact` is True. Soprano cuts
+        * A file whose driver streams (`model.can_stream_speech`: Pocket-TTS, Soprano, VoxCPM2,
+          re-exported) is cut by the driver, and the pieces joined are `infer`'s waveform. `exact` is True. Soprano cuts
           at its sentences, which its reference makes from a fresh state, so the join is sample for
           sample. Pocket-TTS cuts at its latent frames, decoded with the decoder's state carried between
           calls -- 80 ms of audio first, then pieces growing to 640 ms (`piece_frames=` fixes the count,
-          0 is a sentence chunk) -- and the join is within f32 rounding (~1e-6) of `infer`.
+          0 is a sentence chunk) -- and the join is within f32 rounding (~1e-6) of `infer`. VoxCPM2 cuts
+          at its latent patches the same way: 160 ms first, then pieces growing to 1.28 s
+          (`piece_patches=` fixes the count, 0 is the whole clip); unlike `infer` it never retries a
+          generation that ran out of budget, as upstream's streaming mode does not.
         * Any other model is cut HERE, by splitting `text` into sentences and calling `infer` on each.
           Each piece is that sentence's own audio, and the pieces joined differ from one `infer` over
           the whole text wherever the model would have carried prosody across a sentence boundary.
