@@ -743,8 +743,9 @@ class Text2Speech(Interface):
 
         * A file whose driver streams (`model.can_stream_speech`: Pocket-TTS, Soprano, VoxCPM2,
           CosyVoice3, re-exported) is cut by the driver, and the pieces joined are `infer`'s waveform. `exact` is True. Soprano cuts
-          at its sentences, which its reference makes from a fresh state, so the join is sample for
-          sample. Pocket-TTS cuts at its latent frames, decoded with the decoder's state carried between
+          at its hidden rows, each piece decoded over a window holding the decoder's whole receptive
+          field as its reference's `infer_stream` does, so the join is sample for sample: 64 ms of audio
+          first, then pieces growing to 1 s (`piece_tokens=` fixes the row count, 0 is a sentence). Pocket-TTS cuts at its latent frames, decoded with the decoder's state carried between
           calls -- 80 ms of audio first, then pieces growing to 640 ms (`piece_frames=` fixes the count,
           0 is a sentence chunk) -- and the join is within f32 rounding (~1e-6) of `infer`. VoxCPM2 cuts
           at its latent patches the same way: 160 ms first, then pieces growing to 1.28 s
