@@ -753,9 +753,11 @@ class Text2Speech(Interface):
           its reference's hops of speech tokens (the first 1 to 2 s of audio, then 2 s, then 4 s),
           re-running the flow over every token so far in its STREAMING mode, as upstream's
           `tts(stream=True)` does: the join is `infer(..., streaming=1)`, not the default full-attention
-          `infer`, whose audio differs. Even against `streaming=1` it matches on the mel (~1e-3), not
-          sample for sample: the vocoder's sine phase (a running sum of F0) turns that rounding into
-          O(1) sample differences.
+          `infer`, whose audio differs -- with the same `seed`, since both draw in one order (a file
+          exported before loom.cpp ADR-112's 2026-11-12 amendment does not: pin `draws`, `noise` and
+          `nsf_noise` there). Even against `streaming=1` it matches on the mel (~1e-3), not sample for
+          sample: the vocoder's sine phase (a running sum of F0) turns that rounding into O(1) sample
+          differences.
         * Any other model is cut HERE, by splitting `text` into sentences and calling `infer` on each.
           Each piece is that sentence's own audio, and the pieces joined differ from one `infer` over
           the whole text wherever the model would have carried prosody across a sentence boundary.
