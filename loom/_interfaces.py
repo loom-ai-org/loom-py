@@ -742,7 +742,7 @@ class Text2Speech(Interface):
         Takes exactly `infer`'s arguments. **Two ways it can be cut, and `exact` says which:**
 
         * A file whose driver streams (`model.can_stream_speech`: Pocket-TTS, Soprano, VoxCPM2,
-          CosyVoice3, LFM2.5-Audio, Voxtral-4B-TTS, Chatterbox, re-exported) is cut by the driver, and the pieces joined are `infer`'s waveform. `exact` is True. Soprano cuts
+          CosyVoice3, LFM2.5-Audio, Voxtral-4B-TTS, Chatterbox, SpeechT5, re-exported) is cut by the driver, and the pieces joined are `infer`'s waveform. `exact` is True. Soprano cuts
           at its hidden rows, each piece decoded over a window holding the decoder's whole receptive
           field as its reference's `infer_stream` does, so the join is sample for sample: 64 ms of audio
           first, then pieces growing to 1 s (`piece_tokens=` fixes the row count, 0 is a sentence). Pocket-TTS cuts at its latent frames, decoded with the decoder's state carried between
@@ -755,7 +755,11 @@ class Text2Speech(Interface):
           field: 60 ms first, then pieces growing to 640 ms (`piece_frames=` fixes the count, 0 is the
           whole turn), within f32 rounding of `infer`. Voxtral-4B-TTS cuts at its frames the same way,
           its causal codec decoding each piece from 32 frames before it: 80 ms first, then pieces growing
-          to 640 ms (`piece_frames=`). CosyVoice3 cuts at
+          to 640 ms (`piece_frames=`). SpeechT5 cuts at its mel frames, each piece through the postnet
+          and HiFi-GAN over a window holding their receptive field (34 frames either side): 32 ms
+          first, then pieces growing to 4.1 s (`piece_frames=` fixes the count, 0 is the whole
+          utterance), within f32 rounding of `infer` (~1e-4 on a long text: HiFi-GAN amplifies the
+          convolutions' rounding). CosyVoice3 cuts at
           its reference's hops of speech tokens (the first 1 to 2 s of audio, then 2 s, then 4 s),
           re-running the flow over every token so far in its STREAMING mode, as upstream's
           `tts(stream=True)` does: the join is `infer(..., streaming=1)`, not the default full-attention
