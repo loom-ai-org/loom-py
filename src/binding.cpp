@@ -279,7 +279,8 @@ private:
 // Python side cuts them by `width`, which the engine has already checked divides them.
 class FrameStream {
 public:
-    FrameStream(loom::LoomLuaBridge& bridge, const loom::GgufModel& model) : stream_(bridge, model) {}
+    FrameStream(loom::LoomLuaBridge& bridge, const loom::GgufModel& model, loom::audio::FrameStream::Inputs inputs)
+        : stream_(bridge, model, std::move(inputs)) {}
 
     py::dict push(const std::vector<float>& samples) { return update(stream_.push(samples)); }
     py::dict finish() { return update(stream_.finish()); }
@@ -798,11 +799,17 @@ public:
         return std::make_unique<Stream>(*bridge_, *model_, std::move(args));
     }
 
-    std::unique_ptr<FrameStream> open_frame_stream() {
+    // `inputs` go to the driver's `stream_open` (MarbleNet's `lookahead_frames`, loom.cpp ADR-120).
+    std::unique_ptr<FrameStream> open_frame_stream(const py::dict& inputs) {
         if (driver_.empty()) {
             throw std::runtime_error("this GGUF carries no driver script, so there is nothing to stream.");
         }
-        return std::make_unique<FrameStream>(*bridge_, *model_);
+        loom::audio::FrameStream::Inputs args;
+        for (auto item : inputs) {
+            const std::string key = item.first.cast<std::string>();
+            args.emplace(key, to_value(key, item.second));
+        }
+        return std::make_unique<FrameStream>(*bridge_, *model_, std::move(args));
     }
 
     py::object call(const std::string& fn_name, const py::dict& inputs) {
@@ -1022,7 +1029,7 @@ PYBIND11_MODULE(_loom, m) {
         .def("can_stream", &Model::can_stream)
         .def("open_stream", &Model::open_stream, py::arg("inputs") = py::dict(), py::arg("language") = "",
              py::keep_alive<0, 1>())
-        .def("open_frame_stream", &Model::open_frame_stream, py::keep_alive<0, 1>())
+        .def("open_frame_stream", &Model::open_frame_stream, py::arg("inputs") = py::dict(), py::keep_alive<0, 1>())
         .def("can_stream_speech", &Model::can_stream_speech)
         .def("open_speech_stream", &Model::open_speech_stream, py::arg("inputs"), py::keep_alive<0, 1>())
         .def("open_codec_stream", &Model::open_codec_stream, py::arg("inputs"), py::keep_alive<0, 1>())

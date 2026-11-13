@@ -332,7 +332,8 @@ class _FakeHandle:
         return self.token_stream
 
     # -- the audio-in rows-out door (loom.cpp ADR-106) ----------------------------------------------
-    def open_frame_stream(self):
+    def open_frame_stream(self, inputs=None):
+        self.frame_stream_inputs = dict(inputs or {})
         if not self.can_stream():
             raise RuntimeError("this model's driver has no live path")
         c = self._contract
@@ -1339,6 +1340,18 @@ class TestFrameStream:
         got = stream.push([0.0, 0.0])
         assert isinstance(got, loom.FrameEmbeddings) and got.dim == 3
         assert got.rows == [[1.0, 0.5, 0.5]] and got.times == [1 / 50.0]
+
+    def test_options_reach_stream_open(self):
+        """MarbleNet's `lookahead_frames` (loom.cpp ADR-120), and any other option, go to the driver's
+        `stream_open` as numbers; none at all is an empty table, as before."""
+        handle = _FakeHandle([], contract=dict(_VAD_CONTRACT, can_stream=True))
+        model = _model(handle)
+        model.speech2class.stream(lookahead_frames=20)
+        assert handle.frame_stream_inputs == {"lookahead_frames": 20.0}
+        model.speech2class.stream()
+        assert handle.frame_stream_inputs == {}
+        with pytest.raises(TypeError):
+            model.speech2class.stream(lookahead_frames=True)
 
     def test_what_cannot_stream_says_so(self):
         # A clip model is never a frame stream, whatever its driver exports.
