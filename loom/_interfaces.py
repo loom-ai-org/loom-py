@@ -612,14 +612,20 @@ class Speech2Class(Interface):
         """
         return self._model.classify_audio(waveform)
 
-    def stream(self) -> FrameStream:
+    def stream(self, **options) -> FrameStream:
         """Classify live (`FrameStream`): push audio as it arrives, read each frame's distribution once its
         audio is in. Per-frame models only -- a clip's one row needs the whole clip. Raises
         `UnsupportedTask` on a model that is not speech2class, and `RuntimeError` on one whose file has no
-        live path (`model.can_stream_frames`)."""
+        live path (`model.can_stream_frames`).
+
+        Silero VAD answers each 32 ms frame as soon as it is in. Frame-VAD MarbleNet's frames read 1.46 s
+        of audio after them (73 frames), so by default a frame is answered that late, with exactly one
+        call's probabilities; `lookahead_frames=` answers sooner from less of that context, and the
+        probabilities move (on jfk: 20 frames, 400 ms, flips 7 of 550 decisions at 0.5; 40 frames, 800 ms,
+        flips 2)."""
         if not self.supported:
             raise self._unsupported()
-        return self._model.frame_stream()
+        return self._model.frame_stream(**options)
 
 
 class Speech2Embeddings(Interface):
@@ -640,11 +646,13 @@ class Speech2Embeddings(Interface):
         """
         return self._model.embed(waveform)
 
-    def stream(self) -> FrameStream:
-        """Embed live (`FrameStream`), for a frame embedder: each frame's vector once its audio is in."""
+    def stream(self, **options) -> FrameStream:
+        """Embed live (`FrameStream`), for a frame embedder: each frame's vector once its audio is in.
+        WakeHuBERT is causal, so a frame's vector comes back as soon as its 320 samples are in, computed
+        over the 2.5 s before it, as upstream advises. `options` go to the driver's `stream_open`."""
         if not self.supported:
             raise self._unsupported()
-        return self._model.frame_stream()
+        return self._model.frame_stream(**options)
 
 
 class Text2Speech(Interface):

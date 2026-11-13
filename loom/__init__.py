@@ -699,11 +699,12 @@ class Model:
         return self.contract.get("output_granularity") == "frame" and (
             self.speech2class.supported or self.speech2embeddings.supported)
 
-    def frame_stream(self) -> "FrameStream":
+    def frame_stream(self, **options: Any) -> "FrameStream":
         """A live frame classifier or embedder (`FrameStream`); `speech2class.stream()` and
         `speech2embeddings.stream()` land here. The engine's `FrameStream` refuses a clip model, a file
-        without a declared row width and one with no live path, each by name."""
-        return FrameStream(self._handle.open_frame_stream())
+        without a declared row width and one with no live path, each by name. `options` go to the driver's
+        `stream_open`; a file ignores one it does not read."""
+        return FrameStream(self._handle.open_frame_stream({k: _as_value(k, v) for k, v in options.items()}))
 
     def stream(self, *, language: str | None = None, **options: Any) -> "TranscriptStream":
         """Open a live transcription: push audio as it arrives, read the transcript as it grows.
