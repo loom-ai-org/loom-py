@@ -742,7 +742,7 @@ class Text2Speech(Interface):
         Takes exactly `infer`'s arguments. **Two ways it can be cut, and `exact` says which:**
 
         * A file whose driver streams (`model.can_stream_speech`: Pocket-TTS, Soprano, VoxCPM2,
-          CosyVoice3, LFM2.5-Audio, Voxtral-4B-TTS, re-exported) is cut by the driver, and the pieces joined are `infer`'s waveform. `exact` is True. Soprano cuts
+          CosyVoice3, LFM2.5-Audio, Voxtral-4B-TTS, Chatterbox, re-exported) is cut by the driver, and the pieces joined are `infer`'s waveform. `exact` is True. Soprano cuts
           at its hidden rows, each piece decoded over a window holding the decoder's whole receptive
           field as its reference's `infer_stream` does, so the join is sample for sample: 64 ms of audio
           first, then pieces growing to 1 s (`piece_tokens=` fixes the row count, 0 is a sentence). Pocket-TTS cuts at its latent frames, decoded with the decoder's state carried between
@@ -763,7 +763,14 @@ class Text2Speech(Interface):
           exported before loom.cpp ADR-112's 2026-11-12 amendment does not: pin `draws`, `noise` and
           `nsf_noise` there). Even against `streaming=1` it matches on the mel (~1e-3), not sample for
           sample: the vocoder's sine phase (a running sum of F0) turns that rounding into O(1) sample
-          differences.
+          differences. Chatterbox cuts at hops of speech tokens the same way (1 s, then 2 s, then 4 s),
+          re-running its flow over every token so far with the last 3 as look-ahead, as CosyVoice2's
+          stream does with the hook Chatterbox kept; its flow attends over the whole utterance, so no
+          `infer` is the join: the tokens are `infer`'s (a `seed` draws them alike both ways), and the
+          audio a little different -- nearer `infer`'s than `infer` under another seed's noise is.
+          `piece_tokens=` fixes the hop, 0 is one piece. Each hop re-runs the flow over everything so
+          far, so the whole stream costs more than `infer` (twice as much for a 3.5 s sentence on a CPU),
+          while its first piece comes about when the first second of tokens is drawn.
         * Any other model is cut HERE, by splitting `text` into sentences and calling `infer` on each.
           Each piece is that sentence's own audio, and the pieces joined differ from one `infer` over
           the whole text wherever the model would have carried prosody across a sentence boundary.
