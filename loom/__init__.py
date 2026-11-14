@@ -718,7 +718,14 @@ class Model:
         transcript at `finish` does not depend on it -- and a file ignores an option it does not read.
         Nemotron-Labs-Unified-ASR takes its streaming mode's `left_seconds`, `chunk_seconds` and
         `right_seconds` (5.6, 0.56, 0.56 by default; latency is chunk + right, from 0.16 s): those do
-        change the transcript, as they do in NeMo's own streaming.
+        change the transcript, as they do in NeMo's own streaming. Qwen3-ASR and oruk-loop stream the
+        way upstream's `streaming_transcribe` does (loom.cpp ADR-121): every `update_seconds` (2 s) all
+        the audio so far is re-decoded, from the third update with the previous answer minus its last
+        `unfixed_tokens` (5) ids as the start of the reply (`unfixed_chunks`, 2, updates go without).
+        Only the encoder's 8 s window still filling is re-encoded; the transcript so far is re-read at
+        every update, so an update still costs more late in a stream than early. The stream is refused
+        once it outgrows the decoder's cache (about four minutes for Qwen3-ASR, 45 s for oruk-loop):
+        split it at a pause. The cadence changes the transcript.
 
         The engine's own `TranscriptionStream`, the same one `loom_cli --stream` runs. Each stream's
         state -- caches, cursors, audio not yet decoded -- is the engine's and belongs to that stream
