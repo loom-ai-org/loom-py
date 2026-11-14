@@ -721,6 +721,10 @@ class Model:
         change the transcript, as they do in NeMo's own streaming. Parakeet TDT and RNN-T take the same
         three, at NeMo's streaming script's defaults (10, 2, 2; loom.cpp ADR-122); below about 1 s of
         right context NeMo's own stream of these offline models falls apart, and so does this one.
+        Conformer-CTC and Citrinet stream as NeMo's `FrameBatchASR` does (loom.cpp ADR-123):
+        `chunk_seconds` of mel at a time into a `total_seconds` buffer (1.6 and 4 by default; the
+        latency is about chunk + (total - chunk) / 2); the transcript is NeMo's buffered one, not the
+        one pass's.
         Qwen3-ASR and oruk-loop stream the
         way upstream's `streaming_transcribe` does (loom.cpp ADR-121): every `update_seconds` (2 s) all
         the audio so far is re-decoded, from the third update with the previous answer minus its last
