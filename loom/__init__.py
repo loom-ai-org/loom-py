@@ -718,7 +718,10 @@ class Model:
         transcript at `finish` does not depend on it -- and a file ignores an option it does not read.
         Nemotron-Labs-Unified-ASR takes its streaming mode's `left_seconds`, `chunk_seconds` and
         `right_seconds` (5.6, 0.56, 0.56 by default; latency is chunk + right, from 0.16 s): those do
-        change the transcript, as they do in NeMo's own streaming. Qwen3-ASR and oruk-loop stream the
+        change the transcript, as they do in NeMo's own streaming. Parakeet TDT and RNN-T take the same
+        three, at NeMo's streaming script's defaults (10, 2, 2; loom.cpp ADR-122); below about 1 s of
+        right context NeMo's own stream of these offline models falls apart, and so does this one.
+        Qwen3-ASR and oruk-loop stream the
         way upstream's `streaming_transcribe` does (loom.cpp ADR-121): every `update_seconds` (2 s) all
         the audio so far is re-decoded, from the third update with the previous answer minus its last
         `unfixed_tokens` (5) ids as the start of the reply (`unfixed_chunks`, 2, updates go without).
