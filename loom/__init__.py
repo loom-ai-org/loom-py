@@ -724,7 +724,12 @@ class Model:
         Conformer-CTC and Citrinet stream as NeMo's `FrameBatchASR` does (loom.cpp ADR-123):
         `chunk_seconds` of mel at a time into a `total_seconds` buffer (1.6 and 4 by default; the
         latency is about chunk + (total - chunk) / 2); the transcript is NeMo's buffered one, not the
-        one pass's.
+        one pass's. Canary streams as NeMo's AED streaming script does (loom.cpp ADR-124): the same
+        `left_seconds`/`chunk_seconds`/`right_seconds` (10, 2, 2) and `policy`, 0 for wait-k (one
+        token a chunk, the rest at the end; NeMo's default) or 1 for AlignAtt (tokens as the decoder's
+        attention moves past them, a phrase a chunk); `language`/`target_language` as `transcribe`
+        takes them. Its prompt is NeMo's streaming one, so the text opens with `<|emo:undefined|>`
+        as NeMo's does.
         Qwen3-ASR and oruk-loop stream the
         way upstream's `streaming_transcribe` does (loom.cpp ADR-121): every `update_seconds` (2 s) all
         the audio so far is re-decoded, from the third update with the previous answer minus its last
