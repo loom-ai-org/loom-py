@@ -75,6 +75,10 @@ set(CMAKE_BUILD_WITH_INSTALL_RPATH ON)
 # reduction order and internal precision.
 set(GGML_CUDA_FA OFF CACHE BOOL "" FORCE)
 
+# CUDA graphs: a standalone ggml defaults them OFF; loom.cpp's own build turns them on (cmake/Dependencies.cmake,
+# LOOM_CUDA_GRAPHS). A decode loop that reuses its graph replays a captured CUDA graph per step.
+set(GGML_CUDA_GRAPHS ON CACHE BOOL "" FORCE)
+
 # Staged layout first (packaging/stage.py assembles it for a build container, which only
 # mounts this directory), then the in-repo layout.
 if(EXISTS ${CMAKE_CURRENT_LIST_DIR}/cmake/BackendPackage.cmake)

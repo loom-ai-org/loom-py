@@ -205,12 +205,74 @@ class FrameEmbeddings:
         return [self.frame_offset + i / self.frame_rate for i in range(len(self.rows))]
 
 
+class FrameStream:
+    """A frame classifier's or frame embedder's rows as the audio arrives, from `speech2class.stream()` or
+    `speech2embeddings.stream()` (loom.cpp ADR-106).
+
+        vad = model.speech2class.stream()
+        for piece in microphone():   # mono floats at contract["sample_rate"], any length
+            for t, p in zip(*(u := vad.push(piece)).times, u.probability("speech")):
+                ...
+        vad.finish()
+
+    Each `push` returns what one `infer` call returns -- an `AudioClasses` or a `FrameEmbeddings` -- for the
+    frames that push completed, with `frame_offset` set to the first one's time in the stream, so `.times`
+    are stream times. The rows of every call joined are `infer`'s rows over the whole audio: where the
+    pieces break never changes them. The cut into rows and their times are the engine's.
+    """
+
+    def __init__(self, handle):
+        self._handle = handle
+        layout = handle.layout()
+        self.kind = str(layout["kind"])
+        self.labels = list(layout["labels"])
+        self.width = int(layout["width"])
+        self.frame_rate = float(layout["frame_rate"])
+        self.frame_offset = float(layout["frame_offset"])
+
+    def push(self, samples: Sequence[float]) -> "AudioClasses | FrameEmbeddings":
+        """Add audio and answer every frame it completes."""
+        return self._answer(self._handle.push([float(x) for x in samples]))
+
+    def finish(self) -> "AudioClasses | FrameEmbeddings":
+        """End the input: answer what is left. Takes no push afterwards until `reset`."""
+        return self._answer(self._handle.finish())
+
+    def reset(self) -> None:
+        """Drop everything and start again on the same model."""
+        self._handle.reset()
+
+    @property
+    def rows(self) -> int:
+        """Frames answered so far."""
+        return int(self._handle.rows())
+
+    @property
+    def finished(self) -> bool:
+        return bool(self._handle.finished())
+
+    @property
+    def state_bytes(self) -> int:
+        """What this stream's state holds, on the device and on the host."""
+        return int(self._handle.state_bytes())
+
+    def _answer(self, raw: dict):
+        flat, w = raw["values"], self.width
+        rows = [list(flat[r * w:(r + 1) * w]) for r in range(int(raw["n_rows"]))]
+        offset = self.frame_offset + int(raw["first_row"]) / self.frame_rate
+        if self.kind == "class":
+            return AudioClasses(granularity="frame", labels=list(self.labels), probabilities=rows,
+                                frame_rate=self.frame_rate, frame_offset=offset)
+        return FrameEmbeddings(rows=rows, dim=w, frame_rate=self.frame_rate, frame_offset=offset)
+
+
 class SpeechStream:
     """A TTS's audio handed back a piece at a time, from `text2speech.stream`. Iterate it for one
     :class:`Audio` per piece, in order; a piece that made no sound is skipped.
 
     `exact` says how it was cut. True: by the model's own driver (loom.cpp ADR-100, ADR-101), and the pieces
-    joined are `infer`'s waveform, to within f32 rounding where the driver decodes a frame at a time. False:
+    joined are `infer`'s waveform, to within f32 rounding where the driver decodes a frame at a time -- or,
+    for a model whose reference streams in a mode of its own (CosyVoice3, ADR-112), `infer` in that mode. False:
     here, a sentence of the text per `infer` call, which differs from one call over the whole text at the
     joins.
     """
@@ -526,13 +588,15 @@ class Speech2Text(Interface):
             waveform, language=language, task=task, target_language=target_language,
             timestamps=timestamps, condition_on_previous=condition_on_previous)
 
-    def stream(self):
+    def stream(self, **options):
         """A live transcription (`Model.stream`): push audio as it arrives, read text as it grows.
-        Raises `UnsupportedTask` on a model that is not speech2text, and `RuntimeError` on one whose
-        file has no live path yet (`model.can_stream`)."""
+        `language` is a name, as `transcribe` takes it; `options` go to the driver (`update_seconds` for a
+        re-decoding file). Raises `UnsupportedTask` on a
+        model that is not speech2text, and `RuntimeError` on one whose file has no live path yet
+        (`model.can_stream`)."""
         if not self.supported:
             raise self._unsupported()
-        return self._model.stream()
+        return self._model.stream(**options)
 
 
 class Speech2Class(Interface):
@@ -547,6 +611,21 @@ class Speech2Class(Interface):
         segmentation model.
         """
         return self._model.classify_audio(waveform)
+
+    def stream(self, **options) -> FrameStream:
+        """Classify live (`FrameStream`): push audio as it arrives, read each frame's distribution once its
+        audio is in. Per-frame models only -- a clip's one row needs the whole clip. Raises
+        `UnsupportedTask` on a model that is not speech2class, and `RuntimeError` on one whose file has no
+        live path (`model.can_stream_frames`).
+
+        Silero VAD answers each 32 ms frame as soon as it is in. Frame-VAD MarbleNet's frames read 1.46 s
+        of audio after them (73 frames), so by default a frame is answered that late, with exactly one
+        call's probabilities; `lookahead_frames=` answers sooner from less of that context, and the
+        probabilities move (on jfk: 20 frames, 400 ms, flips 7 of 550 decisions at 0.5; 40 frames, 800 ms,
+        flips 2)."""
+        if not self.supported:
+            raise self._unsupported()
+        return self._model.frame_stream(**options)
 
 
 class Speech2Embeddings(Interface):
@@ -566,6 +645,14 @@ class Speech2Embeddings(Interface):
         of the application.
         """
         return self._model.embed(waveform)
+
+    def stream(self, **options) -> FrameStream:
+        """Embed live (`FrameStream`), for a frame embedder: each frame's vector once its audio is in.
+        WakeHuBERT is causal, so a frame's vector comes back as soon as its 320 samples are in, computed
+        over the 2.5 s before it, as upstream advises. `options` go to the driver's `stream_open`."""
+        if not self.supported:
+            raise self._unsupported()
+        return self._model.frame_stream(**options)
 
 
 class Text2Speech(Interface):
@@ -662,12 +749,40 @@ class Text2Speech(Interface):
 
         Takes exactly `infer`'s arguments. **Two ways it can be cut, and `exact` says which:**
 
-        * A file whose driver streams (`model.can_stream_speech`: Pocket-TTS, Soprano, re-exported) is
-          cut by the driver, and the pieces joined are `infer`'s waveform. `exact` is True. Soprano cuts
-          at its sentences, which its reference makes from a fresh state, so the join is sample for
-          sample. Pocket-TTS cuts at its latent frames, decoded with the decoder's state carried between
+        * A file whose driver streams (`model.can_stream_speech`: Pocket-TTS, Soprano, VoxCPM2,
+          CosyVoice3, LFM2.5-Audio, Voxtral-4B-TTS, Chatterbox, SpeechT5, re-exported) is cut by the driver, and the pieces joined are `infer`'s waveform. `exact` is True. Soprano cuts
+          at its hidden rows, each piece decoded over a window holding the decoder's whole receptive
+          field as its reference's `infer_stream` does, so the join is sample for sample: 64 ms of audio
+          first, then pieces growing to 1 s (`piece_tokens=` fixes the row count, 0 is a sentence). Pocket-TTS cuts at its latent frames, decoded with the decoder's state carried between
           calls -- 80 ms of audio first, then pieces growing to 640 ms (`piece_frames=` fixes the count,
-          0 is a sentence chunk) -- and the join is within f32 rounding (~1e-6) of `infer`.
+          0 is a sentence chunk) -- and the join is within f32 rounding (~1e-6) of `infer`. VoxCPM2 cuts
+          at its latent patches the same way: 160 ms first, then pieces growing to 1.28 s
+          (`piece_patches=` fixes the count, 0 is the whole clip); unlike `infer` it never retries a
+          generation that ran out of budget, as upstream's streaming mode does not. LFM2.5-Audio cuts
+          at its audio frames, each piece detokenized over a window holding the detokenizer's receptive
+          field: 60 ms first, then pieces growing to 640 ms (`piece_frames=` fixes the count, 0 is the
+          whole turn), within f32 rounding of `infer`. Voxtral-4B-TTS cuts at its frames the same way,
+          its causal codec decoding each piece from 32 frames before it: 80 ms first, then pieces growing
+          to 640 ms (`piece_frames=`). SpeechT5 cuts at its mel frames, each piece through the postnet
+          and HiFi-GAN over a window holding their receptive field (34 frames either side): 32 ms
+          first, then pieces growing to 4.1 s (`piece_frames=` fixes the count, 0 is the whole
+          utterance), within f32 rounding of `infer` (~1e-4 on a long text: HiFi-GAN amplifies the
+          convolutions' rounding). CosyVoice3 cuts at
+          its reference's hops of speech tokens (the first 1 to 2 s of audio, then 2 s, then 4 s),
+          re-running the flow over every token so far in its STREAMING mode, as upstream's
+          `tts(stream=True)` does: the join is `infer(..., streaming=1)`, not the default full-attention
+          `infer`, whose audio differs -- with the same `seed`, since both draw in one order (a file
+          exported before loom.cpp ADR-112's 2026-11-12 amendment does not: pin `draws`, `noise` and
+          `nsf_noise` there). Even against `streaming=1` it matches on the mel (~1e-3), not sample for
+          sample: the vocoder's sine phase (a running sum of F0) turns that rounding into O(1) sample
+          differences. Chatterbox cuts at hops of speech tokens the same way (1 s, then 2 s, then 4 s),
+          re-running its flow over every token so far with the last 3 as look-ahead, as CosyVoice2's
+          stream does with the hook Chatterbox kept; its flow attends over the whole utterance, so no
+          `infer` is the join: the tokens are `infer`'s (a `seed` draws them alike both ways), and the
+          audio a little different -- nearer `infer`'s than `infer` under another seed's noise is.
+          `piece_tokens=` fixes the hop, 0 is one piece. Each hop re-runs the flow over everything so
+          far, so the whole stream costs more than `infer` (twice as much for a 3.5 s sentence on a CPU),
+          while its first piece comes about when the first second of tokens is drawn.
         * Any other model is cut HERE, by splitting `text` into sentences and calling `infer` on each.
           Each piece is that sentence's own audio, and the pieces joined differ from one `infer` over
           the whole text wherever the model would have carried prosody across a sentence boundary.

@@ -35,12 +35,13 @@ from . import _loom
 from . import phonemizers
 from ._hub import download, list_files
 from ._interfaces import (ALL_INTERFACES, Audio, AudioClasses, Classification, Codes2Speech,
-                          CodecStream, CodesStream, FrameEmbeddings, Interface, SpeechStream,
+                          CodecStream, CodesStream, FrameEmbeddings, FrameStream, Interface,
+                          SpeechStream,
                           Speech2Class, Speech2Embeddings,
                           Speech2Text, Text2Class, Text2Codes, Text2Speech, Text2Text, TokenClass,
                           UnsupportedTask)
 
-__all__ = ["Model", "Voice", "Tokenizer", "Transcription", "TextStream", "SpeechStream", "CodesStream", "CodecStream", "TranscriptStream", "TranscriptUpdate", "Segment", "Audio", "Classification", "TokenClass",
+__all__ = ["Model", "Voice", "Tokenizer", "Transcription", "TextStream", "SpeechStream", "CodesStream", "CodecStream", "FrameStream", "TranscriptStream", "TranscriptUpdate", "Segment", "Audio", "Classification", "TokenClass",
            "AudioClasses", "FrameEmbeddings",
            "Interface", "UnsupportedTask", "Text2Text", "Speech2Text", "Text2Speech", "Text2Class",
            "Text2Codes", "Codes2Speech", "Speech2Class", "Speech2Embeddings",
@@ -689,8 +690,49 @@ class Model:
         functions for its token stream (`can_stream_tokens`)."""
         return bool(self._handle.can_stream()) and self.speech2text.supported
 
-    def stream(self) -> "TranscriptStream":
+    @property
+    def can_stream_frames(self) -> bool:
+        """Whether `speech2class.stream()` / `speech2embeddings.stream()` can open (loom.cpp ADR-106): the
+        driver has its live path and the file answers per frame."""
+        if not (bool(self._handle.can_stream()) and self.contract.get("input_kind") == "audio"):
+            return False
+        return self.contract.get("output_granularity") == "frame" and (
+            self.speech2class.supported or self.speech2embeddings.supported)
+
+    def frame_stream(self, **options: Any) -> "FrameStream":
+        """A live frame classifier or embedder (`FrameStream`); `speech2class.stream()` and
+        `speech2embeddings.stream()` land here. The engine's `FrameStream` refuses a clip model, a file
+        without a declared row width and one with no live path, each by name. `options` go to the driver's
+        `stream_open`; a file ignores one it does not read."""
+        return FrameStream(self._handle.open_frame_stream({k: _as_value(k, v) for k, v in options.items()}))
+
+    def stream(self, *, language: str | None = None, **options: Any) -> "TranscriptStream":
         """Open a live transcription: push audio as it arrives, read the transcript as it grows.
+
+        `language` is a name, as `transcribe` takes it (Nemotron 3.5 ASR: `"de-DE"`, `"auto"`); the
+        engine resolves it from the file's declared table and refuses one the file does not declare.
+        Omitted, the file decodes with its own default.
+
+        `options` go to the driver's `stream_open`: a re-decoding file takes `update_seconds`, how much new
+        audio waits for each decode (Moonshine streaming: 0.5 s by default). It is a cost knob -- the
+        transcript at `finish` does not depend on it -- and a file ignores an option it does not read.
+        Nemotron-Labs-Unified-ASR takes its streaming mode's `left_seconds`, `chunk_seconds` and
+        `right_seconds` (5.6, 0.56, 0.56 by default; latency is chunk + right, from 0.16 s): those do
+        change the transcript, as they do in NeMo's own streaming. Parakeet TDT and RNN-T take the same
+        three, at NeMo's streaming script's defaults (10, 2, 2; loom.cpp ADR-122); below about 1 s of
+        right context NeMo's own stream of these offline models falls apart, and so does this one.
+        Conformer-CTC and Citrinet stream as NeMo's `FrameBatchASR` does (loom.cpp ADR-123):
+        `chunk_seconds` of mel at a time into a `total_seconds` buffer (1.6 and 4 by default; the
+        latency is about chunk + (total - chunk) / 2); the transcript is NeMo's buffered one, not the
+        one pass's.
+        Qwen3-ASR and oruk-loop stream the
+        way upstream's `streaming_transcribe` does (loom.cpp ADR-121): every `update_seconds` (2 s) all
+        the audio so far is re-decoded, from the third update with the previous answer minus its last
+        `unfixed_tokens` (5) ids as the start of the reply (`unfixed_chunks`, 2, updates go without).
+        Only the encoder's 8 s window still filling is re-encoded; the transcript so far is re-read at
+        every update, so an update still costs more late in a stream than early. The stream is refused
+        once it outgrows the decoder's cache (about four minutes for Qwen3-ASR, 45 s for oruk-loop):
+        split it at a pause. The cadence changes the transcript.
 
         The engine's own `TranscriptionStream`, the same one `loom_cli --stream` runs. Each stream's
         state -- caches, cursors, audio not yet decoded -- is the engine's and belongs to that stream
@@ -704,7 +746,9 @@ class Model:
             raise self.speech2text._unsupported()
         # A file exported before the contract carried a rate was read at 16 kHz, as `transcribe` assumes.
         rate = int(self.contract.get("sample_rate") or 0) or 16000
-        return TranscriptStream(self._handle.open_stream(), sample_rate=rate)
+        return TranscriptStream(self._handle.open_stream({k: _as_value(k, v) for k, v in options.items()},
+                                                         language or ""),
+                                sample_rate=rate)
 
     def classify(self, tokens: Sequence[int], *, strip_special: bool = True,
                  **driver_inputs: Any) -> "Classification":
@@ -810,9 +854,10 @@ class TranscriptUpdate:
     """What one `TranscriptStream.push` or `finish` returns.
 
     `delta` is the text this call added and `text` the whole transcript so far. `revised` is set when
-    earlier text changed, and `delta` is then the whole of `text`; a transducer's emissions are final, so
-    it is False for every streaming file today. `tokens` are the ids this call decoded; `seconds` is the
-    audio pushed so far.
+    earlier text changed, and `delta` is then the whole of `text`. A transducer's emissions are final, so
+    it is False for those files; an encoder-decoder that re-decodes as audio arrives (Moonshine streaming,
+    loom.cpp ADR-106) revises, and its text at `finish` is the one-pass transcript. `tokens` are the ids
+    this call decoded -- for a re-decoding file, the whole hypothesis; `seconds` is the audio pushed so far.
     """
     text: str
     delta: str

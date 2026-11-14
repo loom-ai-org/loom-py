@@ -150,6 +150,51 @@ def test_a_live_stream_transcribes_what_one_pass_does(model):
     assert a.text == want and b.text == want
 
 
+def test_a_frame_stream_answers_what_one_pass_does(model):
+    """The audio-in rows-out door (loom.cpp ADR-106), on whatever frame classifier or embedder is
+    configured: the rows of every push joined are `infer`'s rows, at the same times, however the audio is
+    cut, with two streams open at once. Skips for a file with no live path or a clip answer."""
+    if not model.can_stream_frames:
+        pytest.skip(f"{model.architecture} has no frame stream (a live path and a per-frame answer)")
+    import math
+    import wave
+    rate = int(model.contract.get("sample_rate") or 16000)
+    if os.environ.get("LOOM_TEST_WAV"):
+        with wave.open(os.environ["LOOM_TEST_WAV"]) as w:
+            assert w.getframerate() == rate and w.getnchannels() == 1 and w.getsampwidth() == 2
+            raw = w.readframes(w.getnframes())
+        clip = [int.from_bytes(raw[i:i + 2], "little", signed=True) / 32768.0 for i in range(0, len(raw), 2)]
+    else:
+        clip = [0.3 * math.sin(2 * math.pi * (200 + 400 * t / (3 * rate)) * t / rate)
+                * math.sin(math.pi * t / (3 * rate)) for t in range(3 * rate)]
+    door = model.speech2class if model.speech2class.supported else model.speech2embeddings
+    one = door.infer(clip)
+    want = one.probabilities if hasattr(one, "probabilities") else one.rows
+    assert want, "no rows would make the comparison below vacuous"
+
+    def rows_of(u):
+        return u.probabilities if hasattr(u, "probabilities") else u.rows
+
+    a, b = door.stream(), door.stream()
+    got_a, got_b, times = [], [], []
+    for at in range(0, len(clip), 1999):
+        u = a.push(clip[at:at + 1999])
+        got_a += rows_of(u)
+        times += u.times
+        if at % (2 * 1999) == 0:
+            got_b += rows_of(b.push(clip[at:at + 2 * 1999]))
+    u = a.finish()
+    got_a += rows_of(u)
+    times += u.times
+    got_b += rows_of(b.finish())
+    # A push runs its graphs over fewer frames than one call, so its sums are split differently (1.9e-06
+    # on silero-vad); a row in the wrong place or a dropped carry is O(0.1).
+    for got in (got_a, got_b):
+        assert len(got) == len(want)
+        assert max(abs(x - y) for r, s in zip(got, want) for x, y in zip(r, s)) < 1e-4
+    assert times == pytest.approx(one.times)
+
+
 def test_a_token_stream_is_what_generate_returns(model):
     """The tokens-out door (loom.cpp ADR-099), on whatever LM is configured: the pieces join to
     `generate`'s text, greedy and seeded, and two streams pulled in turn -- with a one-pass `generate`
