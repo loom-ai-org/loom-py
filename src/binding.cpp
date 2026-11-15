@@ -22,6 +22,7 @@
 #include "loom/core/text_generate.h"
 #include "loom/core/text_classify.h"
 #include "loom/core/transcribe.h"
+#include "loom/core/transcribe_stream.h"
 
 #include <ggml.h>
 
@@ -242,6 +243,35 @@ loom::LoomLuaBridge::Value to_value(const std::string& key, const py::handle& va
 // Owns everything the engine needs alive for the duration of a session, in an order that matters:
 // the bridge holds non-owning references to the model and the cache, so they are declared first and
 // destroyed last.
+// One live transcription on a loaded model: the engine's `TranscriptionStream`, whose state is its own
+// (ADR-098), so several of these on one `Model` do not see each other. Python keeps the `Model` alive for
+// as long as a stream of it is (`keep_alive` below), since the stream holds its bridge by reference.
+class Stream {
+public:
+    Stream(loom::LoomLuaBridge& bridge, const loom::GgufModel& model) : stream_(bridge, model) {}
+
+    py::dict push(const std::vector<float>& samples) { return update(stream_.push(samples)); }
+    py::dict finish() { return update(stream_.finish()); }
+    void reset() { stream_.reset(); }
+    std::string text() const { return stream_.text(); }
+    std::vector<int32_t> tokens() const { return stream_.tokens(); }
+    bool finished() const { return stream_.finished(); }
+    size_t state_bytes() const { return stream_.state().tensor_bytes() + stream_.state().value_bytes(); }
+
+private:
+    static py::dict update(const loom::audio::TranscriptUpdate& u) {
+        py::dict d;
+        d["tokens"] = u.tokens;
+        d["text"] = u.text;
+        d["delta"] = u.delta;
+        d["revised"] = u.revised;
+        d["samples"] = u.samples;
+        return d;
+    }
+
+    loom::audio::TranscriptionStream stream_;
+};
+
 class Model {
 public:
     // `device` is a loom device spec -- "" (which defers to $LOOM_DEVICE, then autodetection), "auto",
@@ -575,6 +605,17 @@ public:
         return out;
     }
 
+    // Whether the driver exports the live door's three functions (`TranscriptionStream::supported`).
+    bool can_stream() const { return bridge_ && !driver_.empty() && loom::audio::TranscriptionStream::supported(*bridge_); }
+
+    // A new live transcription. Raises when the file's driver has no live path.
+    std::unique_ptr<Stream> open_stream() {
+        if (driver_.empty()) {
+            throw std::runtime_error("this GGUF carries no driver script, so there is nothing to stream.");
+        }
+        return std::make_unique<Stream>(*bridge_, *model_);
+    }
+
     py::object call(const std::string& fn_name, const py::dict& inputs) {
         if (driver_.empty()) {
             throw std::runtime_error(
@@ -717,6 +758,15 @@ PYBIND11_MODULE(_loom, m) {
         return out;
     }, "Every ggml device visible to this process, in registration order.");
 
+    py::class_<Stream>(m, "Stream")
+        .def("push", &Stream::push, py::arg("samples"))
+        .def("finish", &Stream::finish)
+        .def("reset", &Stream::reset)
+        .def("text", &Stream::text)
+        .def("tokens", &Stream::tokens)
+        .def("finished", &Stream::finished)
+        .def("state_bytes", &Stream::state_bytes);
+
     py::class_<Model>(m, "Model")
         .def(py::init<const std::string&, const std::string&>(), py::arg("path"),
               py::arg("device") = std::string{})
@@ -741,6 +791,8 @@ PYBIND11_MODULE(_loom, m) {
         .def("decode", &Model::decode, py::arg("ids"))
         .def("call", &Model::call, py::arg("fn_name"), py::arg("inputs"))
         .def("transcribe", &Model::transcribe, py::arg("waveform"), py::arg("options"))
+        .def("can_stream", &Model::can_stream)
+        .def("open_stream", &Model::open_stream, py::keep_alive<0, 1>())
         .def("classify", &Model::classify, py::arg("tokens"), py::arg("strip_special"),
              py::arg("extra_inputs"))
         .def("classify_audio", &Model::classify_audio, py::arg("waveform"))
