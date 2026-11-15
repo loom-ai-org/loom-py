@@ -87,10 +87,13 @@ def test_inference_runs_and_is_deterministic(model):
 def test_a_text_model_goes_from_a_string_to_a_string(model):
     """The end-to-end claim, on whatever real model is configured.
 
-    Skips for a model with no embedded vocabulary -- which is not a gap in the model but a fact about
-    it: the TTS families take phoneme ids a phonemiser produces outside the engine, so there is no
-    text door to test.
+    Skips for a model that does not declare `text2text`. A vocabulary is not the test: it was when this
+    was written, but most TTS files carry one now (Pocket-TTS, Soprano, Chatterbox...), and `generate` on
+    one of those hands back its audio samples as "ids". The declared interface is what says text comes
+    out, as it is for every other door here.
     """
+    if not model.text2text.supported:
+        pytest.skip(f"{model.architecture} is not a text model ({model.contract.get('interface') or 'no interface'})")
     if model.tokenizer is None:
         pytest.skip(f"{model.architecture} embeds no vocabulary; its driver takes ids directly")
 
@@ -108,6 +111,143 @@ def test_the_tokenizer_describes_itself(model):
     if model.tokenizer is None:
         pytest.skip(f"{model.architecture} embeds no vocabulary")
     tokenizer = model.tokenizer
-    assert tokenizer.kind in {"gpt2", "bert", "byt5", "llama", "t5", "ctc", "phonemes",
-                              "supertonic"}, tokenizer.kind
+    # No list of kinds: the binding builds a Tokenizer only for a `tokenizer.ggml.model` tag it dispatches
+    # (an unknown one is no tokenizer, never a failed load), so a list here could only repeat that dispatch
+    # -- and the one that was here did, until six newer kinds (pocket_tts, soprano, ...) fell outside it.
+    assert isinstance(tokenizer.kind, str) and tokenizer.kind, tokenizer.kind
+    assert tokenizer.kind in repr(model)
     assert tokenizer.size > 0
+
+
+def test_a_live_stream_transcribes_what_one_pass_does(model):
+    """The live door (loom.cpp ADR-098), on whatever streaming ASR model is configured: the same
+    transcript as `transcribe`, however the audio is cut into pieces, with two streams open at once.
+    Skips for a file with no live path -- every file exported before streaming."""
+    if not model.can_stream:
+        pytest.skip(f"{model.architecture} has no live path (stream_open / stream_feed / stream_finish)")
+    import math
+    import wave
+    rate = int(model.contract.get("sample_rate") or 16000)
+    if os.environ.get("LOOM_TEST_WAV"):
+        # Real speech, 16-bit mono at the model's rate: a transcript long enough to cross many chunks.
+        with wave.open(os.environ["LOOM_TEST_WAV"]) as w:
+            assert w.getframerate() == rate and w.getnchannels() == 1 and w.getsampwidth() == 2
+            raw = w.readframes(w.getnframes())
+        clip = [int.from_bytes(raw[i:i + 2], "little", signed=True) / 32768.0 for i in range(0, len(raw), 2)]
+    else:
+        # A rising tone with an envelope: not speech, but a deterministic input the encoder answers.
+        clip = [0.3 * math.sin(2 * math.pi * (200 + 400 * t / (3 * rate)) * t / rate)
+                * math.sin(math.pi * t / (3 * rate)) for t in range(3 * rate)]
+    want = model.transcribe(clip).text
+    assert want, "an empty transcript would make the comparison below vacuous"
+    a, b = model.speech2text.stream(), model.speech2text.stream()
+    for at in range(0, len(clip), 1999):
+        a.push(clip[at:at + 1999])
+        if at % (2 * 1999) == 0:
+            b.push(clip[at:at + 2 * 1999])
+    a.finish()
+    b.finish()
+    assert a.text == want and b.text == want
+
+
+def test_a_frame_stream_answers_what_one_pass_does(model):
+    """The audio-in rows-out door (loom.cpp ADR-106), on whatever frame classifier or embedder is
+    configured: the rows of every push joined are `infer`'s rows, at the same times, however the audio is
+    cut, with two streams open at once. Skips for a file with no live path or a clip answer."""
+    if not model.can_stream_frames:
+        pytest.skip(f"{model.architecture} has no frame stream (a live path and a per-frame answer)")
+    import math
+    import wave
+    rate = int(model.contract.get("sample_rate") or 16000)
+    if os.environ.get("LOOM_TEST_WAV"):
+        with wave.open(os.environ["LOOM_TEST_WAV"]) as w:
+            assert w.getframerate() == rate and w.getnchannels() == 1 and w.getsampwidth() == 2
+            raw = w.readframes(w.getnframes())
+        clip = [int.from_bytes(raw[i:i + 2], "little", signed=True) / 32768.0 for i in range(0, len(raw), 2)]
+    else:
+        clip = [0.3 * math.sin(2 * math.pi * (200 + 400 * t / (3 * rate)) * t / rate)
+                * math.sin(math.pi * t / (3 * rate)) for t in range(3 * rate)]
+    door = model.speech2class if model.speech2class.supported else model.speech2embeddings
+    one = door.infer(clip)
+    want = one.probabilities if hasattr(one, "probabilities") else one.rows
+    assert want, "no rows would make the comparison below vacuous"
+
+    def rows_of(u):
+        return u.probabilities if hasattr(u, "probabilities") else u.rows
+
+    a, b = door.stream(), door.stream()
+    got_a, got_b, times = [], [], []
+    for at in range(0, len(clip), 1999):
+        u = a.push(clip[at:at + 1999])
+        got_a += rows_of(u)
+        times += u.times
+        if at % (2 * 1999) == 0:
+            got_b += rows_of(b.push(clip[at:at + 2 * 1999]))
+    u = a.finish()
+    got_a += rows_of(u)
+    times += u.times
+    got_b += rows_of(b.finish())
+    # A push runs its graphs over fewer frames than one call, so its sums are split differently (1.9e-06
+    # on silero-vad); a row in the wrong place or a dropped carry is O(0.1).
+    for got in (got_a, got_b):
+        assert len(got) == len(want)
+        assert max(abs(x - y) for r, s in zip(got, want) for x, y in zip(r, s)) < 1e-4
+    assert times == pytest.approx(one.times)
+
+
+def test_a_token_stream_is_what_generate_returns(model):
+    """The tokens-out door (loom.cpp ADR-099), on whatever LM is configured: the pieces join to
+    `generate`'s text, greedy and seeded, and two streams pulled in turn -- with a one-pass `generate`
+    between their pulls -- each give their own, under both cache modes. Skips for a model that is not
+    text2text, or a file whose loop has no stream functions."""
+    if not model.text2text.supported or not model.can_stream_tokens:
+        pytest.skip(f"{model.architecture} has no token stream")
+    prompt_a, prompt_b = "The history of the city of Rome begins", "A recipe for bread needs"
+    want_a = model.generate(prompt_a, max_new_tokens=24, temperature=0.0)
+    want_b = model.generate(prompt_b, max_new_tokens=24, temperature=0.8, top_k=40, seed=7)
+    assert want_a, "an empty generation would make the comparison below vacuous"
+    assert "".join(model.text2text.stream(prompt_a, max_new_tokens=24, temperature=0.0)) == want_a
+    for mode in ("park", "per-stream"):
+        model.stream_caches = mode
+        a = iter(model.generate_stream(prompt_a, max_new_tokens=24, temperature=0.0, per_pull=3))
+        b = iter(model.generate_stream(prompt_b, max_new_tokens=24, temperature=0.8, top_k=40, seed=7))
+        got_a, got_b = [], []
+        for _ in range(64):
+            got_a.append(next(a, ""))
+            assert model.generate("The three primary colours are", max_new_tokens=4, temperature=0.0)
+            got_b.append(next(b, ""))
+        assert "".join(got_a) == want_a, mode
+        assert "".join(got_b) == want_b, mode
+    model.stream_caches = "auto"
+
+
+def test_a_speech_stream_is_what_infer_returns(model):
+    """The audio-out door (loom.cpp ADR-100, ADR-101), on whatever TTS is configured: a file whose driver
+    streams hands back pieces that join to `infer`'s waveform -- the same sample count, and the same values
+    to within f32 summation order (Pocket-TTS decodes a frame at a time through a state-carrying step,
+    ~1e-6 from its one-call decode; Soprano's sentences are bit for bit). Two streams pulled in turn, with a
+    one-pass `infer` between their pieces, each give exactly what they gave alone. Skips for a model that is
+    not text2speech, or a file whose driver does not stream (that one is cut by sentence, not exactly)."""
+    if not model.text2speech.supported or not model.can_stream_speech:
+        pytest.skip(f"{model.architecture} has no speech stream")
+    text_a = ("The history of the city of Rome begins on the Palatine hill, where shepherds built their "
+              "first huts beside the river. A good recipe for country bread needs only flour, water, salt "
+              "and a great deal of patience in the morning.")
+    text_b = "Trains leave every twenty minutes. Bring a warm coat."
+    want_a = model.text2speech.infer(text_a, seed=11).samples
+    want_b = model.text2speech.infer(text_b, seed=12).samples
+    stream = model.text2speech.stream(text_a, seed=11)
+    assert stream.exact
+    pieces = [p.samples for p in stream]
+    alone_a = sum(pieces, [])
+    assert len(pieces) >= 2 and len(alone_a) == len(want_a)
+    assert max(abs(x - y) for x, y in zip(alone_a, want_a)) <= 1e-4
+    alone_b = sum((p.samples for p in model.text2speech.stream(text_b, seed=12)), [])
+    a = iter(model.text2speech.stream(text_a, seed=11))
+    b = iter(model.text2speech.stream(text_b, seed=12))
+    got_a, got_b = [], []
+    for _ in range(64):
+        got_a += next(a, loom.Audio(samples=[], sample_rate=1)).samples
+        assert model.text2speech.infer(text_b, seed=12).samples == want_b
+        got_b += next(b, loom.Audio(samples=[], sample_rate=1)).samples
+    assert got_a == alone_a and got_b == alone_b

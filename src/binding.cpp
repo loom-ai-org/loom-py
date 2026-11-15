@@ -22,6 +22,7 @@
 #include "loom/core/text_generate.h"
 #include "loom/core/text_classify.h"
 #include "loom/core/transcribe.h"
+#include "loom/core/transcribe_stream.h"
 
 #include <ggml.h>
 
@@ -242,6 +243,187 @@ loom::LoomLuaBridge::Value to_value(const std::string& key, const py::handle& va
 // Owns everything the engine needs alive for the duration of a session, in an order that matters:
 // the bridge holds non-owning references to the model and the cache, so they are declared first and
 // destroyed last.
+// One live transcription on a loaded model: the engine's `TranscriptionStream`, whose state is its own
+// (ADR-098), so several of these on one `Model` do not see each other. Python keeps the `Model` alive for
+// as long as a stream of it is (`keep_alive` below), since the stream holds its bridge by reference.
+class Stream {
+public:
+    Stream(loom::LoomLuaBridge& bridge, const loom::GgufModel& model,
+           loom::audio::TranscriptionStream::Inputs inputs)
+        : stream_(bridge, model, std::move(inputs)) {}
+
+    py::dict push(const std::vector<float>& samples) { return update(stream_.push(samples)); }
+    py::dict finish() { return update(stream_.finish()); }
+    void reset() { stream_.reset(); }
+    std::string text() const { return stream_.text(); }
+    std::vector<int32_t> tokens() const { return stream_.tokens(); }
+    bool finished() const { return stream_.finished(); }
+    size_t state_bytes() const { return stream_.state().tensor_bytes() + stream_.state().value_bytes(); }
+
+private:
+    static py::dict update(const loom::audio::TranscriptUpdate& u) {
+        py::dict d;
+        d["tokens"] = u.tokens;
+        d["text"] = u.text;
+        d["delta"] = u.delta;
+        d["revised"] = u.revised;
+        d["samples"] = u.samples;
+        return d;
+    }
+
+    loom::audio::TranscriptionStream stream_;
+};
+
+// VAD lines on two loaded models (loom.cpp ADR-127): the engine's `LineStream`, Silero cutting the audio into
+// lines and the recogniser re-run over each line a push touched. Python keeps both Models alive.
+class LineStream {
+public:
+    LineStream(loom::LoomLuaBridge& asr_bridge, const loom::GgufModel& asr, loom::LoomLuaBridge& vad_bridge,
+               const loom::GgufModel& vad, loom::audio::LineOptions options)
+        : stream_(asr_bridge, asr, vad_bridge, vad, std::move(options)) {}
+
+    py::dict push(const std::vector<float>& samples) { return update(stream_.push(samples)); }
+    py::dict finish() { return update(stream_.finish()); }
+    void reset() { stream_.reset(); }
+    bool finished() const { return stream_.finished(); }
+    std::string text() const { return stream_.text(); }
+    uint32_t sample_rate() const { return stream_.sample_rate(); }
+    py::list lines() const {
+        py::list out;
+        for (const auto& line : stream_.lines()) out.append(as_dict(line));
+        return out;
+    }
+
+private:
+    static py::dict as_dict(const loom::audio::Line& line) {
+        py::dict d;
+        d["start"] = line.start;
+        d["samples"] = line.samples;
+        d["text"] = line.text;
+        d["complete"] = line.complete;
+        return d;
+    }
+    py::dict update(const loom::audio::LineUpdate& u) const {
+        py::dict d;
+        py::list touched;
+        for (size_t k : u.touched) {
+            py::dict line = as_dict(stream_.lines()[k]);
+            line["index"] = k;
+            touched.append(line);
+        }
+        d["touched"] = touched;
+        d["ran"] = u.ran;
+        d["samples"] = u.samples;
+        return d;
+    }
+
+    loom::audio::LineStream stream_;
+};
+
+// One frame stream on a loaded model: the engine's `FrameStream` (ADR-106) -- a frame classifier's or
+// frame embedder's rows, each handed back once its audio has arrived. The rows stay flat here; the
+// Python side cuts them by `width`, which the engine has already checked divides them.
+class FrameStream {
+public:
+    FrameStream(loom::LoomLuaBridge& bridge, const loom::GgufModel& model, loom::audio::FrameStream::Inputs inputs)
+        : stream_(bridge, model, std::move(inputs)) {}
+
+    py::dict push(const std::vector<float>& samples) { return update(stream_.push(samples)); }
+    py::dict finish() { return update(stream_.finish()); }
+    void reset() { stream_.reset(); }
+    bool finished() const { return stream_.finished(); }
+    uint32_t rows() const { return stream_.rows(); }
+    py::dict layout() const {
+        py::dict d;
+        d["kind"] = stream_.output_kind();
+        d["labels"] = stream_.labels();
+        d["width"] = stream_.width();
+        d["frame_rate"] = stream_.frame_rate();
+        d["frame_offset"] = stream_.frame_offset();
+        return d;
+    }
+    size_t state_bytes() const { return stream_.state().tensor_bytes() + stream_.state().value_bytes(); }
+
+private:
+    static py::dict update(const loom::audio::FrameUpdate& u) {
+        py::dict d;
+        d["values"] = u.values;
+        d["first_row"] = u.first_row;
+        d["n_rows"] = u.n_rows;
+        d["samples"] = u.samples;
+        d["row_start"] = u.row_start;
+        d["row_duration"] = u.row_duration;
+        return d;
+    }
+
+    loom::audio::FrameStream stream_;
+};
+
+// One token stream on a loaded model: the engine's `GenerationStream` (ADR-099), the same ids
+// `generate` returns, handed back as they are drawn. Like `Stream`, its state is its own and it keeps
+// the Model alive.
+class TokenStream {
+public:
+    TokenStream(loom::LoomLuaBridge& bridge, const loom::GgufModel& model, std::vector<int32_t> prompt,
+                loom::text::GenerateOptions options)
+        : stream_(bridge, model, std::move(prompt), std::move(options)) {}
+
+    std::vector<int32_t> next(uint32_t max_tokens) { return stream_.next(max_tokens); }
+    void reset() { stream_.reset(); }
+    std::vector<int32_t> tokens() const { return stream_.tokens(); }
+    bool finished() const { return stream_.finished(); }
+    bool stopped_on_eos() const { return stream_.stopped_on_eos(); }
+    size_t state_bytes() const {
+        const loom::StreamState& s = stream_.state();
+        return s.tensor_bytes() + s.value_bytes() + s.parked_bytes() + s.cache_bytes();
+    }
+
+private:
+    loom::text::GenerationStream stream_;
+};
+
+// Audio out (loom.cpp ADR-100): a TTS's waveform a piece at a time. The inputs are `infer`'s, marshalled
+// once at open.
+class SpeechStream {
+public:
+    SpeechStream(loom::LoomLuaBridge& bridge, loom::audio::SpeechStream::Inputs inputs)
+        : stream_(bridge, std::move(inputs)) {}
+
+    std::vector<float> next() { return stream_.next(); }
+    void reset() { stream_.reset(); }
+    bool finished() const { return stream_.finished(); }
+    size_t pieces_done() const { return stream_.pieces_done(); }
+    size_t pieces_total() const { return stream_.pieces_total(); }
+    size_t samples() const { return stream_.samples(); }
+    size_t state_bytes() const {
+        const loom::StreamState& s = stream_.state();
+        return s.tensor_bytes() + s.value_bytes() + s.parked_bytes() + s.cache_bytes();
+    }
+
+private:
+    loom::audio::SpeechStream stream_;
+};
+
+// The codec half of a streamed pair (loom.cpp ADR-102): codes pushed as an LM makes them, samples back.
+class CodecStream {
+public:
+    CodecStream(loom::LoomLuaBridge& bridge, loom::audio::CodecStream::Inputs inputs)
+        : stream_(bridge, std::move(inputs)) {}
+
+    std::vector<float> push(const std::vector<int32_t>& codes) { return stream_.push(codes); }
+    std::vector<float> finish() { return stream_.finish(); }
+    void reset() { stream_.reset(); }
+    bool finished() const { return stream_.finished(); }
+    size_t samples() const { return stream_.samples(); }
+    size_t state_bytes() const {
+        const loom::StreamState& s = stream_.state();
+        return s.tensor_bytes() + s.value_bytes() + s.parked_bytes() + s.cache_bytes();
+    }
+
+private:
+    loom::audio::CodecStream stream_;
+};
+
 class Model {
 public:
     // `device` is a loom device spec -- "" (which defers to $LOOM_DEVICE, then autodetection), "auto",
@@ -395,6 +577,75 @@ public:
             throw std::runtime_error(
                 "this GGUF carries no driver script, so there is nothing to generate with.");
         }
+        return loom::text::generate(*bridge_, *model_, tokens,
+                                    generate_options(max_new_tokens, eos_token, extra_inputs, temperature,
+                                                     top_k, top_p, seed));
+    }
+
+    // A token stream over the same options `generate` takes. Raises when the file's driver loops inside
+    // one call and has no stream functions.
+    std::unique_ptr<TokenStream> open_token_stream(const std::vector<int32_t>& tokens, uint32_t max_new_tokens,
+                                                   int32_t eos_token, const py::dict& extra_inputs,
+                                                   const std::optional<float>& temperature,
+                                                   const std::optional<int32_t>& top_k,
+                                                   const std::optional<float>& top_p,
+                                                   const std::optional<uint32_t>& seed) {
+        if (driver_.empty()) {
+            throw std::runtime_error("this GGUF carries no driver script, so there is nothing to stream.");
+        }
+        return std::make_unique<TokenStream>(*bridge_, *model_, tokens,
+                                             generate_options(max_new_tokens, eos_token, extra_inputs,
+                                                              temperature, top_k, top_p, seed));
+    }
+
+    // A speech stream over `infer`'s inputs. Raises when the file's driver has no stream functions.
+    std::unique_ptr<SpeechStream> open_speech_stream(const py::dict& inputs) {
+        if (driver_.empty()) {
+            throw std::runtime_error("this GGUF carries no driver script, so there is nothing to stream.");
+        }
+        loom::audio::SpeechStream::Inputs args;
+        for (auto item : inputs) {
+            const std::string key = item.first.cast<std::string>();
+            args.emplace(key, to_value(key, item.second));
+        }
+        return std::make_unique<SpeechStream>(*bridge_, std::move(args));
+    }
+
+    // A codec stream over the codec's own inputs (none, for every codec today).
+    std::unique_ptr<CodecStream> open_codec_stream(const py::dict& inputs) {
+        if (driver_.empty()) {
+            throw std::runtime_error("this GGUF carries no driver script, so there is nothing to stream.");
+        }
+        loom::audio::CodecStream::Inputs args;
+        for (auto item : inputs) {
+            const std::string key = item.first.cast<std::string>();
+            args.emplace(key, to_value(key, item.second));
+        }
+        return std::make_unique<CodecStream>(*bridge_, std::move(args));
+    }
+
+    bool can_stream_speech() const {
+        return bridge_ && !driver_.empty() && loom::audio::SpeechStream::supported(*bridge_);
+    }
+
+    bool can_stream_tokens() const {
+        return bridge_ && !driver_.empty() && loom::text::GenerationStream::supported(*bridge_, *model_);
+    }
+
+    // ADR-099: how streams keep their rows of the model's caches apart. Set before opening streams.
+    void set_stream_caches(const std::string& mode) {
+        if (mode == "auto") bridge_->set_stream_caches(loom::StreamCaches::Auto);
+        else if (mode == "park") bridge_->set_stream_caches(loom::StreamCaches::Park);
+        else if (mode == "per-stream") bridge_->set_stream_caches(loom::StreamCaches::PerStream);
+        else throw std::invalid_argument("stream_caches is 'auto', 'park' or 'per-stream', not '" + mode + "'");
+    }
+
+    loom::text::GenerateOptions generate_options(uint32_t max_new_tokens, int32_t eos_token,
+                                                 const py::dict& extra_inputs,
+                                                 const std::optional<float>& temperature,
+                                                 const std::optional<int32_t>& top_k,
+                                                 const std::optional<float>& top_p,
+                                                 const std::optional<uint32_t>& seed) {
         loom::text::GenerateOptions options;
         options.max_new_tokens = max_new_tokens;
         options.eos_token = eos_token;
@@ -412,7 +663,7 @@ public:
             const auto key = item.first.cast<std::string>();
             options.extra_inputs[key] = to_value(key, item.second);
         }
-        return loom::text::generate(*bridge_, *model_, tokens, options);
+        return options;
     }
     // -- the chat door (P4.23) --------------------------------------------------------------------
     //
@@ -575,6 +826,67 @@ public:
         return out;
     }
 
+    // Whether the driver exports the live door's three functions (`TranscriptionStream::supported`).
+    bool can_stream() const { return bridge_ && !driver_.empty() && loom::audio::TranscriptionStream::supported(*bridge_); }
+
+    // A new live transcription. Raises when the file's driver has no live path.
+    // `language` is a NAME, resolved as `transcribe` resolves it (the engine's `language_input`, ADR-109);
+    // empty leaves the driver its default.
+    std::unique_ptr<Stream> open_stream(const py::dict& inputs, const std::string& language) {
+        if (driver_.empty()) {
+            throw std::runtime_error("this GGUF carries no driver script, so there is nothing to stream.");
+        }
+        loom::audio::TranscriptionStream::Inputs args;
+        for (auto item : inputs) {
+            const std::string key = item.first.cast<std::string>();
+            args.emplace(key, to_value(key, item.second));
+        }
+        if (!language.empty()) {
+            args["language"] = loom::audio::TranscriptionStream::language_input(*model_, language);
+        }
+        return std::make_unique<Stream>(*bridge_, *model_, std::move(args));
+    }
+
+    // VAD lines with `vad` cutting (loom.cpp ADR-127). `options` are `LineOptions`' numbers by name; the
+    // recogniser's `language` / `task` go to every line's `transcribe`.
+    std::unique_ptr<LineStream> open_line_stream(Model& vad, const py::dict& options, const std::string& language,
+                                                 const std::string& task) {
+        if (driver_.empty() || vad.driver_.empty()) {
+            throw std::runtime_error("both GGUFs need a driver script to stream lines.");
+        }
+        loom::audio::LineOptions o;
+        o.transcribe.language = language;
+        o.transcribe.task = task;
+        for (auto item : options) {
+            const std::string key = item.first.cast<std::string>();
+            const double v = item.second.cast<double>();
+            if (key == "update_seconds") o.update_seconds = v;
+            else if (key == "threshold") o.threshold = static_cast<float>(v);
+            else if (key == "window_seconds") o.window_seconds = static_cast<float>(v);
+            else if (key == "max_line_seconds") o.max_line_seconds = static_cast<float>(v);
+            else if (key == "look_behind") o.look_behind = static_cast<size_t>(v);
+            else if (key == "max_tokens_per_second") o.max_tokens_per_second = static_cast<float>(v);
+            else if (key == "decode_incomplete") o.decode_incomplete = v != 0.0;
+            else throw std::invalid_argument("not a line option: " + key + " (update_seconds, threshold, "
+                                             "window_seconds, max_line_seconds, look_behind, "
+                                             "max_tokens_per_second, decode_incomplete)");
+        }
+        return std::make_unique<LineStream>(*bridge_, *model_, *vad.bridge_, *vad.model_, std::move(o));
+    }
+
+    // `inputs` go to the driver's `stream_open` (MarbleNet's `lookahead_frames`, loom.cpp ADR-120).
+    std::unique_ptr<FrameStream> open_frame_stream(const py::dict& inputs) {
+        if (driver_.empty()) {
+            throw std::runtime_error("this GGUF carries no driver script, so there is nothing to stream.");
+        }
+        loom::audio::FrameStream::Inputs args;
+        for (auto item : inputs) {
+            const std::string key = item.first.cast<std::string>();
+            args.emplace(key, to_value(key, item.second));
+        }
+        return std::make_unique<FrameStream>(*bridge_, *model_, std::move(args));
+    }
+
     py::object call(const std::string& fn_name, const py::dict& inputs) {
         if (driver_.empty()) {
             throw std::runtime_error(
@@ -717,6 +1029,58 @@ PYBIND11_MODULE(_loom, m) {
         return out;
     }, "Every ggml device visible to this process, in registration order.");
 
+    py::class_<SpeechStream>(m, "SpeechStream")
+        .def("next", &SpeechStream::next)
+        .def("reset", &SpeechStream::reset)
+        .def("finished", &SpeechStream::finished)
+        .def("pieces_done", &SpeechStream::pieces_done)
+        .def("pieces_total", &SpeechStream::pieces_total)
+        .def("samples", &SpeechStream::samples)
+        .def("state_bytes", &SpeechStream::state_bytes);
+
+    py::class_<CodecStream>(m, "CodecStream")
+        .def("push", &CodecStream::push, py::arg("codes"))
+        .def("finish", &CodecStream::finish)
+        .def("reset", &CodecStream::reset)
+        .def("finished", &CodecStream::finished)
+        .def("samples", &CodecStream::samples)
+        .def("state_bytes", &CodecStream::state_bytes);
+
+    py::class_<TokenStream>(m, "TokenStream")
+        .def("next", &TokenStream::next, py::arg("max_tokens"))
+        .def("reset", &TokenStream::reset)
+        .def("tokens", &TokenStream::tokens)
+        .def("finished", &TokenStream::finished)
+        .def("stopped_on_eos", &TokenStream::stopped_on_eos)
+        .def("state_bytes", &TokenStream::state_bytes);
+
+    py::class_<Stream>(m, "Stream")
+        .def("push", &Stream::push, py::arg("samples"))
+        .def("finish", &Stream::finish)
+        .def("reset", &Stream::reset)
+        .def("text", &Stream::text)
+        .def("tokens", &Stream::tokens)
+        .def("finished", &Stream::finished)
+        .def("state_bytes", &Stream::state_bytes);
+
+    py::class_<LineStream>(m, "LineStream")
+        .def("push", &LineStream::push, py::arg("samples"))
+        .def("finish", &LineStream::finish)
+        .def("reset", &LineStream::reset)
+        .def("finished", &LineStream::finished)
+        .def("text", &LineStream::text)
+        .def("lines", &LineStream::lines)
+        .def("sample_rate", &LineStream::sample_rate);
+
+    py::class_<FrameStream>(m, "FrameStream")
+        .def("push", &FrameStream::push, py::arg("samples"))
+        .def("finish", &FrameStream::finish)
+        .def("reset", &FrameStream::reset)
+        .def("finished", &FrameStream::finished)
+        .def("rows", &FrameStream::rows)
+        .def("layout", &FrameStream::layout)
+        .def("state_bytes", &FrameStream::state_bytes);
+
     py::class_<Model>(m, "Model")
         .def(py::init<const std::string&, const std::string&>(), py::arg("path"),
               py::arg("device") = std::string{})
@@ -739,8 +1103,27 @@ PYBIND11_MODULE(_loom, m) {
         .def("tokenizer_default_lang", &Model::tokenizer_default_lang)
         .def("encode", &Model::encode, py::arg("text"), py::arg("lang") = std::string{})
         .def("decode", &Model::decode, py::arg("ids"))
+        // The same bytes before UTF-8 decoding: a token stream stops between any two tokens, and a
+        // byte-level BPE token can end inside a character, which `decode`'s strict str would refuse.
+        .def("decode_bytes", [](const Model& self, const std::vector<int32_t>& ids) {
+            return py::bytes(self.decode(ids));
+        }, py::arg("ids"))
         .def("call", &Model::call, py::arg("fn_name"), py::arg("inputs"))
         .def("transcribe", &Model::transcribe, py::arg("waveform"), py::arg("options"))
+        .def("can_stream", &Model::can_stream)
+        .def("open_stream", &Model::open_stream, py::arg("inputs") = py::dict(), py::arg("language") = "",
+             py::keep_alive<0, 1>())
+        .def("open_frame_stream", &Model::open_frame_stream, py::arg("inputs") = py::dict(), py::keep_alive<0, 1>())
+        .def("open_line_stream", &Model::open_line_stream, py::arg("vad"), py::arg("options") = py::dict(),
+             py::arg("language") = "", py::arg("task") = "", py::keep_alive<0, 1>(), py::keep_alive<0, 2>())
+        .def("can_stream_speech", &Model::can_stream_speech)
+        .def("open_speech_stream", &Model::open_speech_stream, py::arg("inputs"), py::keep_alive<0, 1>())
+        .def("open_codec_stream", &Model::open_codec_stream, py::arg("inputs"), py::keep_alive<0, 1>())
+        .def("can_stream_tokens", &Model::can_stream_tokens)
+        .def("open_token_stream", &Model::open_token_stream, py::arg("tokens"), py::arg("max_new_tokens"),
+             py::arg("eos_token"), py::arg("extra_inputs"), py::arg("temperature"), py::arg("top_k"),
+             py::arg("top_p"), py::arg("seed"), py::keep_alive<0, 1>())
+        .def("set_stream_caches", &Model::set_stream_caches, py::arg("mode"))
         .def("classify", &Model::classify, py::arg("tokens"), py::arg("strip_special"),
              py::arg("extra_inputs"))
         .def("classify_audio", &Model::classify_audio, py::arg("waveform"))

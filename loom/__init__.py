@@ -23,6 +23,7 @@ table and tokenizes here like any other.
 """
 from __future__ import annotations
 
+import codecs
 import os
 import sys
 import warnings
@@ -34,10 +35,13 @@ from . import _loom
 from . import phonemizers
 from ._hub import download, list_files
 from ._interfaces import (ALL_INTERFACES, Audio, AudioClasses, Classification, Codes2Speech,
-                          FrameEmbeddings, Interface, Speech2Class, Speech2Embeddings, Speech2Text,
-                          Text2Class, Text2Codes, Text2Speech, Text2Text, TokenClass, UnsupportedTask)
+                          CodecStream, CodesStream, FrameEmbeddings, FrameStream, Interface,
+                          SpeechStream,
+                          Speech2Class, Speech2Embeddings,
+                          Speech2Text, Text2Class, Text2Codes, Text2Speech, Text2Text, TokenClass,
+                          UnsupportedTask)
 
-__all__ = ["Model", "Voice", "Tokenizer", "Transcription", "Segment", "Audio", "Classification", "TokenClass",
+__all__ = ["Model", "Voice", "Tokenizer", "Transcription", "TextStream", "SpeechStream", "CodesStream", "CodecStream", "FrameStream", "TranscriptStream", "TranscriptUpdate", "LineStream", "Line", "Segment", "Audio", "Classification", "TokenClass",
            "AudioClasses", "FrameEmbeddings",
            "Interface", "UnsupportedTask", "Text2Text", "Speech2Text", "Text2Speech", "Text2Class",
            "Text2Codes", "Codes2Speech", "Speech2Class", "Speech2Embeddings",
@@ -601,6 +605,181 @@ class Model:
             timestamped=bool(raw["timestamped"]),
         )
 
+    def generate_stream(
+        self,
+        prompt: str | Sequence[int],
+        max_new_tokens: int = 64,
+        eos_token: int | None = None,
+        *,
+        temperature: float | None = None,
+        top_k: int | None = None,
+        top_p: float | None = None,
+        seed: int | None = None,
+        per_pull: int = 1,
+        **inputs: float | int | Sequence[float],
+    ) -> "TextStream":
+        """`generate`, handed back as it is drawn: iterate it for each new piece of text.
+
+            for piece in model.generate_stream("Once upon a time"):
+                print(piece, end="", flush=True)
+
+        The engine's `GenerationStream` (loom.cpp ADR-099): greedy or seeded, the ids are exactly
+        `generate`'s with the same arguments. `prompt` may be text or token ids. `per_pull` is how many
+        tokens each step of the iteration draws. Each stream is independent of the others on this
+        model and of one-pass calls between its steps; how their caches are kept apart is
+        `stream_caches`.
+
+        Raises `RuntimeError` on a file whose loop runs inside one call and has no stream functions --
+        one exported before them; `can_stream_tokens` asks first.
+        """
+        tokens = self.tokenize(prompt) if isinstance(prompt, str) else [int(t) for t in prompt]
+        handle = self._handle.open_token_stream(
+            tokens, int(max_new_tokens), -2 if eos_token is None else int(eos_token),
+            {k: _as_value(k, v) for k, v in inputs.items()},
+            None if temperature is None else float(temperature),
+            None if top_k is None else int(top_k),
+            None if top_p is None else float(top_p),
+            None if seed is None else int(seed))
+        decode = self._handle.decode_bytes if self.tokenizer is not None else None
+        return TextStream(handle, decode, per_pull=int(per_pull))
+
+    def chat_stream(self, messages: str | Sequence[tuple[str, str]] | Sequence[dict],
+                    max_new_tokens: int = 256, **options) -> "TextStream":
+        """`chat`, streamed: the template applied, then `generate_stream`."""
+        if isinstance(messages, str):
+            messages = [("user", messages)]
+        return self.generate_stream(self.apply_chat_template(messages, add_generation_prompt=True),
+                                    max_new_tokens=max_new_tokens, **options)
+
+    @property
+    def can_stream_tokens(self) -> bool:
+        """Whether `generate_stream` can run this file: its driver has the stream functions, or draws
+        one token per call already."""
+        return bool(self._handle.can_stream_tokens())
+
+    @property
+    def can_stream_speech(self) -> bool:
+        """Whether this file's driver hands its audio back a piece at a time (loom.cpp ADR-100), so
+        `text2speech.stream` is cut by the model and exact. Without it the stream is cut by sentence."""
+        return bool(self._handle.can_stream_speech())
+
+    def _open_codec_stream(self, inputs: Mapping[str, Any]):
+        return self._handle.open_codec_stream({k: _as_value(k, v) for k, v in inputs.items()})
+
+    def _open_speech_stream(self, inputs: Mapping[str, Any]):
+        return self._handle.open_speech_stream({k: _as_value(k, v) for k, v in inputs.items()})
+
+    @property
+    def stream_caches(self) -> str:
+        return getattr(self, "_stream_caches", "auto")
+
+    @stream_caches.setter
+    def stream_caches(self, mode: str) -> None:
+        """How streams on this model keep their rows of its KV and conv caches apart (loom.cpp ADR-099):
+        ``"park"`` copies a stream's rows out while another runs, ``"per-stream"`` gives each stream a
+        cache of its own, ``"auto"`` (the default) does the second on a discrete GPU and the first
+        elsewhere. Set it before opening streams."""
+        self._handle.set_stream_caches(str(mode))
+        self._stream_caches = str(mode)
+
+    @property
+    def can_stream(self) -> bool:
+        """Whether this file's driver has a live path (`stream_open` / `stream_feed` /
+        `stream_finish`), which `stream()` needs. False for every file exported before streaming, whose
+        one-pass doors are unchanged, and for a model that is not speech2text: an LM has the same three
+        functions for its token stream (`can_stream_tokens`)."""
+        return bool(self._handle.can_stream()) and self.speech2text.supported
+
+    @property
+    def can_stream_frames(self) -> bool:
+        """Whether `speech2class.stream()` / `speech2embeddings.stream()` can open (loom.cpp ADR-106): the
+        driver has its live path and the file answers per frame."""
+        if not (bool(self._handle.can_stream()) and self.contract.get("input_kind") == "audio"):
+            return False
+        return self.contract.get("output_granularity") == "frame" and (
+            self.speech2class.supported or self.speech2embeddings.supported)
+
+    def frame_stream(self, **options: Any) -> "FrameStream":
+        """A live frame classifier or embedder (`FrameStream`); `speech2class.stream()` and
+        `speech2embeddings.stream()` land here. The engine's `FrameStream` refuses a clip model, a file
+        without a declared row width and one with no live path, each by name. `options` go to the driver's
+        `stream_open`; a file ignores one it does not read."""
+        return FrameStream(self._handle.open_frame_stream({k: _as_value(k, v) for k, v in options.items()}))
+
+    def line_stream(self, vad: "Model", *, language: str | None = None, task: str | None = None,
+                    **options: Any) -> "LineStream":
+        """Any recogniser live in Moonshine's VAD lines (loom.cpp ADR-127): `vad` (silero-vad with its live
+        door) cuts the audio into lines, and this model's one pass re-transcribes each line a push touches.
+        `options` are the loop's numbers, Moonshine's defaults: `update_seconds` (0.5), `threshold` (0.5),
+        `window_seconds` (0.5), `max_line_seconds` (15; upstream's fade closes a line of continuous speech
+        at about 10 s), `look_behind` (8192 samples), `decode_incomplete` (True), `max_tokens_per_second`
+        (0: the model's own budget; 6.5 is Moonshine's per line). `language`/`task` as `transcribe` takes
+        them, for every line."""
+        if not self.speech2text.supported:
+            raise self.speech2text._unsupported()
+        return LineStream(self._handle.open_line_stream(vad._handle, {k: float(v) for k, v in options.items()},
+                                                        language or "", task or ""))
+
+    def stream(self, *, language: str | None = None, **options: Any) -> "TranscriptStream":
+        """Open a live transcription: push audio as it arrives, read the transcript as it grows.
+
+        `language` is a name, as `transcribe` takes it (Nemotron 3.5 ASR: `"de-DE"`, `"auto"`); the
+        engine resolves it from the file's declared table and refuses one the file does not declare.
+        Omitted, the file decodes with its own default.
+
+        `options` go to the driver's `stream_open`: a re-decoding file takes `update_seconds`, how much new
+        audio waits for each decode (Moonshine streaming: 0.5 s by default). It is a cost knob -- the
+        transcript at `finish` does not depend on it -- and a file ignores an option it does not read.
+        Nemotron-Labs-Unified-ASR takes its streaming mode's `left_seconds`, `chunk_seconds` and
+        `right_seconds` (5.6, 0.56, 0.56 by default; latency is chunk + right, from 0.16 s): those do
+        change the transcript, as they do in NeMo's own streaming. Parakeet TDT and RNN-T take the same
+        three, at NeMo's streaming script's defaults (10, 2, 2; loom.cpp ADR-122); below about 1 s of
+        right context NeMo's own stream of these offline models falls apart, and so does this one.
+        Conformer-CTC and Citrinet stream as NeMo's `FrameBatchASR` does (loom.cpp ADR-123):
+        `chunk_seconds` of mel at a time into a `total_seconds` buffer (1.6 and 4 by default; the
+        latency is about chunk + (total - chunk) / 2); the transcript is NeMo's buffered one, not the
+        one pass's. Canary streams as NeMo's AED streaming script does (loom.cpp ADR-124): the same
+        `left_seconds`/`chunk_seconds`/`right_seconds` (10, 2, 2) and `policy`, 0 for wait-k (one
+        token a chunk, the rest at the end; NeMo's default) or 1 for AlignAtt (tokens as the decoder's
+        attention moves past them, a phrase a chunk); `language`/`target_language` as `transcribe`
+        takes them. Its prompt is NeMo's streaming one, so the text opens with `<|emo:undefined|>`
+        as NeMo's does.
+        Qwen3-ASR and oruk-loop stream the
+        way upstream's `streaming_transcribe` does (loom.cpp ADR-121): every `update_seconds` (2 s) all
+        the audio so far is re-decoded, from the third update with the previous answer minus its last
+        `unfixed_tokens` (5) ids as the start of the reply (`unfixed_chunks`, 2, updates go without).
+        Only the encoder's 8 s window still filling is re-encoded; the transcript so far is re-read at
+        every update, so an update still costs more late in a stream than early. The stream is refused
+        once it outgrows the decoder's cache (about four minutes for Qwen3-ASR, 45 s for oruk-loop):
+        split it at a pause. The cadence changes the transcript.
+        HuBERT, data2vec-audio and wav2vec 2.0 CTC files stream the way the transformers ASR pipeline
+        chunks them (loom.cpp ADR-126): `chunk_seconds` of raw audio (4 by default) overlapping by
+        `stride_seconds` each side (a sixth of the chunk; or `left_stride_seconds`/`right_stride_seconds`),
+        each chunk's middle decoded once a sample past its end arrives. The transcript is
+        `pipeline(chunk_length_s=..., stride_length_s=...)`'s, which at short chunks is not the one pass's.
+        Whisper streams as ufal's SimulStreaming does (loom.cpp ADR-128): every `chunk_seconds` (1.2) of
+        audio joins a 30 s buffer and the decoder re-reads what it has committed, then decodes until a
+        token's attention is within `frame_threshold` frames (25, 0.5 s) of the audio's end;
+        `rewind_threshold` (200 frames) is SimulStreaming's own; `language` as `transcribe` takes it
+        (English by default). Any recogniser streams in VAD lines with `speech2text.stream(vad=...)`
+        (`line_stream`, loom.cpp ADR-127).
+
+        The engine's own `TranscriptionStream`, the same one `loom_cli --stream` runs. Each stream's
+        state -- caches, cursors, audio not yet decoded -- is the engine's and belongs to that stream
+        alone (loom.cpp ADR-098), so several streams on one `Model` are independent, and a one-pass
+        `transcribe` between two pushes disturbs none of them.
+
+        Raises `RuntimeError` when the file has no live path; `can_stream` asks first.
+        """
+        if not self.speech2text.supported:
+            # An LM has `stream_open` too, for its tokens; the transcript door would feed it audio.
+            raise self.speech2text._unsupported()
+        # A file exported before the contract carried a rate was read at 16 kHz, as `transcribe` assumes.
+        rate = int(self.contract.get("sample_rate") or 0) or 16000
+        return TranscriptStream(self._handle.open_stream({k: _as_value(k, v) for k, v in options.items()},
+                                                         language or ""),
+                                sample_rate=rate)
+
     def classify(self, tokens: Sequence[int], *, strip_special: bool = True,
                  **driver_inputs: Any) -> "Classification":
         """Label already-encoded tokens, one declared class each.
@@ -698,6 +877,210 @@ class Transcription:
     segments: list[Segment]
     windows: int
     timestamped: bool
+
+
+@dataclass(frozen=True)
+class TranscriptUpdate:
+    """What one `TranscriptStream.push` or `finish` returns.
+
+    `delta` is the text this call added and `text` the whole transcript so far. `revised` is set when
+    earlier text changed, and `delta` is then the whole of `text`. A transducer's emissions are final, so
+    it is False for those files; an encoder-decoder that re-decodes as audio arrives (Moonshine streaming,
+    loom.cpp ADR-106) revises, and its text at `finish` is the one-pass transcript. `tokens` are the ids
+    this call decoded -- for a re-decoding file, the whole hypothesis; `seconds` is the audio pushed so far.
+    """
+    text: str
+    delta: str
+    tokens: list[int]
+    revised: bool
+    seconds: float
+
+
+class TranscriptStream:
+    """A live transcription, from `Model.stream()` or `model.speech2text.stream()`.
+
+        stream = model.speech2text.stream()
+        for piece in microphone():   # mono floats at contract["sample_rate"], any length
+            print(stream.push(piece).delta, end="", flush=True)
+        print(stream.finish().delta)
+
+    A piece can be any length, down to a single sample; the model decodes a chunk once the audio it
+    needs has arrived, so where the pieces break never changes the transcript.
+    """
+
+    def __init__(self, handle: "_loom.Stream", sample_rate: int):
+        self._handle = handle
+        self._rate = sample_rate
+
+    def push(self, samples: Sequence[float]) -> TranscriptUpdate:
+        """Add audio and decode every chunk it completes."""
+        return self._update(self._handle.push([float(x) for x in samples]))
+
+    def finish(self) -> TranscriptUpdate:
+        """End the input: decode what is left. Takes no push afterwards until `reset`."""
+        return self._update(self._handle.finish())
+
+    def reset(self) -> None:
+        """Drop everything and start again on the same model."""
+        self._handle.reset()
+
+    @property
+    def text(self) -> str:
+        return self._handle.text()
+
+    @property
+    def tokens(self) -> list[int]:
+        return list(self._handle.tokens())
+
+    @property
+    def finished(self) -> bool:
+        return bool(self._handle.finished())
+
+    @property
+    def state_bytes(self) -> int:
+        """What this stream's state holds, on the device and on the host."""
+        return int(self._handle.state_bytes())
+
+    def _update(self, raw: dict) -> TranscriptUpdate:
+        return TranscriptUpdate(text=raw["text"], delta=raw["delta"], tokens=[int(t) for t in raw["tokens"]],
+                                revised=bool(raw["revised"]), seconds=int(raw["samples"]) / self._rate)
+
+
+@dataclass(frozen=True)
+class Line:
+    """One line of a `LineStream`: where it starts and how long it is (seconds), its text, and whether it
+    has closed. An open line's text is revised as it grows; a closed line's is final. `index` is its place
+    in `LineStream.lines`."""
+    index: int
+    start: float
+    seconds: float
+    text: str
+    complete: bool
+
+
+class LineStream:
+    """Any recogniser, live, in Moonshine's VAD lines (loom.cpp ADR-127), from `Model.line_stream(vad)` or
+    `model.speech2text.stream(vad=vad)`:
+
+        vad = loom.Model("silero-vad.gguf")
+        stream = model.speech2text.stream(vad=vad)
+        for piece in microphone():
+            for line in stream.push(piece):
+                print(("final " if line.complete else "...   ") + line.text)
+
+    The VAD cuts the audio into lines of speech; every push that brings `update_seconds` (0.5) of audio
+    re-transcribes each line it touched with the recogniser's one pass, the open one included. `push` and
+    `finish` return the lines that changed.
+    """
+
+    def __init__(self, handle: "_loom.LineStream"):
+        self._handle = handle
+        self._rate = int(handle.sample_rate())
+
+    def push(self, samples: Sequence[float]) -> list[Line]:
+        """Add audio; once enough has gathered, run the VAD over it and re-transcribe the lines it touched."""
+        return self._lines(self._handle.push([float(x) for x in samples]))
+
+    def finish(self) -> list[Line]:
+        """End the input: run what has gathered and close the open line."""
+        return self._lines(self._handle.finish())
+
+    def reset(self) -> None:
+        self._handle.reset()
+
+    @property
+    def lines(self) -> list[Line]:
+        return [self._line(i, d) for i, d in enumerate(self._handle.lines())]
+
+    @property
+    def text(self) -> str:
+        return self._handle.text()
+
+    @property
+    def finished(self) -> bool:
+        return bool(self._handle.finished())
+
+    def _line(self, index: int, d: dict) -> Line:
+        return Line(index=index, start=int(d["start"]) / self._rate, seconds=int(d["samples"]) / self._rate,
+                    text=d["text"], complete=bool(d["complete"]))
+
+    def _lines(self, raw: dict) -> list[Line]:
+        return [self._line(int(d["index"]), d) for d in raw["touched"]]
+
+
+class TextStream:
+    """A generation handed back as it is drawn, from `Model.generate_stream` or `chat_stream`.
+
+    Iterating yields each new piece of text (the ids, for a file without a vocabulary). A piece never
+    ends inside a character: a byte-level token that does is held until the next one completes it.
+    `next(n)` draws up to n more ids directly.
+    """
+
+    def __init__(self, handle: "_loom.TokenStream", decode, per_pull: int = 1):
+        if per_pull < 1:
+            raise ValueError(f"per_pull draws at least one token, not {per_pull}")
+        self._handle = handle
+        self._decode = decode
+        self._per_pull = per_pull
+        self._restart()
+
+    def _restart(self) -> None:
+        self._bytes = b""
+        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        self._text = ""
+
+    def __iter__(self):
+        while not self.finished:
+            ids = self.next(self._per_pull)
+            if self._decode is None:
+                yield from ids
+                continue
+            piece = self._advance()
+            if piece:
+                yield piece
+
+    def next(self, max_tokens: int = 1) -> list[int]:
+        """Up to `max_tokens` more ids; [] once finished."""
+        return [int(t) for t in self._handle.next(int(max_tokens))]
+
+    def _advance(self) -> str:
+        raw = bytes(self._decode(self._handle.tokens()))
+        if not raw.startswith(self._bytes):
+            # A vocabulary whose spelling of a token depends on what follows it; never seen on a
+            # byte-level BPE, and the honest answer is the whole text again.
+            self._restart()
+        new, self._bytes = raw[len(self._bytes):], raw
+        piece = self._decoder.decode(new, final=self.finished)
+        self._text += piece
+        return piece
+
+    def reset(self) -> None:
+        """Back to the prompt, nothing generated."""
+        self._handle.reset()
+        self._restart()
+
+    @property
+    def text(self) -> str:
+        """What has been handed back so far."""
+        return self._text
+
+    @property
+    def tokens(self) -> list[int]:
+        return [int(t) for t in self._handle.tokens()]
+
+    @property
+    def finished(self) -> bool:
+        return bool(self._handle.finished())
+
+    @property
+    def stopped_on_eos(self) -> bool:
+        """Whether it ended on a stop token (dropped from `tokens`) rather than at `max_new_tokens`."""
+        return bool(self._handle.stopped_on_eos())
+
+    @property
+    def state_bytes(self) -> int:
+        """What this stream holds: its values, any rows parked on the host, any caches of its own."""
+        return int(self._handle.state_bytes())
 
 
 class Tokenizer:
