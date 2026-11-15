@@ -28,6 +28,10 @@ class TestPackage:
             "Voice",
             "Tokenizer",
             "Transcription",
+            # The live door (loom.cpp ADR-098): what `model.speech2text.stream()` returns, and what each
+            # of its pushes hands back.
+            "TranscriptStream",
+            "TranscriptUpdate",
             "Segment",
             # The end-to-end layer. The result types and the eight implemented interfaces are exported
             # because a caller annotates against them; the not-yet-implemented ones are reached as
@@ -287,6 +291,18 @@ class _FakeHandle:
                 "text": "hello", "windows": 1, "timestamped": True,
                 "warnings": list(self._transcribe_warnings)}
 
+    # The live door (loom.cpp ADR-098). The engine's TranscriptionStream decodes; the double is a stream
+    # handle that records the pieces and answers in the binding's dict shape, so what is pinned is the
+    # marshalling and the rate `TranscriptUpdate.seconds` is computed at.
+    def can_stream(self):
+        return bool(self._contract.get("can_stream"))
+
+    def open_stream(self):
+        if not self.can_stream():
+            raise RuntimeError("this model's driver has no live path")
+        self.stream_handle = _FakeStream()
+        return self.stream_handle
+
     # Same reasoning as `transcribe`: the framing-token strip and the label lookup are the ENGINE's
     # (loom/core/text_classify.h), so what a double can pin is the marshalling either side. It records
     # what it was handed and returns one entry per token it was given.
@@ -319,6 +335,67 @@ class _FakeHandle:
                     "values": [0.0, 0.25, 0.5, 1.0, 1.25, 1.5]}
         return {"granularity": "clip", "n_rows": 1, "dim": 3, "frame_rate": 0.0, "frame_offset": 0.0,
                 "values": [0.5, -0.25, 0.125]}
+
+
+class _FakeStream:
+    """The binding's `Stream`: one id per push, its text the ids so far."""
+
+    def __init__(self):
+        self.pieces, self._ids, self._samples, self._finished = [], [], 0, False
+
+    def _update(self, ids):
+        self._ids += ids
+        text = " ".join(str(i) for i in self._ids)
+        return {"tokens": ids, "text": text, "delta": text[len(text) - len(" ".join(map(str, ids))):],
+                "revised": False, "samples": self._samples}
+
+    def push(self, samples):
+        self.pieces.append(list(samples))
+        self._samples += len(samples)
+        return self._update([len(self.pieces)])
+
+    def finish(self):
+        self._finished = True
+        return self._update([])
+
+    def reset(self): self.__init__()
+    def text(self): return " ".join(str(i) for i in self._ids)
+    def tokens(self): return list(self._ids)
+    def finished(self): return self._finished
+    def state_bytes(self): return 1024
+
+
+class TestTranscriptStream:
+    """`model.speech2text.stream()`: the Python side of the engine's live door."""
+
+    def test_pieces_go_through_as_floats_and_updates_come_back_typed(self):
+        handle = _FakeHandle([], contract=dict(_ASR_CONTRACT, can_stream=True, sample_rate=24000))
+        stream = _model(handle).speech2text.stream()
+        first = stream.push([0, 1, 2])
+        assert handle.stream_handle.pieces == [[0.0, 1.0, 2.0]]
+        assert all(isinstance(x, float) for x in handle.stream_handle.pieces[0])
+        assert isinstance(first, loom.TranscriptUpdate)
+        assert first.tokens == [1] and first.text == "1" and first.delta == "1" and not first.revised
+        second = stream.push([0.0] * 24000)
+        # Seconds at the MODEL's declared rate, not an assumed 16 kHz.
+        assert second.seconds == pytest.approx(24003 / 24000)
+        assert second.text == "1 2" and second.delta == "2"
+        assert stream.finish().delta == ""
+        assert stream.finished and stream.text == "1 2" and stream.tokens == [1, 2]
+        assert stream.state_bytes == 1024
+
+    def test_a_file_without_a_live_path_says_so(self):
+        model = _model(_FakeHandle([], contract=_ASR_CONTRACT))
+        assert not model.can_stream
+        with pytest.raises(RuntimeError, match="no live path"):
+            model.speech2text.stream()
+
+    def test_a_model_that_is_not_speech2text_is_refused_by_the_door(self):
+        handle = _FakeHandle([], contract=dict(task="text-generation", input_kind="text",
+                                               output_kind="token_ids", interface="text2text",
+                                               declared=True))
+        with pytest.raises(loom.UnsupportedTask, match="text2text"):
+            _model(handle).speech2text.stream()
 
 
 class TestTranscribeWarnings:
