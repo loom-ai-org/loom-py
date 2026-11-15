@@ -10,6 +10,9 @@ __pycache__/
 # build drops libggml-base.so.0 and libggml-base.so.0.16.0 beside the package, and neither matches the
 # pattern above. Untracked build output that a wheel's package copy would happily pick up.
 *.so.*
+# Windows: the extension is `_loom.pyd` and the engine and ggml are DLLs beside it.
+*.pyd
+*.dll
 *.gguf
 build-*/
 dist-*/

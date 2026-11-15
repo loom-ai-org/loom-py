@@ -60,7 +60,8 @@ wheel is a release asset, because PyPI does not accept ARMv6 wheels:
 pip install https://github.com/loom-ai-org/loom-py/releases/latest/download/loom_py_rt-1.0.0rc20-cp311-cp311-linux_armv6l.whl
 ```
 
-Windows is not supported yet. Which CPU kernels a machine gets, and every platform detail, is in
+Windows x64 builds from a checkout but has no published wheels yet. Which CPU kernels a machine gets,
+and every platform detail, is in
 [docs/PLATFORMS.md](https://github.com/loom-ai-org/loom-py/blob/main/docs/PLATFORMS.md).
 
 ## What you can do with it
