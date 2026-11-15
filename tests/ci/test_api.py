@@ -37,6 +37,9 @@ class TestPackage:
             "FrameStream",
             "TranscriptStream",
             "TranscriptUpdate",
+            # VAD lines (loom.cpp ADR-127): what `speech2text.stream(vad=...)` returns, and its lines.
+            "LineStream",
+            "Line",
             "Segment",
             # The end-to-end layer. The result types and the eight implemented interfaces are exported
             # because a caller annotates against them; the not-yet-implemented ones are reached as
@@ -310,6 +313,11 @@ class _FakeHandle:
         self.stream_handle = _FakeStream()
         return self.stream_handle
 
+    def open_line_stream(self, vad, options=None, language="", task=""):
+        self.line_args = (vad, dict(options or {}), language, task)
+        self.line_handle = _FakeLineStream()
+        return self.line_handle
+
     # -- the tokens-out door (loom.cpp ADR-099) ---------------------------------------------------
     # A byte table rather than `decode`'s "|"-joined ids, so a token can end inside a character.
     _TOKEN_BYTES = {1: b"h", 2: b"\xc3", 3: b"\xa9", 4: b"!"}
@@ -414,6 +422,34 @@ class _FakeStream:
     def tokens(self): return list(self._ids)
     def finished(self): return self._finished
     def state_bytes(self): return 1024
+
+
+class _FakeLineStream:
+    """The binding's `LineStream`: each push opens a line of its own length or grows the last one; a push
+    of an even count closes it. 16 kHz."""
+
+    def __init__(self):
+        self._lines, self._finished = [], False
+
+    def push(self, samples):
+        n = len(samples)
+        if not self._lines or self._lines[-1]["complete"]:
+            self._lines.append({"start": 0, "samples": 0, "text": "", "complete": False})
+        line = self._lines[-1]
+        line["samples"] += n
+        line["text"] = f"{line['samples']} samples"
+        line["complete"] = n % 2 == 0
+        return {"touched": [dict(line, index=len(self._lines) - 1)], "ran": True, "samples": n}
+
+    def finish(self):
+        self._finished = True
+        return {"touched": [], "ran": False, "samples": 0}
+
+    def reset(self): self.__init__()
+    def finished(self): return self._finished
+    def text(self): return " ".join(l["text"] for l in self._lines)
+    def lines(self): return [dict(l) for l in self._lines]
+    def sample_rate(self): return 16000
 
 
 class _FakeFrameStream:
@@ -614,6 +650,24 @@ class TestTranscriptStream:
                                                declared=True))
         with pytest.raises(loom.UnsupportedTask, match="text2text"):
             _model(handle).speech2text.stream()
+
+
+class TestLineStream:
+    """`model.speech2text.stream(vad=...)`: any recogniser in VAD lines (loom.cpp ADR-127)."""
+
+    def test_a_vad_turns_the_stream_into_lines(self):
+        handle = _FakeHandle([], contract=_ASR_CONTRACT)  # no live path of its own: lines need none
+        vad = _model(_FakeHandle([]))
+        stream = _model(handle).speech2text.stream(vad=vad, language="en", update_seconds=1, threshold=0.4)
+        assert isinstance(stream, loom.LineStream)
+        assert handle.line_args == (vad._handle, {"update_seconds": 1.0, "threshold": 0.4}, "en", "")
+        first = stream.push([0.0] * 8001)
+        assert [type(l) for l in first] == [loom.Line]
+        assert first[0].index == 0 and first[0].seconds == pytest.approx(8001 / 16000) and not first[0].complete
+        second = stream.push([0.0] * 7998)
+        assert second[0].index == 0 and second[0].complete and second[0].seconds == pytest.approx(15999 / 16000)
+        assert stream.finish() == [] and stream.finished
+        assert [l.text for l in stream.lines] == ["15999 samples"] and stream.text == "15999 samples"
 
 
 class TestTranscribeWarnings:
