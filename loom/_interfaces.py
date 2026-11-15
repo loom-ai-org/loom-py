@@ -143,13 +143,15 @@ class AudioClasses:
     ENGINE's (`loom::audio::classify`), read off the file's contract, so loom_cli and this agree.
 
     `granularity` is "clip" (one row) or "frame" (one row per encoder frame, starting at
-    `frame_offset` seconds and `1 / frame_rate` apart).
+    `frame_offset` seconds and `1 / frame_rate` apart). A stream whose rows sit on a grid of their own
+    (pyannote's, as diart cuts it: loom.cpp ADR-129) states each row's start in `starts` instead.
     """
     granularity: str
     labels: list
     probabilities: list  # rows of len(labels) probabilities
     frame_rate: float = 0.0
     frame_offset: float = 0.0
+    starts: list | None = None
 
     def __len__(self) -> int:
         return len(self.probabilities)
@@ -162,6 +164,8 @@ class AudioClasses:
     @property
     def times(self) -> list:
         """Each row's start in seconds -- all 0.0 for a clip answer, which covers the whole clip."""
+        if self.starts is not None:
+            return list(self.starts)
         if not self.frame_rate:
             return [0.0] * len(self.probabilities)
         return [self.frame_offset + i / self.frame_rate for i in range(len(self.probabilities))]
@@ -262,7 +266,8 @@ class FrameStream:
         offset = self.frame_offset + int(raw["first_row"]) / self.frame_rate
         if self.kind == "class":
             return AudioClasses(granularity="frame", labels=list(self.labels), probabilities=rows,
-                                frame_rate=self.frame_rate, frame_offset=offset)
+                                frame_rate=self.frame_rate, frame_offset=offset,
+                                starts=[float(t) for t in raw.get("row_start", [])] or None)
         return FrameEmbeddings(rows=rows, dim=w, frame_rate=self.frame_rate, frame_offset=offset)
 
 
@@ -625,7 +630,12 @@ class Speech2Class(Interface):
         of audio after them (73 frames), so by default a frame is answered that late, with exactly one
         call's probabilities; `lookahead_frames=` answers sooner from less of that context, and the
         probabilities move (on jfk: 20 frames, 400 ms, flips 7 of 550 decisions at 0.5; 40 frames, 800 ms,
-        flips 2)."""
+        flips 2).
+
+        pyannote segmentation streams as diart's voice activity detection does (loom.cpp ADR-129): a
+        `speech` score per row instead of the seven powerset classes, `duration_seconds=` chunks (5) every
+        `step_seconds=` (0.5), each answered `latency_seconds=` (the step) behind, rows on diart's own
+        grid (`.times`). diart's decision is a score above 0.6, turns closer than 0.05 s joined."""
         if not self.supported:
             raise self._unsupported()
         return self._model.frame_stream(**options)

@@ -351,6 +351,8 @@ private:
         d["first_row"] = u.first_row;
         d["n_rows"] = u.n_rows;
         d["samples"] = u.samples;
+        d["row_start"] = u.row_start;
+        d["row_duration"] = u.row_duration;
         return d;
     }
 
@@ -627,7 +629,7 @@ public:
     }
 
     bool can_stream_tokens() const {
-        return bridge_ && !driver_.empty() && loom::text::GenerationStream::supported(*bridge_);
+        return bridge_ && !driver_.empty() && loom::text::GenerationStream::supported(*bridge_, *model_);
     }
 
     // ADR-099: how streams keep their rows of the model's caches apart. Set before opening streams.
