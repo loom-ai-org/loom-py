@@ -588,14 +588,17 @@ class Speech2Text(Interface):
             waveform, language=language, task=task, target_language=target_language,
             timestamps=timestamps, condition_on_previous=condition_on_previous)
 
-    def stream(self, **options):
+    def stream(self, *, vad=None, **options):
         """A live transcription (`Model.stream`): push audio as it arrives, read text as it grows.
         `language` is a name, as `transcribe` takes it; `options` go to the driver (`update_seconds` for a
-        re-decoding file). Raises `UnsupportedTask` on a
-        model that is not speech2text, and `RuntimeError` on one whose file has no live path yet
-        (`model.can_stream`)."""
+        re-decoding file). With `vad` (a silero-vad `Model`), any recogniser streams in VAD lines instead
+        (`Model.line_stream`, loom.cpp ADR-127), the file's own live path or not. Raises `UnsupportedTask`
+        on a model that is not speech2text, and `RuntimeError` on one whose file has no live path yet
+        (`model.can_stream`) when no `vad` is given."""
         if not self.supported:
             raise self._unsupported()
+        if vad is not None:
+            return self._model.line_stream(vad, **options)
         return self._model.stream(**options)
 
 
