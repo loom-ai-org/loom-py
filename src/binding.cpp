@@ -248,7 +248,9 @@ loom::LoomLuaBridge::Value to_value(const std::string& key, const py::handle& va
 // as long as a stream of it is (`keep_alive` below), since the stream holds its bridge by reference.
 class Stream {
 public:
-    Stream(loom::LoomLuaBridge& bridge, const loom::GgufModel& model) : stream_(bridge, model) {}
+    Stream(loom::LoomLuaBridge& bridge, const loom::GgufModel& model,
+           loom::audio::TranscriptionStream::Inputs inputs)
+        : stream_(bridge, model, std::move(inputs)) {}
 
     py::dict push(const std::vector<float>& samples) { return update(stream_.push(samples)); }
     py::dict finish() { return update(stream_.finish()); }
@@ -270,6 +272,91 @@ private:
     }
 
     loom::audio::TranscriptionStream stream_;
+};
+
+// VAD lines on two loaded models (loom.cpp ADR-127): the engine's `LineStream`, Silero cutting the audio into
+// lines and the recogniser re-run over each line a push touched. Python keeps both Models alive.
+class LineStream {
+public:
+    LineStream(loom::LoomLuaBridge& asr_bridge, const loom::GgufModel& asr, loom::LoomLuaBridge& vad_bridge,
+               const loom::GgufModel& vad, loom::audio::LineOptions options)
+        : stream_(asr_bridge, asr, vad_bridge, vad, std::move(options)) {}
+
+    py::dict push(const std::vector<float>& samples) { return update(stream_.push(samples)); }
+    py::dict finish() { return update(stream_.finish()); }
+    void reset() { stream_.reset(); }
+    bool finished() const { return stream_.finished(); }
+    std::string text() const { return stream_.text(); }
+    uint32_t sample_rate() const { return stream_.sample_rate(); }
+    py::list lines() const {
+        py::list out;
+        for (const auto& line : stream_.lines()) out.append(as_dict(line));
+        return out;
+    }
+
+private:
+    static py::dict as_dict(const loom::audio::Line& line) {
+        py::dict d;
+        d["start"] = line.start;
+        d["samples"] = line.samples;
+        d["text"] = line.text;
+        d["complete"] = line.complete;
+        return d;
+    }
+    py::dict update(const loom::audio::LineUpdate& u) const {
+        py::dict d;
+        py::list touched;
+        for (size_t k : u.touched) {
+            py::dict line = as_dict(stream_.lines()[k]);
+            line["index"] = k;
+            touched.append(line);
+        }
+        d["touched"] = touched;
+        d["ran"] = u.ran;
+        d["samples"] = u.samples;
+        return d;
+    }
+
+    loom::audio::LineStream stream_;
+};
+
+// One frame stream on a loaded model: the engine's `FrameStream` (ADR-106) -- a frame classifier's or
+// frame embedder's rows, each handed back once its audio has arrived. The rows stay flat here; the
+// Python side cuts them by `width`, which the engine has already checked divides them.
+class FrameStream {
+public:
+    FrameStream(loom::LoomLuaBridge& bridge, const loom::GgufModel& model, loom::audio::FrameStream::Inputs inputs)
+        : stream_(bridge, model, std::move(inputs)) {}
+
+    py::dict push(const std::vector<float>& samples) { return update(stream_.push(samples)); }
+    py::dict finish() { return update(stream_.finish()); }
+    void reset() { stream_.reset(); }
+    bool finished() const { return stream_.finished(); }
+    uint32_t rows() const { return stream_.rows(); }
+    py::dict layout() const {
+        py::dict d;
+        d["kind"] = stream_.output_kind();
+        d["labels"] = stream_.labels();
+        d["width"] = stream_.width();
+        d["frame_rate"] = stream_.frame_rate();
+        d["frame_offset"] = stream_.frame_offset();
+        return d;
+    }
+    size_t state_bytes() const { return stream_.state().tensor_bytes() + stream_.state().value_bytes(); }
+
+private:
+    static py::dict update(const loom::audio::FrameUpdate& u) {
+        py::dict d;
+        d["values"] = u.values;
+        d["first_row"] = u.first_row;
+        d["n_rows"] = u.n_rows;
+        d["samples"] = u.samples;
+        d["row_start"] = u.row_start;
+        d["row_duration"] = u.row_duration;
+        return d;
+    }
+
+    loom::audio::FrameStream stream_;
 };
 
 // One token stream on a loaded model: the engine's `GenerationStream` (ADR-099), the same ids
@@ -542,7 +629,7 @@ public:
     }
 
     bool can_stream_tokens() const {
-        return bridge_ && !driver_.empty() && loom::text::GenerationStream::supported(*bridge_);
+        return bridge_ && !driver_.empty() && loom::text::GenerationStream::supported(*bridge_, *model_);
     }
 
     // ADR-099: how streams keep their rows of the model's caches apart. Set before opening streams.
@@ -743,11 +830,61 @@ public:
     bool can_stream() const { return bridge_ && !driver_.empty() && loom::audio::TranscriptionStream::supported(*bridge_); }
 
     // A new live transcription. Raises when the file's driver has no live path.
-    std::unique_ptr<Stream> open_stream() {
+    // `language` is a NAME, resolved as `transcribe` resolves it (the engine's `language_input`, ADR-109);
+    // empty leaves the driver its default.
+    std::unique_ptr<Stream> open_stream(const py::dict& inputs, const std::string& language) {
         if (driver_.empty()) {
             throw std::runtime_error("this GGUF carries no driver script, so there is nothing to stream.");
         }
-        return std::make_unique<Stream>(*bridge_, *model_);
+        loom::audio::TranscriptionStream::Inputs args;
+        for (auto item : inputs) {
+            const std::string key = item.first.cast<std::string>();
+            args.emplace(key, to_value(key, item.second));
+        }
+        if (!language.empty()) {
+            args["language"] = loom::audio::TranscriptionStream::language_input(*model_, language);
+        }
+        return std::make_unique<Stream>(*bridge_, *model_, std::move(args));
+    }
+
+    // VAD lines with `vad` cutting (loom.cpp ADR-127). `options` are `LineOptions`' numbers by name; the
+    // recogniser's `language` / `task` go to every line's `transcribe`.
+    std::unique_ptr<LineStream> open_line_stream(Model& vad, const py::dict& options, const std::string& language,
+                                                 const std::string& task) {
+        if (driver_.empty() || vad.driver_.empty()) {
+            throw std::runtime_error("both GGUFs need a driver script to stream lines.");
+        }
+        loom::audio::LineOptions o;
+        o.transcribe.language = language;
+        o.transcribe.task = task;
+        for (auto item : options) {
+            const std::string key = item.first.cast<std::string>();
+            const double v = item.second.cast<double>();
+            if (key == "update_seconds") o.update_seconds = v;
+            else if (key == "threshold") o.threshold = static_cast<float>(v);
+            else if (key == "window_seconds") o.window_seconds = static_cast<float>(v);
+            else if (key == "max_line_seconds") o.max_line_seconds = static_cast<float>(v);
+            else if (key == "look_behind") o.look_behind = static_cast<size_t>(v);
+            else if (key == "max_tokens_per_second") o.max_tokens_per_second = static_cast<float>(v);
+            else if (key == "decode_incomplete") o.decode_incomplete = v != 0.0;
+            else throw std::invalid_argument("not a line option: " + key + " (update_seconds, threshold, "
+                                             "window_seconds, max_line_seconds, look_behind, "
+                                             "max_tokens_per_second, decode_incomplete)");
+        }
+        return std::make_unique<LineStream>(*bridge_, *model_, *vad.bridge_, *vad.model_, std::move(o));
+    }
+
+    // `inputs` go to the driver's `stream_open` (MarbleNet's `lookahead_frames`, loom.cpp ADR-120).
+    std::unique_ptr<FrameStream> open_frame_stream(const py::dict& inputs) {
+        if (driver_.empty()) {
+            throw std::runtime_error("this GGUF carries no driver script, so there is nothing to stream.");
+        }
+        loom::audio::FrameStream::Inputs args;
+        for (auto item : inputs) {
+            const std::string key = item.first.cast<std::string>();
+            args.emplace(key, to_value(key, item.second));
+        }
+        return std::make_unique<FrameStream>(*bridge_, *model_, std::move(args));
     }
 
     py::object call(const std::string& fn_name, const py::dict& inputs) {
@@ -926,6 +1063,24 @@ PYBIND11_MODULE(_loom, m) {
         .def("finished", &Stream::finished)
         .def("state_bytes", &Stream::state_bytes);
 
+    py::class_<LineStream>(m, "LineStream")
+        .def("push", &LineStream::push, py::arg("samples"))
+        .def("finish", &LineStream::finish)
+        .def("reset", &LineStream::reset)
+        .def("finished", &LineStream::finished)
+        .def("text", &LineStream::text)
+        .def("lines", &LineStream::lines)
+        .def("sample_rate", &LineStream::sample_rate);
+
+    py::class_<FrameStream>(m, "FrameStream")
+        .def("push", &FrameStream::push, py::arg("samples"))
+        .def("finish", &FrameStream::finish)
+        .def("reset", &FrameStream::reset)
+        .def("finished", &FrameStream::finished)
+        .def("rows", &FrameStream::rows)
+        .def("layout", &FrameStream::layout)
+        .def("state_bytes", &FrameStream::state_bytes);
+
     py::class_<Model>(m, "Model")
         .def(py::init<const std::string&, const std::string&>(), py::arg("path"),
               py::arg("device") = std::string{})
@@ -956,7 +1111,11 @@ PYBIND11_MODULE(_loom, m) {
         .def("call", &Model::call, py::arg("fn_name"), py::arg("inputs"))
         .def("transcribe", &Model::transcribe, py::arg("waveform"), py::arg("options"))
         .def("can_stream", &Model::can_stream)
-        .def("open_stream", &Model::open_stream, py::keep_alive<0, 1>())
+        .def("open_stream", &Model::open_stream, py::arg("inputs") = py::dict(), py::arg("language") = "",
+             py::keep_alive<0, 1>())
+        .def("open_frame_stream", &Model::open_frame_stream, py::arg("inputs") = py::dict(), py::keep_alive<0, 1>())
+        .def("open_line_stream", &Model::open_line_stream, py::arg("vad"), py::arg("options") = py::dict(),
+             py::arg("language") = "", py::arg("task") = "", py::keep_alive<0, 1>(), py::keep_alive<0, 2>())
         .def("can_stream_speech", &Model::can_stream_speech)
         .def("open_speech_stream", &Model::open_speech_stream, py::arg("inputs"), py::keep_alive<0, 1>())
         .def("open_codec_stream", &Model::open_codec_stream, py::arg("inputs"), py::keep_alive<0, 1>())

@@ -34,8 +34,12 @@ class TestPackage:
             "SpeechStream",
             "CodesStream",
             "CodecStream",
+            "FrameStream",
             "TranscriptStream",
             "TranscriptUpdate",
+            # VAD lines (loom.cpp ADR-127): what `speech2text.stream(vad=...)` returns, and its lines.
+            "LineStream",
+            "Line",
             "Segment",
             # The end-to-end layer. The result types and the eight implemented interfaces are exported
             # because a caller annotates against them; the not-yet-implemented ones are reached as
@@ -301,11 +305,18 @@ class _FakeHandle:
     def can_stream(self):
         return bool(self._contract.get("can_stream"))
 
-    def open_stream(self):
+    def open_stream(self, inputs=None, language=""):
         if not self.can_stream():
             raise RuntimeError("this model's driver has no live path")
+        self.stream_inputs = dict(inputs or {})
+        self.stream_language = language
         self.stream_handle = _FakeStream()
         return self.stream_handle
+
+    def open_line_stream(self, vad, options=None, language="", task=""):
+        self.line_args = (vad, dict(options or {}), language, task)
+        self.line_handle = _FakeLineStream()
+        return self.line_handle
 
     # -- the tokens-out door (loom.cpp ADR-099) ---------------------------------------------------
     # A byte table rather than `decode`'s "|"-joined ids, so a token can end inside a character.
@@ -327,6 +338,17 @@ class _FakeHandle:
              "top_p": top_p, "seed": seed})
         self.token_stream = _FakeTokenStream(self._returns.pop(0) if self._returns else [])
         return self.token_stream
+
+    # -- the audio-in rows-out door (loom.cpp ADR-106) ----------------------------------------------
+    def open_frame_stream(self, inputs=None):
+        self.frame_stream_inputs = dict(inputs or {})
+        if not self.can_stream():
+            raise RuntimeError("this model's driver has no live path")
+        c = self._contract
+        width = len(c["labels"]) if c["output_kind"] == "class" else c["embedding_dim"]
+        self.frame_stream = _FakeFrameStream(c["output_kind"], c["labels"], width, c["frame_rate"],
+                                             c["frame_offset"])
+        return self.frame_stream
 
     # -- the audio-out door (loom.cpp ADR-100) -------------------------------------------------------
     def can_stream_speech(self): return bool(self._contract.get("can_stream_speech"))
@@ -400,6 +422,68 @@ class _FakeStream:
     def tokens(self): return list(self._ids)
     def finished(self): return self._finished
     def state_bytes(self): return 1024
+
+
+class _FakeLineStream:
+    """The binding's `LineStream`: each push opens a line of its own length or grows the last one; a push
+    of an even count closes it. 16 kHz."""
+
+    def __init__(self):
+        self._lines, self._finished = [], False
+
+    def push(self, samples):
+        n = len(samples)
+        if not self._lines or self._lines[-1]["complete"]:
+            self._lines.append({"start": 0, "samples": 0, "text": "", "complete": False})
+        line = self._lines[-1]
+        line["samples"] += n
+        line["text"] = f"{line['samples']} samples"
+        line["complete"] = n % 2 == 0
+        return {"touched": [dict(line, index=len(self._lines) - 1)], "ran": True, "samples": n}
+
+    def finish(self):
+        self._finished = True
+        return {"touched": [], "ran": False, "samples": 0}
+
+    def reset(self): self.__init__()
+    def finished(self): return self._finished
+    def text(self): return " ".join(l["text"] for l in self._lines)
+    def lines(self): return [dict(l) for l in self._lines]
+    def sample_rate(self): return 16000
+
+
+class _FakeFrameStream:
+    """The binding's `FrameStream`: one row per two samples, its values the row's index then 0.5s, so
+    the rows' order and first_row are visible; the engine's checks are its own (test_frame_stream)."""
+
+    def __init__(self, kind, labels, width, frame_rate, frame_offset):
+        self._layout = {"kind": kind, "labels": list(labels), "width": width, "frame_rate": frame_rate,
+                        "frame_offset": frame_offset}
+        self.pushes, self._pending, self._rows, self._samples, self._finished = [], 0, 0, 0, False
+
+    def _update(self, n):
+        w = self._layout["width"]
+        values = [v for r in range(self._rows, self._rows + n) for v in [float(r)] + [0.5] * (w - 1)]
+        out = {"values": values, "first_row": self._rows, "n_rows": n, "samples": self._samples}
+        self._rows += n
+        return out
+
+    def push(self, samples):
+        self.pushes.append(list(samples))
+        self._samples += len(samples)
+        have = self._pending + len(samples)
+        self._pending = have % 2
+        return self._update(have // 2)
+
+    def finish(self):
+        self._finished = True
+        return self._update(self._pending)
+
+    def reset(self): self.__init__(**{k: self._layout[k] for k in self._layout})
+    def finished(self): return self._finished
+    def rows(self): return self._rows
+    def layout(self): return dict(self._layout)
+    def state_bytes(self): return 128
 
 
 class _FakeSpeechStream:
@@ -539,6 +623,21 @@ class TestTranscriptStream:
         assert stream.finished and stream.text == "1 2" and stream.tokens == [1, 2]
         assert stream.state_bytes == 1024
 
+    def test_stream_options_reach_the_driver(self):
+        """A re-decoding file's cadence (loom.cpp ADR-106) is a `stream_open` input, passed as given."""
+        handle = _FakeHandle([], contract=dict(_ASR_CONTRACT, can_stream=True))
+        _model(handle).speech2text.stream(update_seconds=1.0)
+        assert handle.stream_inputs == {"update_seconds": 1.0}
+        _model(handle).speech2text.stream()
+        assert handle.stream_inputs == {} and handle.stream_language == ""
+
+    def test_a_stream_language_is_a_name_the_engine_resolves(self):
+        """`language` goes to the binding as the NAME (the engine's `language_input`, loom.cpp ADR-109
+        turns it into the driver's id), never through `_as_value`, which refuses strings."""
+        handle = _FakeHandle([], contract=dict(_ASR_CONTRACT, can_stream=True))
+        _model(handle).speech2text.stream(language="de-DE")
+        assert handle.stream_language == "de-DE" and handle.stream_inputs == {}
+
     def test_a_file_without_a_live_path_says_so(self):
         model = _model(_FakeHandle([], contract=_ASR_CONTRACT))
         assert not model.can_stream
@@ -551,6 +650,24 @@ class TestTranscriptStream:
                                                declared=True))
         with pytest.raises(loom.UnsupportedTask, match="text2text"):
             _model(handle).speech2text.stream()
+
+
+class TestLineStream:
+    """`model.speech2text.stream(vad=...)`: any recogniser in VAD lines (loom.cpp ADR-127)."""
+
+    def test_a_vad_turns_the_stream_into_lines(self):
+        handle = _FakeHandle([], contract=_ASR_CONTRACT)  # no live path of its own: lines need none
+        vad = _model(_FakeHandle([]))
+        stream = _model(handle).speech2text.stream(vad=vad, language="en", update_seconds=1, threshold=0.4)
+        assert isinstance(stream, loom.LineStream)
+        assert handle.line_args == (vad._handle, {"update_seconds": 1.0, "threshold": 0.4}, "en", "")
+        first = stream.push([0.0] * 8001)
+        assert [type(l) for l in first] == [loom.Line]
+        assert first[0].index == 0 and first[0].seconds == pytest.approx(8001 / 16000) and not first[0].complete
+        second = stream.push([0.0] * 7998)
+        assert second[0].index == 0 and second[0].complete and second[0].seconds == pytest.approx(15999 / 16000)
+        assert stream.finish() == [] and stream.finished
+        assert [l.text for l in stream.lines] == ["15999 samples"] and stream.text == "15999 samples"
 
 
 class TestTranscribeWarnings:
@@ -1242,6 +1359,65 @@ class TestSpeechStream:
     def test_split_sentences(self, text, want):
         from loom._interfaces import split_sentences
         assert split_sentences(text) == want
+
+
+class TestFrameStream:
+    """`speech2class.stream()` and `speech2embeddings.stream()`: a frame model's rows as the audio
+    arrives (loom.cpp ADR-106), each push answered with what `infer` answers, at stream times."""
+
+    def test_a_vad_answers_each_push_with_its_frames_at_stream_times(self):
+        handle = _FakeHandle([], contract=dict(_VAD_CONTRACT, can_stream=True))
+        model = _model(handle)
+        assert model.can_stream_frames
+        stream = model.speech2class.stream()
+        first = stream.push([0.0, 0.25, 0.5])
+        assert isinstance(first, loom.AudioClasses) and first.granularity == "frame"
+        assert first.labels == ["non_speech", "speech"] and first.probabilities == [[0.0, 0.5]]
+        assert first.times == [0.01]
+        second = stream.push([1.0, 2.0, 3.0, 4.0])
+        assert second.probabilities == [[1.0, 0.5], [2.0, 0.5]]
+        assert second.times == [0.01 + 1 / 50.0, 0.01 + 2 / 50.0]
+        assert second.probability("speech") == [0.5, 0.5]
+        assert handle.frame_stream.pushes[1] == [1.0, 2.0, 3.0, 4.0]
+        last = stream.finish()
+        assert last.probabilities == [[3.0, 0.5]] and last.times == [0.01 + 3 / 50.0]
+        assert stream.rows == 4 and stream.finished and stream.state_bytes == 128
+        stream.reset()
+        assert stream.rows == 0 and stream.push([0.0, 0.0]).times == [0.01]
+
+    def test_a_frame_embedder_answers_frame_embeddings(self):
+        handle = _FakeHandle([], contract=dict(_FRAME_EMBEDDER_CONTRACT, can_stream=True))
+        model = _model(handle)
+        assert model.can_stream_frames
+        stream = model.speech2embeddings.stream()
+        stream.push([0.0, 0.0])
+        got = stream.push([0.0, 0.0])
+        assert isinstance(got, loom.FrameEmbeddings) and got.dim == 3
+        assert got.rows == [[1.0, 0.5, 0.5]] and got.times == [1 / 50.0]
+
+    def test_options_reach_stream_open(self):
+        """MarbleNet's `lookahead_frames` (loom.cpp ADR-120), and any other option, go to the driver's
+        `stream_open` as numbers; none at all is an empty table, as before."""
+        handle = _FakeHandle([], contract=dict(_VAD_CONTRACT, can_stream=True))
+        model = _model(handle)
+        model.speech2class.stream(lookahead_frames=20)
+        assert handle.frame_stream_inputs == {"lookahead_frames": 20.0}
+        model.speech2class.stream()
+        assert handle.frame_stream_inputs == {}
+        with pytest.raises(TypeError):
+            model.speech2class.stream(lookahead_frames=True)
+
+    def test_what_cannot_stream_says_so(self):
+        # A clip model is never a frame stream, whatever its driver exports.
+        assert not _model(_FakeHandle([], contract=dict(_LID_CONTRACT, can_stream=True))).can_stream_frames
+        # A frame model exported before the live path.
+        model = _model(_FakeHandle([], contract=_VAD_CONTRACT))
+        assert not model.can_stream_frames
+        with pytest.raises(RuntimeError, match="no live path"):
+            model.speech2class.stream()
+        # The wrong door.
+        with pytest.raises(loom.UnsupportedTask):
+            _model(_FakeHandle([], contract=dict(_VAD_CONTRACT, can_stream=True))).speech2embeddings.stream()
 
 
 class TestPairStream:
