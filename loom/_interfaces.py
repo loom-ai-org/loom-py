@@ -22,6 +22,7 @@ decode strategy is in the wrong layer.
 """
 from __future__ import annotations
 
+import re
 import warnings
 from dataclasses import dataclass
 from typing import Any, Sequence
@@ -202,6 +203,120 @@ class FrameEmbeddings:
         if not self.frame_rate:
             return [self.frame_offset] * len(self.rows)
         return [self.frame_offset + i / self.frame_rate for i in range(len(self.rows))]
+
+
+class SpeechStream:
+    """A TTS's audio handed back a piece at a time, from `text2speech.stream`. Iterate it for one
+    :class:`Audio` per piece, in order; a piece that made no sound is skipped.
+
+    `exact` says how it was cut. True: by the model's own driver (loom.cpp ADR-100), and the pieces joined
+    are `infer`'s waveform. False: here, a sentence of the text per `infer` call, which differs from one
+    call over the whole text at the joins.
+    """
+
+    def __init__(self, handle, sample_rate: int, exact: bool):
+        self._handle = handle
+        self.sample_rate = int(sample_rate)
+        self.exact = bool(exact)
+
+    def __iter__(self):
+        while not self.finished:
+            piece = self.next()
+            if piece is not None:
+                yield piece
+
+    def next(self) -> Audio | None:
+        """The next piece, or None once finished."""
+        samples = self._handle.next()
+        if len(samples) == 0:
+            return None
+        return Audio(samples=[float(s) for s in samples], sample_rate=self.sample_rate)
+
+    def reset(self) -> None:
+        """Back to the start: the next piece is the first again."""
+        self._handle.reset()
+
+    @property
+    def finished(self) -> bool:
+        return bool(self._handle.finished())
+
+    @property
+    def pieces_done(self) -> int:
+        return int(self._handle.pieces_done())
+
+    @property
+    def pieces_total(self) -> int:
+        """How many pieces there are, or 0 when the model does not say up front."""
+        return int(self._handle.pieces_total())
+
+    @property
+    def seconds(self) -> float:
+        """Audio handed back so far."""
+        return int(self._handle.samples()) / self.sample_rate
+
+    @property
+    def state_bytes(self) -> int:
+        """What the engine holds for this stream between pieces."""
+        return int(self._handle.state_bytes())
+
+
+# A sentence ends at a run of terminal marks (with any closing quote or bracket) followed by white space,
+# at a CJK terminal mark, or at a line break. Generic on purpose: this is the cut for models whose own
+# driver does not cut, and "Dr. Smith" becomes two pieces, which costs a pause and nothing else.
+_SENTENCE_END = re.compile(r"[.!?\u2026]+[\"')\]\u201d\u2019]*(?=\s)|[\u3002\uff01\uff1f]+|\n+")
+
+
+def split_sentences(text: str) -> list[str]:
+    """`text` cut into sentences, each stripped; the whole text when nothing cuts it."""
+    out, start = [], 0
+    for m in _SENTENCE_END.finditer(text):
+        piece = text[start:m.end()].strip()
+        if piece:
+            out.append(piece)
+        start = m.end()
+    tail = text[start:].strip()
+    if tail:
+        out.append(tail)
+    return out or [text]
+
+
+class _SentencePieces:
+    """The stream handle for a model whose driver does not stream: one `infer` per piece."""
+
+    def __init__(self, interface: "Text2Speech", pieces: list[dict], options: dict):
+        self._interface = interface
+        self._pieces = pieces
+        self._options = options
+        self.reset()
+
+    def next(self) -> list[float]:
+        if self.finished():
+            return []
+        piece = {k: v for k, v in self._pieces[self._done].items() if v is not None}
+        inputs = self._interface._inputs(**piece, **self._options)
+        samples = self._interface._model.infer(**inputs)
+        self._done += 1
+        self._samples += len(samples)
+        return samples
+
+    def reset(self) -> None:
+        self._done = 0
+        self._samples = 0
+
+    def finished(self) -> bool:
+        return self._done >= len(self._pieces)
+
+    def pieces_done(self) -> int:
+        return self._done
+
+    def pieces_total(self) -> int:
+        return len(self._pieces)
+
+    def samples(self) -> int:
+        return self._samples
+
+    def state_bytes(self) -> int:
+        return 0
 
 
 class Interface:
@@ -394,6 +509,23 @@ class Text2Speech(Interface):
         Passing one you know to be right silences nothing -- there is no way for this to tell a good
         guess from a bad one -- so a model whose rate matters should be re-exported declaring it.
         """
+        inputs = self._inputs(text, phonemes=phonemes, tokens=tokens, steps=steps, seed=seed,
+                              language=language, voice=voice, reference=reference,
+                              reference_text=reference_text, **driver_inputs)
+        samples = self._model.infer(**inputs)
+        if not isinstance(samples, list):
+            raise TypeError(
+                f"this model's driver returned {type(samples).__name__} rather than a waveform. Its "
+                f"declared output kind is audio, so either the export or the driver is wrong -- "
+                f"`model.driver_source` documents what `infer` actually returns."
+            )
+        return Audio(samples=[float(s) for s in samples], sample_rate=self._rate(sample_rate, stacklevel=4))
+
+    def _inputs(self, text: str | None = None, *, phonemes: str | Sequence[int] | None = None,
+                tokens: Sequence[int] | None = None, steps: int | None = None, seed: int = 0,
+                language: str | None = None, voice: Any = None, reference: Any = None,
+                reference_text: str | None = None, **driver_inputs) -> dict[str, Any]:
+        """The driver inputs `_infer` documents, built and not yet run -- shared with `stream`."""
         contract = self._model.contract
         inputs: dict[str, Any] = {}
         if voice is not None:
@@ -424,23 +556,45 @@ class Text2Speech(Interface):
         # produce the same audio twice, which is the behaviour a caller is more likely to want from a
         # library than from a demo. Name one to vary the voice's noise.
         inputs["seed"] = float(seed)
+        return inputs
 
-        samples = self._model.infer(**inputs)
-        if not isinstance(samples, list):
-            raise TypeError(
-                f"this model's driver returned {type(samples).__name__} rather than a waveform. Its "
-                f"declared output kind is audio, so either the export or the driver is wrong -- "
-                f"`model.driver_source` documents what `infer` actually returns."
-            )
-        declared = int(contract.get("sample_rate") or 0)
+    def stream(self, text: str | None = None, *, phonemes: str | Sequence[int] | None = None,
+               tokens: Sequence[int] | None = None, sample_rate: int = 16000, **options) -> "SpeechStream":
+        """`infer`, handed back a piece at a time: iterate the result for one :class:`Audio` per piece.
+
+        Takes exactly `infer`'s arguments. **Two ways it can be cut, and `exact` says which:**
+
+        * A file whose driver streams (`model.can_stream_speech`: Pocket-TTS, Soprano, re-exported) is
+          cut by the driver, one sentence chunk per piece. Those references make each chunk from a fresh
+          state, so the pieces joined are `infer`'s waveform, sample for sample. `exact` is True.
+        * Any other model is cut HERE, by splitting `text` into sentences and calling `infer` on each.
+          Each piece is that sentence's own audio, and the pieces joined differ from one `infer` over
+          the whole text wherever the model would have carried prosody across a sentence boundary.
+          `exact` is False. Given `phonemes=` or `tokens=` there is no text to split, and the stream
+          is one piece.
+        """
+        if not self.supported:
+            raise self._unsupported()
+        rate = self._rate(sample_rate, stacklevel=3)
+        if self._model.can_stream_speech:
+            inputs = self._inputs(text, phonemes=phonemes, tokens=tokens, **options)
+            return SpeechStream(self._model._open_speech_stream(inputs), rate, exact=True)
+        if text is not None and phonemes is None and tokens is None and options.get("reference") is None:
+            pieces = [{"text": sentence} for sentence in split_sentences(text)]
+        else:
+            pieces = [{"text": text, "phonemes": phonemes, "tokens": tokens}]
+        return SpeechStream(_SentencePieces(self, pieces, options), rate, exact=False)
+
+    def _rate(self, sample_rate: int, stacklevel: int) -> int:
+        declared = int(self._model.contract.get("sample_rate") or 0)
         if not declared:
             warnings.warn(
                 f"{self._model.path.name} declares no sample rate, so {sample_rate} Hz is used. If that "
                 f"is not this model's rate the audio will play at the wrong speed rather than fail -- "
                 f"pass sample_rate= if you know it, or re-export the model declaring it.",
-                RuntimeWarning, stacklevel=3,
+                RuntimeWarning, stacklevel=stacklevel,
             )
-        return Audio(samples=[float(s) for s in samples], sample_rate=declared or int(sample_rate))
+        return declared or int(sample_rate)
 
     #: What a model that clones by in-filling declares as `loom.tts.reference`. An hparam rather than
     #: a contract field by ADR-020's split: it does not choose the door (that is still text2speech), it

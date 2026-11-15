@@ -87,10 +87,13 @@ def test_inference_runs_and_is_deterministic(model):
 def test_a_text_model_goes_from_a_string_to_a_string(model):
     """The end-to-end claim, on whatever real model is configured.
 
-    Skips for a model with no embedded vocabulary -- which is not a gap in the model but a fact about
-    it: the TTS families take phoneme ids a phonemiser produces outside the engine, so there is no
-    text door to test.
+    Skips for a model that does not declare `text2text`. A vocabulary is not the test: it was when this
+    was written, but most TTS files carry one now (Pocket-TTS, Soprano, Chatterbox...), and `generate` on
+    one of those hands back its audio samples as "ids". The declared interface is what says text comes
+    out, as it is for every other door here.
     """
+    if not model.text2text.supported:
+        pytest.skip(f"{model.architecture} is not a text model ({model.contract.get('interface') or 'no interface'})")
     if model.tokenizer is None:
         pytest.skip(f"{model.architecture} embeds no vocabulary; its driver takes ids directly")
 
@@ -108,8 +111,11 @@ def test_the_tokenizer_describes_itself(model):
     if model.tokenizer is None:
         pytest.skip(f"{model.architecture} embeds no vocabulary")
     tokenizer = model.tokenizer
-    assert tokenizer.kind in {"gpt2", "bert", "byt5", "llama", "t5", "ctc", "phonemes",
-                              "supertonic"}, tokenizer.kind
+    # No list of kinds: the binding builds a Tokenizer only for a `tokenizer.ggml.model` tag it dispatches
+    # (an unknown one is no tokenizer, never a failed load), so a list here could only repeat that dispatch
+    # -- and the one that was here did, until six newer kinds (pocket_tts, soprano, ...) fell outside it.
+    assert isinstance(tokenizer.kind, str) and tokenizer.kind, tokenizer.kind
+    assert tokenizer.kind in repr(model)
     assert tokenizer.size > 0
 
 
@@ -168,3 +174,30 @@ def test_a_token_stream_is_what_generate_returns(model):
         assert "".join(got_a) == want_a, mode
         assert "".join(got_b) == want_b, mode
     model.stream_caches = "auto"
+
+
+def test_a_speech_stream_is_what_infer_returns(model):
+    """The audio-out door (loom.cpp ADR-100), on whatever TTS is configured: a file whose driver streams
+    hands back pieces that join to `infer`'s waveform sample for sample, and two streams pulled in turn
+    -- with a one-pass `infer` between their pieces -- each give their own. Skips for a model that is not
+    text2speech, or a file whose driver does not stream (that one is cut by sentence, not exactly)."""
+    if not model.text2speech.supported or not model.can_stream_speech:
+        pytest.skip(f"{model.architecture} has no speech stream")
+    text_a = ("The history of the city of Rome begins on the Palatine hill, where shepherds built their "
+              "first huts beside the river. A good recipe for country bread needs only flour, water, salt "
+              "and a great deal of patience in the morning.")
+    text_b = "Trains leave every twenty minutes. Bring a warm coat."
+    want_a = model.text2speech.infer(text_a, seed=11).samples
+    want_b = model.text2speech.infer(text_b, seed=12).samples
+    stream = model.text2speech.stream(text_a, seed=11)
+    assert stream.exact
+    pieces = [p.samples for p in stream]
+    assert len(pieces) >= 2 and sum(pieces, []) == want_a
+    a = iter(model.text2speech.stream(text_a, seed=11))
+    b = iter(model.text2speech.stream(text_b, seed=12))
+    got_a, got_b = [], []
+    for _ in range(16):
+        got_a += next(a, loom.Audio(samples=[], sample_rate=1)).samples
+        assert model.text2speech.infer(text_b, seed=12).samples == want_b
+        got_b += next(b, loom.Audio(samples=[], sample_rate=1)).samples
+    assert got_a == want_a and got_b == want_b
