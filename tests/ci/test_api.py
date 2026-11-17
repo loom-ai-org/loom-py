@@ -1866,3 +1866,54 @@ class TestSampleRateFallback:
 
         sig = inspect.signature(loom.Text2Speech._infer)
         assert sig.parameters["sample_rate"].default == 16000
+
+
+_TTS_TRANSCRIPT_CONTRACT = dict(_TTS_TEXT_CONTRACT, sample_rate=24000, languages=["de", "en", "zh"])
+
+
+def _transcript(**kw):
+    return _CharHandle([[0.1]], vocab="omnivoice", contract=_TTS_TRANSCRIPT_CONTRACT,
+                       hparams={"tts.reference": "transcript", "tts.instruct": "text"}, **kw)
+
+
+class TestText2SpeechTranscriptInstructLanguage:
+    """OmniVoice's door (loom.cpp ADR-131): the clip's transcript BESIDE the text, a voice described in
+    words, and a language as an index into the file's own codes."""
+
+    def test_a_transcript_reference_is_three_inputs_and_no_join(self):
+        handle = _transcript()
+        _model(handle).text2speech.infer("hi", reference=[0.5, -0.5], reference_text="Ok.")
+        call, = handle.calls
+        assert call["waveform"] == [0.5, -0.5]
+        assert call["ref_text"] == [float(ord(c)) for c in "Ok."]
+        assert call["tokens"] == [float(ord(c)) for c in "hi"]
+        assert "text_ids" not in call and "n_ref_text" not in call
+
+    def test_a_transcript_model_speaks_without_a_reference(self):
+        """Unlike an in-filling model, a voice is optional: no clip is the model's own voice."""
+        handle = _transcript()
+        _model(handle).text2speech.infer("hi")
+        assert handle.calls[0]["tokens"] == [float(ord(c)) for c in "hi"]
+        assert "waveform" not in handle.calls[0]
+
+    def test_instruct_is_encoded_for_a_model_that_declares_it(self):
+        handle = _transcript()
+        _model(handle).text2speech.infer("hi", instruct="female, low pitch")
+        assert handle.calls[0]["instruct"] == [float(ord(c)) for c in "female, low pitch"]
+
+    def test_instruct_is_refused_by_a_model_that_does_not_design_voices(self):
+        handle = _CharHandle([], contract=_TTS_TEXT_CONTRACT)
+        with pytest.raises(loom.UnsupportedTask, match="voice="):
+            _model(handle).text2speech.infer("hi", instruct="female")
+        assert handle.calls == []
+
+    def test_the_language_is_the_index_of_a_declared_code(self):
+        handle = _transcript()
+        _model(handle).text2speech.infer("hi", language="en")
+        assert handle.calls[0]["language"] == 2.0
+        # Consumed by the driver, not handed to the vocabulary as a tag.
+        assert all(lang == "" for lang in getattr(handle, "encode_langs", [""]))
+
+    def test_an_undeclared_language_is_refused_with_the_list(self):
+        with pytest.raises(ValueError, match="model.contract"):
+            _model(_transcript()).text2speech.infer("hi", language="xx")
