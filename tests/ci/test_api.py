@@ -330,6 +330,14 @@ class _FakeHandle:
             raise ValueError(f"stream_caches is 'auto', 'park' or 'per-stream', not '{mode}'")
         self.stream_caches = mode
 
+    # -- the compute-buffer controls (loom.cpp ADR-072) -------------------------------------------
+    held = False
+    buffer_bytes = 4096
+
+    def hold_compute_buffers(self, hold): self.held = hold
+    def release_compute_buffers(self): self.buffer_bytes = 0
+    def compute_buffer_bytes(self): return self.buffer_bytes
+
     def open_token_stream(self, tokens, max_new_tokens, eos_token, extra_inputs, temperature, top_k,
                           top_p, seed):
         self.generate_calls.append(
@@ -588,6 +596,16 @@ class TestTextStream:
         assert model.stream_caches == "per-stream" and model._handle.stream_caches == "per-stream"
         with pytest.raises(ValueError):
             model.stream_caches = "both"
+
+    def test_compute_buffer_controls_reach_the_engine(self):
+        model = self._model([])
+        assert model.hold_compute_buffers is False and model.compute_buffer_bytes == 4096
+        model.hold_compute_buffers = True
+        assert model.hold_compute_buffers is True and model._handle.held is True
+        with pytest.raises(TypeError):
+            model.hold_compute_buffers = 1   # a truthy int would read as a decision nobody made
+        model.release_compute_buffers()
+        assert model.compute_buffer_bytes == 0
 
     def test_an_lm_with_stream_functions_is_not_a_transcript_stream(self):
         handle = _FakeHandle([], contract=dict(task="text-generation", input_kind="text",
