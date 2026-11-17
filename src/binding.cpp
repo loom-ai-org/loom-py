@@ -124,6 +124,9 @@ public:
             // tortoise-tts's English normaliser, the sentence split, each sentence wrapped in the
             // prompt `[STOP][TEXT]...[START]` -- the driver generates the sentences in turn.
             tokenizer->soprano_ = loom::SopranoVocab::load(model);
+        } else if (tokenizer->kind_ == "plamo") {
+            // PFN's PLaMo: a scored unigram decoded by Viterbi with byte fallback (loom.cpp ADR-132).
+            tokenizer->plamo_ = loom::PlamoVocab::load(model);
         } else if (tokenizer->kind_ == "llama" || tokenizer->kind_ == "t5") {
             tokenizer->spm_ = loom::Vocab::load(model);
         }
@@ -133,7 +136,7 @@ public:
 
     bool valid() const {
         return spm_ || bpe_ || wordpiece_ || byte_ || supertonic_ || phoneme_ || ctc_ || f5_ ||
-               chatterbox_ || pocket_tts_ || voxcpm_ || cosyvoice3_ || soprano_;
+               chatterbox_ || pocket_tts_ || voxcpm_ || cosyvoice3_ || soprano_ || plamo_;
     }
     const std::string& kind() const { return kind_; }
 
@@ -150,6 +153,7 @@ public:
         if (voxcpm_) return voxcpm_->size();
         if (cosyvoice3_) return cosyvoice3_->size();
         if (soprano_) return soprano_->size();
+        if (plamo_) return plamo_->size();
         // n_tokens(), not vocab_size() -- the latter is the 65536-entry BMP lookup table, which is not
         // what any caller reading `tokenizer.size()` means.
         return supertonic_->n_tokens();
@@ -183,6 +187,7 @@ public:
         if (voxcpm_) return voxcpm_->encode(text);
         if (cosyvoice3_) return cosyvoice3_->encode(text);
         if (soprano_) return soprano_->encode(text);
+        if (plamo_) return plamo_->encode(text);
         return supertonic_->tokenize(text, lang);  // empty lang -> the file's own default_lang
     }
 
@@ -199,6 +204,7 @@ public:
         if (voxcpm_) return voxcpm_->decode(ids);
         if (cosyvoice3_) return cosyvoice3_->decode(ids);
         if (soprano_) return soprano_->decode(ids);
+        if (plamo_) return plamo_->decode(ids);
         return supertonic_->detokenize(ids);
     }
 
@@ -213,6 +219,7 @@ private:
     std::unique_ptr<loom::WordPieceVocab> wordpiece_;
     std::unique_ptr<loom::ByteVocab> byte_;
     std::unique_ptr<loom::SupertonicTextVectorizer> supertonic_;
+    std::unique_ptr<loom::PlamoVocab> plamo_;
     std::unique_ptr<loom::PhonemeVocab> phoneme_;
     std::unique_ptr<loom::CtcVocab> ctc_;
     std::unique_ptr<loom::F5Vocab> f5_;
