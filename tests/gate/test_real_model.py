@@ -84,6 +84,32 @@ def test_inference_runs_and_is_deterministic(model):
     assert model.infer(**inputs) == first
 
 
+def test_the_compute_buffer_controls_act_on_a_real_model(model):
+    """`release_compute_buffers` gives the working memory back and the next call rebuilds it with the
+    same answer; `hold_compute_buffers` is what the engine's shrink rule reads (loom.cpp ADR-072)."""
+    import json
+
+    raw = os.environ.get("LOOM_TEST_MODEL_INPUTS")
+    if not raw:
+        pytest.skip("set LOOM_TEST_MODEL_INPUTS to a JSON object of the driver's inputs")
+    inputs = json.loads(raw)
+
+    first = model.infer(**inputs)
+    assert model.compute_buffer_bytes > 0, "a call ran but no compute buffer is reported"
+    model.release_compute_buffers()
+    assert model.compute_buffer_bytes == 0
+    assert model.infer(**inputs) == first
+    assert model.compute_buffer_bytes > 0
+
+    model.hold_compute_buffers = True
+    try:
+        held = model.compute_buffer_bytes
+        assert model.infer(**inputs) == first
+        assert model.compute_buffer_bytes >= held
+    finally:
+        model.hold_compute_buffers = False
+
+
 def test_a_text_model_goes_from_a_string_to_a_string(model):
     """The end-to-end claim, on whatever real model is configured.
 

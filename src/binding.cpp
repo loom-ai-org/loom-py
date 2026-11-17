@@ -640,6 +640,12 @@ public:
         else throw std::invalid_argument("stream_caches is 'auto', 'park' or 'per-stream', not '" + mode + "'");
     }
 
+    // The bridge-wide compute-buffer controls (loom.cpp ADR-072). When to hold or give back memory is the
+    // host's call, not the driver's, which is why they are here and not in Lua.
+    void hold_compute_buffers(bool hold) { bridge_->hold_compute_buffers(hold); }
+    void release_compute_buffers() { bridge_->release_compute_buffers(); }
+    size_t compute_buffer_bytes() const { return bridge_->compute_buffer_bytes(); }
+
     loom::text::GenerateOptions generate_options(uint32_t max_new_tokens, int32_t eos_token,
                                                  const py::dict& extra_inputs,
                                                  const std::optional<float>& temperature,
@@ -1124,6 +1130,9 @@ PYBIND11_MODULE(_loom, m) {
              py::arg("eos_token"), py::arg("extra_inputs"), py::arg("temperature"), py::arg("top_k"),
              py::arg("top_p"), py::arg("seed"), py::keep_alive<0, 1>())
         .def("set_stream_caches", &Model::set_stream_caches, py::arg("mode"))
+        .def("hold_compute_buffers", &Model::hold_compute_buffers, py::arg("hold"))
+        .def("release_compute_buffers", &Model::release_compute_buffers)
+        .def("compute_buffer_bytes", &Model::compute_buffer_bytes)
         .def("classify", &Model::classify, py::arg("tokens"), py::arg("strip_special"),
              py::arg("extra_inputs"))
         .def("classify_audio", &Model::classify_audio, py::arg("waveform"))
