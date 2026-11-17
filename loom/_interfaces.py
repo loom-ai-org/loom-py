@@ -1072,9 +1072,10 @@ class Text2Speech(Interface):
                     f"with a current loom-exporter, which writes the table its checkpoint already had."
                 )
             lang = language or (contract.get("languages") or ["en"])[0]
-            spoken = phonemizers.phonemize(text, alphabet=alphabet, language=lang)
-            # The conventions the checkpoint was trained in, when it declares them (`phonemizers.fold`).
-            return self._model.tokenize(phonemizers.fold(spoken, self._phoneme_style(), language=lang))
+            # The conventions the checkpoint was trained in, when it declares them (`phonemizers.fold`),
+            # or the style's own front end when it has one and it is installed (`phonemize_styled`).
+            return self._model.tokenize(phonemizers.phonemize_styled(
+                text, self._phoneme_style(), alphabet=alphabet, language=lang))
         if frontend != "vocab":
             raise UnsupportedTask(
                 f"this model declares no text front end, so it cannot encode text. Pass tokens=[...] "
