@@ -683,6 +683,32 @@ class Model:
         self._stream_caches = str(mode)
 
     @property
+    def hold_compute_buffers(self) -> bool:
+        return getattr(self, "_hold_compute_buffers", False)
+
+    @hold_compute_buffers.setter
+    def hold_compute_buffers(self, hold: bool) -> None:
+        """Keep every module's compute buffer at its largest size instead of shrinking it after a
+        stretch of smaller calls (loom.cpp ADR-072). A server that alternates long and short requests
+        wants this: a buffer given back has to be faulted in again by the next long one, which on an LM
+        is each request's prefill. Off by default. Applies to modules that have not run yet too."""
+        if not isinstance(hold, bool):
+            raise TypeError(f"hold_compute_buffers takes True or False, not {type(hold).__name__}")
+        self._handle.hold_compute_buffers(hold)
+        self._hold_compute_buffers = hold
+
+    def release_compute_buffers(self) -> None:
+        """Give every module's compute buffer back now, e.g. before a host goes idle. The weights, the
+        caches and anything a stream keeps are untouched; the next call rebuilds at the size it needs."""
+        self._handle.release_compute_buffers()
+
+    @property
+    def compute_buffer_bytes(self) -> int:
+        """Bytes every module's compute buffer holds right now: the model's working memory beyond its
+        weights and caches."""
+        return int(self._handle.compute_buffer_bytes())
+
+    @property
     def can_stream(self) -> bool:
         """Whether this file's driver has a live path (`stream_open` / `stream_feed` /
         `stream_finish`), which `stream()` needs. False for every file exported before streaming, whose
