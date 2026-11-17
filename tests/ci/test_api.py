@@ -1917,3 +1917,48 @@ class TestText2SpeechTranscriptInstructLanguage:
     def test_an_undeclared_language_is_refused_with_the_list(self):
         with pytest.raises(ValueError, match="model.contract"):
             _model(_transcript()).text2speech.infer("hi", language="xx")
+
+
+class _TranslateHandle(_FakeHandle):
+    """A file whose driver builds a translation prompt (PLaMo 3, loom.cpp ADR-132)."""
+
+    def has_driver(self): return True
+    def driver_source(self): return "function translation_prompt(inputs)\n  return {}\nend\n"
+    def call(self, fn_name, inputs):
+        self.calls.append((fn_name, dict(inputs)))
+        return [1.0, 16.0, 5.0]
+
+
+class TestText2TextTranslate:
+    """`text2text.translate`: the host encodes the strings, the FILE assembles the prompt, and the
+    ordinary loop generates from it -- no prompt format lives in this package."""
+
+    def _model(self):
+        handle = _TranslateHandle([[42, 43]], contract={"task": "text-generation", "input_kind": "text",
+                                                         "output_kind": "text", "interface": "text2text"})
+        return _model(handle), handle
+
+    def test_the_pieces_go_to_the_driver_and_its_prompt_to_the_loop(self):
+        model, handle = self._model()
+        out = model.text2text.translate("hi", target_lang="ja", source_lang="en", form="polite",
+                                        glossary={"a": "b", "c": "d"}, history=[("x", "y")])
+        (fn, inputs), = handle.calls
+        assert fn == "translation_prompt"
+        assert inputs["text"] == [10.0, 11.0, 12.0] and inputs["target_lang"] == [10.0, 11.0, 12.0]
+        # Two strings per glossary entry and per history turn, each three ids in this fake vocabulary.
+        assert inputs["glossary_offsets"] == [0.0, 3.0, 6.0, 9.0, 12.0]
+        assert inputs["history_offsets"] == [0.0, 3.0, 6.0]
+        assert handle.generate_calls[0]["tokens"] == [1, 16, 5]
+        assert out == "42|43"
+
+    def test_optional_pieces_left_out_are_not_sent(self):
+        model, handle = self._model()
+        model.text2text.translate("hi", target_lang="en")
+        (_, inputs), = handle.calls
+        assert set(inputs) == {"text", "target_lang"}
+
+    def test_a_file_without_the_prompt_refuses(self):
+        handle = _FakeHandle([], contract={"task": "text-generation", "input_kind": "text",
+                                           "output_kind": "text", "interface": "text2text"})
+        with pytest.raises(loom.UnsupportedTask, match="translation_prompt"):
+            _model(handle).text2text.translate("hi", target_lang="en")
