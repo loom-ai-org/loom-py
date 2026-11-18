@@ -25,7 +25,7 @@ from __future__ import annotations
 import re
 import warnings
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 
 class UnsupportedTask(NotImplementedError):
@@ -568,6 +568,68 @@ class Text2Text(Interface):
         if not self.supported:
             raise self._unsupported()
         return self._model.chat_stream(messages, max_new_tokens=max_new_tokens, **options)
+
+    def translate(self, text: str, target_lang: str, *, source_lang: str | None = None,
+                  context: str | None = None, glossary=None, form: str | None = None, history=None,
+                  max_new_tokens: int = 512, **options) -> str:
+        """Translate `text` into `target_lang`, for a file that ships a translation prompt (PLaMo 3
+        translate: `model.can_translate`).
+
+        The prompt's FORMAT is the file's -- its driver's `translation_prompt` assembles the ids (loom.cpp
+        ADR-132) -- and this door only encodes the strings it is given: `text`, the language codes,
+        `context`, `glossary` (a mapping or a list of `(source, target)` pairs, in order), `form`
+        ("polite"/"plain", a Japanese target only) and `history` (earlier `(source, translation)` pairs,
+        oldest first, to keep word choices consistent). What the model generates is decoded without its
+        stop tag. Greedy unless `options` say otherwise (`temperature`, `top_k`, `top_p`, `seed`).
+        """
+        ids = self._translation_ids(text, target_lang, source_lang, context, glossary, form, history,
+                                    max_new_tokens, options)
+        # The stop token the loop ended on is not part of the translation.
+        stops = set(self._model.eos_token_ids)
+        while ids and ids[-1] in stops:
+            ids.pop()
+        return self._model.detokenize(ids)
+
+    def translate_stream(self, text: str, target_lang: str, *, source_lang: str | None = None,
+                         context: str | None = None, glossary=None, form: str | None = None, history=None,
+                         max_new_tokens: int = 512, **options):
+        """`translate`, handed back as it is drawn (`Model.generate_stream`): iterate it for the text."""
+        prompt = self._translation_prompt(text, target_lang, source_lang, context, glossary, form, history)
+        return self._model.generate_stream(prompt, max_new_tokens=max_new_tokens, **options)
+
+    def _translation_prompt(self, text, target_lang, source_lang, context, glossary, form, history) -> list[int]:
+        if not self._model.can_translate:
+            raise UnsupportedTask(
+                f"{self._model.path.name} ships no translation prompt (its driver has no "
+                f"`translation_prompt`); prompt it yourself with infer().")
+        enc = lambda s: [float(i) for i in self._model.tokenize(str(s))]
+        pairs = list(glossary.items()) if isinstance(glossary, Mapping) else list(glossary or [])
+        turns = list(history or [])
+        inputs: dict[str, Any] = {"text": enc(text), "target_lang": enc(target_lang)}
+        if source_lang:
+            inputs["source_lang"] = enc(source_lang)
+        if context:
+            inputs["context"] = enc(context)
+        if form:
+            inputs["form"] = enc(form)
+        # Lists of strings travel as one id array and its offsets, the shape a driver input can take.
+        for name, items in (("glossary", [s for pair in pairs for s in pair]),
+                            ("history", [s for turn in turns for s in turn])):
+            if not items:
+                continue
+            ids, offsets = [], [0.0]
+            for item in items:
+                ids += enc(item)
+                offsets.append(float(len(ids)))
+            inputs[name] = ids
+            inputs[name + "_offsets"] = offsets
+        out = self._model.call("translation_prompt", inputs)
+        return [int(t) for t in (out if isinstance(out, list) else [out])]
+
+    def _translation_ids(self, text, target_lang, source_lang, context, glossary, form, history,
+                         max_new_tokens, options) -> list[int]:
+        prompt = self._translation_prompt(text, target_lang, source_lang, context, glossary, form, history)
+        return self._model.generate_ids(prompt, max_new_tokens=max_new_tokens, **options)
 
     def ids(self, tokens: Sequence[int], max_new_tokens: int = 64,
             eos_token: int | None = None, **driver_inputs) -> list[int]:
