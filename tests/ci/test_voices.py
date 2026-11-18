@@ -156,3 +156,52 @@ def test_text2codes_takes_a_voice_through_the_same_door(tmp_path):
     assert m.text2codes.infer(tokens=[5], voice="pair") == [[3], [4]]
     assert m.text2codes.infer(tokens=[5], voice="pair", voice_kv=[8.0]) == [[8]]
     assert m.text2codes.infer(tokens=[5]) == [[-1]]
+
+
+# -- voices the file carries, chosen by row (Paradee, loom.cpp ADR-135) --------------------------------
+
+ROW_DRIVER = """
+function infer(inputs)
+    return {inputs.voice or -1}
+end
+"""
+
+
+def _rows_model(path):
+    w = GGUFWriter(str(path), "voice-rows-test")
+    w.add_string("loom.architecture", "voice_rows_test")
+    w.add_string("model.graph_topology", '{"version": 1, "nodes": []}')
+    w.add_string("model.driver_script", ROW_DRIVER)
+    w.add_string("loom.task", "text-to-speech")
+    w.add_string("loom.input.kind", "text")
+    w.add_string("loom.output.kind", "audio")
+    w.add_uint32("loom.sample_rate", 24000)
+    w.add_array("loom.tts.voices", ["af_heart", "bf_isabella", "ff_siwis"])
+    w.add_array("loom.tts.voice_languages", ["en-US", "en-GB", "fr-FR"])
+    w.add_tensor("test.placeholder", np.zeros(4, dtype=np.float32))
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    return loom.Model.from_file(path)
+
+
+def test_a_voice_the_file_carries_is_its_row_through_the_drivers_voice_input(tmp_path):
+    m = _rows_model(tmp_path / "rows.gguf")
+    assert m.voices == ["af_heart", "bf_isabella", "ff_siwis"]
+    assert m.contract["voice_languages"] == ["en-US", "en-GB", "fr-FR"]
+    assert m.text2speech.infer(tokens=[5], voice="ff_siwis").samples == [2.0]
+    assert m.text2speech.infer(tokens=[5]).samples == [-1.0]          # none named: the driver's default
+    with pytest.raises(ValueError, match="no voice 'nonesuch'.*af_heart, bf_isabella, ff_siwis"):
+        m.text2speech.infer(tokens=[5], voice="nonesuch")
+
+
+def test_a_voice_the_file_carries_picks_the_g2p_language_unless_one_is_named(tmp_path, monkeypatch):
+    m = _rows_model(tmp_path / "rows.gguf")
+    seen = []
+    monkeypatch.setattr(type(m.text2speech), "_resolve_ids",
+                        lambda self, text, phonemes, tokens, language, contract: seen.append(language) or [5])
+    m.text2speech.infer("Bonjour", voice="ff_siwis")
+    m.text2speech.infer("Bonjour", voice="ff_siwis", language="fr-CA")
+    m.text2speech.infer("Hello")
+    assert seen == ["fr-FR", "fr-CA", None]
