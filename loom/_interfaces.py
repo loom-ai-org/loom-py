@@ -675,7 +675,7 @@ class Text2Speech(Interface):
     def _infer(self, text: str | None = None, *, phonemes: str | Sequence[int] | None = None,
                tokens: Sequence[int] | None = None, steps: int | None = None,
                seed: int = 0, language: str | None = None, voice: Any = None,
-               reference: Any = None, reference_text: str | None = None,
+               reference: Any = None, reference_text: str | None = None, instruct: str | None = None,
                sample_rate: int = 16000, **driver_inputs) -> Audio:
         """Three ways in, and which ones a given model accepts is a property of the model.
 
@@ -692,8 +692,15 @@ class Text2Speech(Interface):
         driver, and a driver input you pass explicitly still wins.
 
         `reference` + `reference_text` clone the voice in a clip, for a model that clones by
-        IN-FILLING (F5-TTS): the clip's samples at the model's own rate (or a mono :class:`Audio` at
-        that rate) and what it says, word for word. See `_reference_inputs` for the join.
+        IN-FILLING (F5-TTS) or that takes the transcript beside the text (OmniVoice): the clip's samples
+        at the model's own rate (or a mono :class:`Audio` at that rate) and what it says, word for word.
+        See `_reference_inputs` for the join.
+
+        `instruct` describes a voice in words, for a model that designs one (OmniVoice: "female, low
+        pitch, british accent"). The model validates it and says which items it knows.
+
+        `language`, for a model whose vocabulary is its front end and which declares languages, is a
+        code from `model.contract["languages"]`; for a phoneme model it picks the G2P's language.
 
         **`sample_rate` is the FALLBACK, not an override.** A model that declares its own rate is
         believed, because the export read it off the checkpoint and the caller is guessing; a model that
@@ -709,7 +716,7 @@ class Text2Speech(Interface):
         """
         inputs = self._inputs(text, phonemes=phonemes, tokens=tokens, steps=steps, seed=seed,
                               language=language, voice=voice, reference=reference,
-                              reference_text=reference_text, **driver_inputs)
+                              reference_text=reference_text, instruct=instruct, **driver_inputs)
         samples = self._model.infer(**inputs)
         if not isinstance(samples, list):
             raise TypeError(
@@ -722,10 +729,27 @@ class Text2Speech(Interface):
     def _inputs(self, text: str | None = None, *, phonemes: str | Sequence[int] | None = None,
                 tokens: Sequence[int] | None = None, steps: int | None = None, seed: int = 0,
                 language: str | None = None, voice: Any = None, reference: Any = None,
-                reference_text: str | None = None, **driver_inputs) -> dict[str, Any]:
+                reference_text: str | None = None, instruct: str | None = None,
+                **driver_inputs) -> dict[str, Any]:
         """The driver inputs `_infer` documents, built and not yet run -- shared with `stream`."""
         contract = self._model.contract
         inputs: dict[str, Any] = {}
+        if instruct is not None:
+            if not self._declares("tts.instruct"):
+                raise UnsupportedTask(
+                    f"{self._model.path.name} does not describe a voice from words (`loom.tts.instruct` is "
+                    f"absent); pick a voice with voice= or reference= instead.")
+            if not str(instruct).strip():
+                raise ValueError("instruct is empty; leave it out for the model's own voice.")
+            inputs["instruct"] = [float(i) for i in self._model.tokenize(str(instruct))]
+        if language is not None and contract.get("text_frontend") == "vocab" and contract.get("languages"):
+            declared = list(contract["languages"])
+            if language not in declared:
+                raise ValueError(f"language={language!r} is not one this model declares; it declares "
+                                 f"{len(declared)}, e.g. {declared[:8]} (model.contract['languages']).")
+            inputs["language"] = float(declared.index(language) + 1)
+            # Consumed as the driver's input; the vocabulary itself takes no language tag.
+            language = None
         if voice is not None:
             inputs.update({name: list(values) for name, values in self._model.voice(voice).inputs.items()})
         inputs.update(driver_inputs)
@@ -829,6 +853,9 @@ class Text2Speech(Interface):
     #: a contract field by ADR-020's split: it does not choose the door (that is still text2speech), it
     #: says how the host builds this door's inputs.
     INFILL = "infill"
+    #: ... and what a model declares that takes the clip's transcript BESIDE the text rather than joined
+    #: to it (OmniVoice): `waveform`, `ref_text` and `tokens` as three inputs, the join the driver's own.
+    TRANSCRIPT = "transcript"
 
     def _reference_inputs(self, text, phonemes, tokens, reference, reference_text, contract,
                           driver_inputs) -> dict[str, Any]:
@@ -861,6 +888,16 @@ class Text2Speech(Interface):
                 "the clip's frames to it, so an empty one has nothing to align."
             )
         mode = self._reference_mode()
+        if mode == self.TRANSCRIPT:
+            clash = sorted({"waveform", "ref_text"} & set(driver_inputs))
+            if clash:
+                raise TypeError(f"reference= builds {clash} itself; passing them as well would be two "
+                                f"answers to one question. Use one spelling or the other.")
+            return {
+                "waveform": self._reference_samples(reference, contract),
+                "ref_text": [float(i) for i in self._model.tokenize(str(reference_text))],
+                "tokens": [float(i) for i in self._model.tokenize(str(text))],
+            }
         if mode != self.INFILL:
             voices = contract.get("voices") or []
             other = (f" It takes voice files instead: voice= one of {voices}, or a file you made."
@@ -895,6 +932,12 @@ class Text2Speech(Interface):
             return str(self._model.hparam("tts.phoneme_style", "str"))
         except Exception:
             return ""
+
+    def _declares(self, key: str) -> bool:
+        try:
+            return bool(self._model.hparam(key, "str"))
+        except Exception:
+            return False
 
     def _reference_mode(self) -> str:
         try:
