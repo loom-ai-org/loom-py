@@ -313,9 +313,119 @@ def _fold_arpabet(phonemes: str, language: str) -> str:
     return " | ".join(" ".join(w) for w in words if w)
 
 
+# -- the `dizione` style (tiny-voca, loom.cpp ADR-133) -----------------------------------------------
+#
+# dizione (Apache-2.0, numpy only) is tiny-voca's own front end: 59 American English phones, stress as a
+# mark before the phone it falls on, `<sp>` between words, punctuation as symbols, each SENTENCE wrapped
+# `<bos> ... <eos>` -- the reference (`tiny_voca.infer.speak_text`) phonemizes and speaks a text one
+# sentence at a time. When dizione is installed (and its data found: `DIZIONE_DATA`, which the model's
+# own repo ships under `phonemizer/`), the door IS dizione, cut the reference's way. Without it, the
+# default G2P's IPA is folded to espeak's conventions (length marks, stress before the vowel: dizione's
+# spelling) and segmented into dizione's inventory, longest symbol first -- measurably worse (the card states both), and better than no text door.
+
+_DIZIONE_PHONES = ("tʃ dʒ p b t d k ɡ f v θ ð s z ʃ ʒ h m n ŋ l ɹ j w ɾ ʔ "
+                   "aɪɚ aɪə ɑːɹ ɔːɹ oːɹ ɪɹ ɛɹ ʊɹ əl n̩ eɪ aɪ ɔɪ oʊ aʊ iə oː "
+                   "ə ɐ ɚ ᵻ ɪ iː i ɛ æ ʌ ɑː ɔː ɔ ʊ uː ɜː").split()
+_DIZIONE_ORDER = sorted(_DIZIONE_PHONES, key=len, reverse=True)
+_DIZIONE_PUNCTUATION = set(",.?!;:\"'()—…")
+_SPACE = re.compile("[\\s" + chr(0xFEFF) + "]+")
+_SENTENCE_END = re.compile(r"""(?:(?<=[.!?…])|(?<=[.!?…]["')\]]))\s+(?=["'(\[]?[A-Z0-9])""")
+_NOT_AN_END = re.compile(r"(?:\b(?:mr|mrs|ms|dr|prof|sr|jr|st|vs|etc|no|inc|ltd|co|e\.g|i\.e|a\.m|p\.m)|\b[A-Z])\.$",
+                         re.IGNORECASE | re.ASCII)
+_TEXT_END = re.compile("[\\s" + chr(0xFEFF) + "]+$")
+_CLOSING = "\"'”’)]»"
+
+
+def dizione_sentences(text: str) -> list:
+    """`tiny_voca.infer.sentences(finished(text))`: a full stop added to a text ending without a mark,
+    then cut after sentence-final marks, never after a title, an initial or inside a number."""
+    body = _TEXT_END.sub("", text)
+    if body:
+        last = _SPACE.split(body)[-1]
+        if any(ch.isalnum() for ch in last):
+            marked = last.rstrip(_CLOSING)[-1:] in tuple(".!?…,;:")
+        else:
+            marked = any(ch in ".!?…" for ch in last) or last in (",", ";", ":")
+        text = text if marked else body + "."
+    parts, current = [], ""
+    for piece in _SENTENCE_END.split(_SPACE.sub(" ", text).strip()):
+        current = f"{current} {piece}" if current else piece
+        if not _NOT_AN_END.search(current):
+            parts.append(current)
+            current = ""
+    if current:
+        parts.append(current)
+    return [part for part in parts if any(ch.isalnum() for ch in part)]
+
+
+def _dizione_native():
+    try:
+        import dizione
+    except ImportError:
+        return None
+    return dizione
+
+
+def _fold_dizione(phonemes: str, language: str) -> str:
+    """One sentence's IPA -> `<bos> ... <eos>` in dizione's inventory: espeak's conventions first, then
+    each word segmented longest symbol first, a stress mark carried onto the next phone. The syllabic
+    `əl` and `n̩` are taken only where no vowel follows ("bottle", not the `əl` of "hello")."""
+    folded = _fold_espeak(phonemes, language)
+    words = []
+    for word in folded.split():
+        out, stress, i = [], "", 0
+        while i < len(word):
+            ch = word[i]
+            if ch in _STRESS:
+                stress = ch
+                i += 1
+                continue
+            if ch in _DIZIONE_PUNCTUATION:
+                if out:
+                    words.append(out)
+                    out = []
+                words.append([ch])
+                i += 1
+                continue
+            for symbol in _DIZIONE_ORDER:
+                if word.startswith(symbol, i):
+                    after = word[i + len(symbol): i + len(symbol) + 1]
+                    if symbol in ("əl", "n̩") and after and (after in _STRESS or after in _VOWELS):
+                        continue
+                    out.append(stress + symbol)
+                    stress = ""
+                    i += len(symbol)
+                    break
+            else:
+                i += 1                   # outside the inventory: dropped, as the table would drop it
+        if out:
+            words.append(out)
+    tokens = ["<bos>"]
+    for w in words:
+        is_mark = len(w) == 1 and w[0] in _DIZIONE_PUNCTUATION
+        if not is_mark and tokens[-1] not in ("<bos>",) and tokens[-1] not in _DIZIONE_PUNCTUATION:
+            tokens.append("<sp>")
+        tokens.extend(w)
+    tokens.append("<eos>")
+    return " ".join(tokens)
+
+
+def phonemize_styled(text: str, style: str, *, alphabet: str = "ipa", language: str = "en") -> str:
+    """The text door's phonemes for a model declaring `style`: the style's own front end when it has one
+    and it is installed (dizione), else the registered G2P folded to the style."""
+    if style == "dizione":
+        sentences = dizione_sentences(text)
+        native = _dizione_native()
+        if native is not None:
+            return " ".join(str(native.phonemize(s)) for s in sentences)
+        return " ".join(fold(phonemize(s, alphabet=alphabet, language=language), style, language=language)
+                        for s in sentences)
+    return fold(phonemize(text, alphabet=alphabet, language=language), style, language=language)
+
+
 #: `{style: fold(phonemes, language) -> phonemes}`, the styles a model may declare.
 STYLES: Dict[str, Callable[[str, str], str]] = {"espeak": _fold_espeak, "misaki": _fold_misaki,
-                                                "arpabet": _fold_arpabet}
+                                                "arpabet": _fold_arpabet, "dizione": _fold_dizione}
 
 
 def fold(phonemes: str, style: str, *, language: str = "en") -> str:
