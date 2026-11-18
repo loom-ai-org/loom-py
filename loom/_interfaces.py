@@ -813,7 +813,17 @@ class Text2Speech(Interface):
             # Consumed as the driver's input; the vocabulary itself takes no language tag.
             language = None
         if voice is not None:
-            inputs.update({name: list(values) for name, values in self._model.voice(voice).inputs.items()})
+            builtin = self._builtin_voice(voice, contract)
+            if builtin is None:
+                inputs.update({name: list(values) for name, values in self._model.voice(voice).inputs.items()})
+            else:
+                # A voice the file carries, chosen by its row: the driver's `voice` input. Its language
+                # is the G2P's when the caller names none -- the voice decides it, as upstream's runtime
+                # does (Paradee's `ff_siwis` reads French).
+                inputs["voice"] = float(builtin)
+                per_voice = contract.get("voice_languages") or []
+                if language is None and builtin < len(per_voice):
+                    language = per_voice[builtin]
         inputs.update(driver_inputs)
         if reference is not None or reference_text is not None:
             inputs.update(self._reference_inputs(text, phonemes, tokens, reference, reference_text,
@@ -1027,6 +1037,19 @@ class Text2Speech(Interface):
         if not samples:
             raise ValueError("the reference clip is empty.")
         return samples
+
+    def _builtin_voice(self, voice: Any, contract: dict) -> int | None:
+        """The row of `voice` among the voices the file carries, for a model that takes no voice files and
+        picks its voice through the driver's `voice` input (loom.cpp ADR-135); None for everything else,
+        which goes on to `Model.voice`. A name the file does not carry is refused with the ones it does."""
+        if not isinstance(voice, str) or self._model._handle.takes_voice_files():
+            return None
+        names = list(contract.get("voices") or [])
+        if not names:
+            return None
+        if voice not in names:
+            raise ValueError(f"{self._model.path.name} has no voice {voice!r}; its voices are {', '.join(names)}")
+        return names.index(voice)
 
     def _resolve_ids(self, text, phonemes, tokens, language, contract) -> Sequence[int]:
         named = [n for n, v in (("text", text), ("phonemes", phonemes), ("tokens", tokens))
