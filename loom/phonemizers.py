@@ -35,10 +35,15 @@ from typing import Callable, Dict, Optional
 #: produced it is not something the model has an opinion about.
 _PROVIDERS: Dict[str, Callable[[str, str], str]] = {}
 
-#: `{language: source}` handed to `orthography2ipa.register_lexicon`, newest wins. Kept here rather than
-#: passed per call because registration is process-global in that library and the parsed lexicon is
-#: cached there for the process, so naming a source once is the whole interaction.
+#: `{resolved language: source}` as named to `set_lexicon`, newest wins -- what `lexicons()` reports.
 _LEXICONS: Dict[str, str] = {}
+
+#: `{resolved language: orthography2ipa.G2P}`, each built once with `Pipeline(lexicon=...)` over that
+#: language's entries. An engine of its own rather than the library's process-wide registry
+#: (`register_lexicon`, deprecated in orthography2ipa 7.123 and removed in 8.0): the lexicon then reaches
+#: loom's transcriptions and nothing else in the process, and building the engine once keeps the spec
+#: load off every call.
+_ENGINES: Dict[str, object] = {}
 
 
 def register(alphabet: str, phonemize: Callable[[str, str], str]) -> None:
@@ -55,9 +60,10 @@ def set_lexicon(source: Optional[str | os.PathLike] = None, *, language: str = "
     """Point the default provider at a pronunciation lexicon for `language`, or `None` to clear one.
 
     `source` is a `word<TAB>ipa` TSV -- a local path, an `http(s)://` URL, or a Hugging Face
-    `hf://<repo>/<path>` id, all three resolved by orthography2ipa itself. It is read here rather than
-    on the first transcription for that language, so that a file which yields nothing is reported at
-    the line that named it -- see WHY IT IS VERIFIED HERE below.
+    `hf://<repo>/<path>` id, all three resolved by orthography2ipa's `load_lexicon`. It is read here,
+    once, into the engine loom transcribes `language` with, so that a file which yields nothing is
+    reported at the line that named it -- see WHY IT IS VERIFIED HERE below. The lexicon is loom's:
+    other users of orthography2ipa in the process do not see it.
 
     **WHY THIS EXISTS.** orthography2ipa transduces by RULE, and English is one of the deep-orthography
     languages its own documentation names as unreachable that way -- "time" comes out `tɪm` rather than
@@ -71,9 +77,8 @@ def set_lexicon(source: Optional[str | os.PathLike] = None, *, language: str = "
     overlay, not a replacement.
 
     `language` is resolved the way orthography2ipa resolves it, so `"en"` reaches the `en-GB` spec and a
-    lexicon registered for either is found. Registering under an unresolved tag is silent when it is
-    wrong -- the lexicon simply never loads -- which is why this does the resolution rather than passing
-    the caller's string through.
+    lexicon set for either is found when either is synthesised. Keyed by the caller's string instead, a
+    lexicon set for `"en"` would silently never apply to `"en-GB"`.
 
     **WHY IT IS VERIFIED HERE.** The parse skips, without complaint, every line that is not exactly
     `word<TAB>ipa` -- so a file of the wrong SHAPE loads as an empty overlay, and an empty overlay is
@@ -81,15 +86,14 @@ def set_lexicon(source: Optional[str | os.PathLike] = None, *, language: str = "
     and the audio comes back unstressed with nothing anywhere saying why. That is not hypothetical.
     Running the documented `sed` over the GitHub *blob* page for ipa-dict instead of the raw file
     yields 700 lines of HTML, zero of them entries, and the only symptom is that `set_lexicon` appears
-    not to be taken into account. So the lexicon is loaded now and a zero-entry one warns. The parse is
-    not extra work, only earlier -- orthography2ipa caches it, and the first transcription would have
-    paid for it anyway; what does move is the network fetch behind a URL or an `hf://` id.
+    not to be taken into account. So a zero-entry lexicon warns. Reading it here is not extra work: the
+    engine needs the entries before its first transcription anyway.
 
-    Raises `LookupError` when orthography2ipa is not installed, because a lexicon set on a provider that
-    does not exist would otherwise be accepted and never applied. A source that cannot be READ raises
-    whatever reading it raises -- `FileNotFoundError` for a path that is not there, a fetch error for a
-    URL or an `hf://` id. Those were always raised; verifying here moves them off the first synthesis
-    call and onto the line holding the wrong path.
+    Raises `LookupError` when orthography2ipa is not installed, or is older than 7.123 (no per-engine
+    lexicon), because a lexicon set on a provider that does not exist would otherwise be accepted and
+    never applied. A source that cannot be READ raises whatever reading it raises -- `FileNotFoundError`
+    for a path that is not there, a fetch error for a URL or an `hf://` id -- and replaces nothing: the
+    previous lexicon for that language stays.
     """
     try:
         import orthography2ipa
@@ -100,13 +104,21 @@ def set_lexicon(source: Optional[str | os.PathLike] = None, *, language: str = "
             "`loom.phonemizers.register(...)` brings its own pronunciations and needs none of this."
         ) from None
 
+    if not hasattr(orthography2ipa, "Pipeline"):
+        raise LookupError(
+            f"a lexicon needs orthography2ipa 7.123 or newer, and "
+            f"{getattr(orthography2ipa, '__version__', 'an older one')} is installed. "
+            "Upgrade it with `pip install -U \"loom-py-rt[phonemes]\"`."
+        )
     code = orthography2ipa.resolve(language)
     if source is None:
         _LEXICONS.pop(code, None)
+        _ENGINES.pop(code, None)
         return
+    entries = orthography2ipa.load_lexicon(source)      # raises before anything is replaced
     _LEXICONS[code] = str(source)
-    orthography2ipa.register_lexicon(code, str(source))
-    if not orthography2ipa.get_lexicon(code):
+    _ENGINES[code] = orthography2ipa.G2P(code, pipeline=orthography2ipa.Pipeline(lexicon=entries))
+    if not entries:
         warnings.warn(
             f"the lexicon at {source} holds no entries, so it will change nothing -- an empty overlay "
             f"behaves exactly like no lexicon at all. Every line must be `word<TAB>ipa`; anything else "
@@ -344,7 +356,11 @@ def _load_default(alphabet: str):
         # DIALECT_PROFILE stays None because all fifteen shipped profiles are Portuguese/Galician;
         # there is no English one to pass.
         #
-        # What DOES move the output is a lexicon, which is `set_lexicon` above and not a parameter here.
+        # What DOES move the output is a lexicon, which is `set_lexicon` above and not a parameter here:
+        # a language with one transcribes through the engine built over it.
+        engine = _ENGINES.get(orthography2ipa.resolve(language)) if _ENGINES else None
+        if engine is not None:
+            return str(engine.transcribe(text))
         return str(orthography2ipa.transcribe(text, language))
 
     register(alphabet, provider)

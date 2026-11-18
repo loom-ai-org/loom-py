@@ -1619,6 +1619,46 @@ class TestText2Speech:
             assert loom.phonemizers.lexicons() == {}, "None clears rather than registering 'None'"
         finally:
             loom.phonemizers._LEXICONS.clear()
+            loom.phonemizers._ENGINES.clear()
+            os.unlink(tsv)
+
+    def test_a_lexicon_reaches_loom_and_only_loom(self):
+        """The lexicon lives in an engine of loom's (`G2P(..., pipeline=Pipeline(lexicon=...))`), not
+        in orthography2ipa's process-wide registry, which 7.123 deprecates and 8.0 removes -- and which
+        this suite's own warnings-as-errors block turned into a failure on a fresh install.
+
+        Three things pin it: the entry changes loom's transcription, under the caller's spelling of the
+        language as well as the resolved one; the library's own `transcribe` is untouched, because
+        another user of orthography2ipa in the process did not ask for it; and `None` restores the
+        rules. Nothing on the way may warn: a deprecation is how this broke.
+        """
+        o2i = pytest.importorskip("orthography2ipa")
+        loom.phonemizers.available("ipa")                 # the default provider, before the lexicon
+        rules = o2i.transcribe("zebra", "en")
+        tsv = tmp_lexicon("zebra\tzˈiːbɹɑː\n")
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                loom.phonemizers.set_lexicon(tsv, language="en")
+                assert rules != "zˈiːbɹɑː", "the entry must differ from the rules or this proves nothing"
+                assert loom.phonemizers.phonemize("zebra", language="en") == "zˈiːbɹɑː"
+                assert loom.phonemizers.phonemize("zebra", language="en-GB") == "zˈiːbɹɑː"
+                assert o2i.transcribe("zebra", "en") == rules, "the lexicon leaked out of loom"
+                loom.phonemizers.set_lexicon(None, language="en-GB")
+                assert loom.phonemizers.phonemize("zebra", language="en") == rules
+        finally:
+            loom.phonemizers._LEXICONS.clear()
+            loom.phonemizers._ENGINES.clear()
+            os.unlink(tsv)
+
+    def test_a_lexicon_on_an_orthography2ipa_without_pipelines_is_refused(self):
+        """7.30 to 7.93 have no `Pipeline`: an AttributeError deep in `set_lexicon` would name neither
+        the version nor the fix. A LookupError also lets the card gate read it as an unmet extra."""
+        old = types.SimpleNamespace(__version__="7.93.16", resolve=lambda language: language)
+        with mock.patch.dict(sys.modules, {"orthography2ipa": old}):
+            with pytest.raises(LookupError, match="7.123 or newer, and 7.93.16 is installed"):
+                loom.phonemizers.set_lexicon("/does/not/matter.tsv")
+        assert loom.phonemizers.lexicons() == {}
 
     def test_a_lexicon_that_parses_to_nothing_warns_instead_of_registering_silently(self):
         """Every line that is not exactly `word<TAB>ipa` is skipped without complaint, so a file of the
@@ -1642,7 +1682,7 @@ class TestText2Speech:
                 loom.phonemizers.set_lexicon(good, language="en")
         finally:
             loom.phonemizers._LEXICONS.clear()
-            o2i.clear_lexicons()
+            loom.phonemizers._ENGINES.clear()
             os.unlink(junk)
             os.unlink(good)
 
