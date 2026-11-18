@@ -410,9 +410,99 @@ def _fold_dizione(phonemes: str, language: str) -> str:
     return " ".join(tokens)
 
 
+# -- the `kokoro` style (Paradee: loom-exporter paradee_export.py) ------------------------------------
+#
+# What Kokoro's own pipeline (`KPipeline`) writes, which is what a model distilled from it read in training:
+# misaki for American and British English (one symbol per diphthong and affricate -- `A I W O Y`, British
+# `Q` -- stress before the vowel, punctuation kept as symbols), and for every other language espeak's IPA as
+# misaki's `EspeakG2P` hands it over: length and aspiration kept, tied pairs made one symbol. Upstream's
+# runtime phonemizes English with misaki and Hindi, French and Spanish with Paradee's own Apache-2.0 G2P
+# (`paradee.g2p`, trained to give espeak's output without espeak), so when those are installed the door IS
+# them. Without them the default G2P runs between punctuation marks -- it drops marks, and the model reads a
+# comma as a pause and a full stop as an end -- and each run is folded to the language's conventions, the
+# marks put back after the word before them, as misaki writes them.
+
+_KOKORO_MARKS = re.compile(r"\s*([,.!?;:—…]+)\s*")
+_KOKORO_NATIVE: Dict[str, Optional[Callable[[str], str]]] = {}
+# The tied pairs misaki's EspeakG2P compresses, for a language whose default G2P writes them as two symbols.
+_KOKORO_TIES = (("dʒ", "ʤ"), ("tʃ", "ʧ"), ("ts", "ʦ"), ("dz", "ʣ"))
+# Hindi: orthography2ipa's spellings to espeak's (`ɟ` and `c` for the palatal stops, `h` for the breathy
+# glottal, no dental mark).
+_KOKORO_HINDI = (("dʒ", "ɟ"), ("tʃ", "c"), ("ɦ", "h"), ("\u032a", ""))
+
+
+def _kokoro_language(language: str) -> str:
+    """`en-US`/`en-GB`/`fr-FR`/... -> `a`/`b` (misaki's American/British) or the bare language code."""
+    code = language.replace("_", "-").lower()
+    if code.startswith("en"):
+        return "b" if code in ("en-gb", "en-uk") else "a"
+    return code.split("-")[0]
+
+
+def _kokoro_native(lang: str) -> Optional[Callable[[str], str]]:
+    """The installed front end for `lang`, or None: misaki for English, Paradee's G2P for the rest."""
+    if lang in _KOKORO_NATIVE:
+        return _KOKORO_NATIVE[lang]
+    fn = None
+    try:
+        if lang in ("a", "b"):
+            from misaki import en
+
+            british = lang == "b"
+
+            def unknown(token):   # misaki's fallback for a word its lexicon lacks: the default G2P, folded
+                return _fold_misaki(phonemize(token.text, language="en-GB" if british else "en-US"), "en"), 1
+
+            g2p = en.G2P(trf=False, british=british, fallback=unknown, unk="")
+            fn = lambda text: str(g2p(text)[0])
+        else:
+            from paradee.g2p import G2P
+
+            own = G2P()
+            fn = lambda text: str(own(text, lang))
+    except Exception:            # not installed, or installed without its data: the folded default below
+        fn = None
+    _KOKORO_NATIVE[lang] = fn
+    return fn
+
+
+def _fold_kokoro(phonemes: str, language: str) -> str:
+    lang = _kokoro_language(language)
+    if lang in ("a", "b"):
+        return _fold_misaki(phonemes, language)
+    words = []
+    for word in phonemes.split():
+        word = _stress_before_vowel(word)
+        if lang == "hi":
+            word = _replace_all(word, _KOKORO_HINDI)
+        else:
+            word = _replace_all(word, _KOKORO_TIES)
+        words.append(word)
+    return " ".join(words)
+
+
+def phonemize_kokoro(text: str, *, alphabet: str = "ipa", language: str = "en-US") -> str:
+    """The `kokoro` style's phonemes for `text` (see the note above): the language's own front end when it
+    is installed, else the default G2P between punctuation marks, folded, with the marks kept."""
+    native = _kokoro_native(_kokoro_language(language))
+    if native is not None:
+        return native(text)
+    out = []
+    for i, part in enumerate(_KOKORO_MARKS.split(text)):
+        if i % 2:                                     # a run of marks: after the word before it
+            if out:
+                out[-1] += part.replace(" ", "")
+            continue
+        if part.strip():
+            out.append(_fold_kokoro(phonemize(part, alphabet=alphabet, language=language), language))
+    return " ".join(out)
+
+
 def phonemize_styled(text: str, style: str, *, alphabet: str = "ipa", language: str = "en") -> str:
     """The text door's phonemes for a model declaring `style`: the style's own front end when it has one
     and it is installed (dizione), else the registered G2P folded to the style."""
+    if style == "kokoro":
+        return phonemize_kokoro(text, alphabet=alphabet, language=language)
     if style == "dizione":
         sentences = dizione_sentences(text)
         native = _dizione_native()
@@ -425,6 +515,7 @@ def phonemize_styled(text: str, style: str, *, alphabet: str = "ipa", language: 
 
 #: `{style: fold(phonemes, language) -> phonemes}`, the styles a model may declare.
 STYLES: Dict[str, Callable[[str, str], str]] = {"espeak": _fold_espeak, "misaki": _fold_misaki,
+                                                "kokoro": _fold_kokoro,
                                                 "arpabet": _fold_arpabet, "dizione": _fold_dizione}
 
 
