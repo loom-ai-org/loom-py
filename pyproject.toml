@@ -44,8 +44,10 @@ hub = ["huggingface_hub>=0.24"]
 # property of the language rather than of any checkpoint, so it lives here. Optional because this
 # package declares no runtime dependencies on purpose and orthography2ipa brings numpy, langcodes and
 # ovos-spec-tools with it: a caller running an LM or an ASR model should not pay for a G2P engine.
-# Apache-2.0, so nothing about it constrains this package's own licensing.
-phonemes = ["orthography2ipa>=7.30"]
+# Apache-2.0, so nothing about it constrains this package's own licensing. 7.123 is the first release
+# with `Pipeline(lexicon=...)`, the per-engine lexicon `set_lexicon` builds on; the process-wide
+# `register_lexicon` it replaced warns from 7.123 and goes in 8.0.
+phonemes = ["orthography2ipa>=7.123"]
 
 # ACCELERATORS (BACKLOG.md P4.8). `pip install "loom-py-rt[vulkan]"` fetches one small wheel holding
 # one libggml-vulkan.so; this package finds it on sys.path at import and `device="auto"` uses it. The
