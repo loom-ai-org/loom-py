@@ -652,6 +652,19 @@ class Model:
                                     max_new_tokens=max_new_tokens, **options)
 
     @property
+    def eos_token_ids(self) -> list[int]:
+        """The ids generation stops on, from the file (`tokenizer.ggml.eos_token_ids` or its single id)."""
+        return [int(i) for i in self._handle.eos_token_ids()]
+
+    @property
+    def can_translate(self) -> bool:
+        """Whether this file's driver builds a translation prompt (`text2text.translate`, ADR-132)."""
+        try:
+            return self.has_driver and "function translation_prompt(" in (self.driver_source or "")
+        except AttributeError:      # a handle that cannot say (an older extension, a test double)
+            return False
+
+    @property
     def can_stream_tokens(self) -> bool:
         """Whether `generate_stream` can run this file: its driver has the stream functions, or draws
         one token per call already."""
