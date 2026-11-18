@@ -550,6 +550,7 @@ public:
         out["entry_points"] = c.entry_points;
         out["default_steps"] = c.default_steps;
         out["voices"] = c.voices;
+        out["voice_languages"] = c.voice_languages;
         out["labels"] = c.labels;
         // How many answers a `class`/`embeddings` output gives, and the time a frame row covers
         // (ADR-062). Empty/0 for every other output.
