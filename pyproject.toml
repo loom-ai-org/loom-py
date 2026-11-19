@@ -36,6 +36,11 @@ classifiers = [
 # may use rather than something this package makes them install.
 dependencies = []
 
+# `loom-serve`: the OpenAI-compatible HTTP server (loom/server.py, loom-py#52). Standard library only, so
+# it costs the package no dependency; ffmpeg from PATH widens the audio formats it takes and returns.
+[project.scripts]
+loom-serve = "loom.server:main"
+
 [project.optional-dependencies]
 hub = ["huggingface_hub>=0.24"]
 
