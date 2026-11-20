@@ -148,6 +148,29 @@ dac.codes2speech.infer(codes).save("dialogue.wav")
 
 MusicGen + EnCodec, Qwen3-TTS + its tokenizer and MOSS-TTS + its codec pair the same way.
 
+### 🌐 An OpenAI-compatible server
+
+`loom-serve` puts loaded models behind OpenAI's HTTP API, so any OpenAI client or tool can use them:
+
+```sh
+loom-serve loom-ai-org/smollm2-360m-instruct-loom loom-ai-org/moonshine-tiny-loom:moonshine-tiny-q8_0.gguf \
+           loom-ai-org/kokoro-82m-loom
+```
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="unused")
+client.chat.completions.create(model="smollm2-360m-instruct-loom",
+                               messages=[{"role": "user", "content": "Hi!"}], stream=True)
+client.audio.transcriptions.create(model="whisper-1", file=open("clip.wav", "rb"))
+client.audio.speech.create(model="tts-1", voice="af_heart", input="Hello.", response_format="wav")
+```
+
+Chat and text completions (streamed or not), speech and transcriptions/translations. It needs no
+extra Python packages; with [ffmpeg](https://ffmpeg.org) on `PATH` it also returns mp3, opus, aac
+and flac, and reads any audio format. [docs/GUIDE.md](docs/GUIDE.md#an-openai-compatible-server) has
+the details.
+
 ### 🔧 The layer underneath
 
 Each file embeds its own driver script, and `model.infer(...)` passes your arguments straight to it,

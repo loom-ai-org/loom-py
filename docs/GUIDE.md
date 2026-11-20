@@ -180,6 +180,43 @@ included, so an empty device list means no backend library was found at all rath
 Which ops fall back to the CPU, and why some always will, is documented in
 [loom.cpp's build notes](https://github.com/loom-ai-org/loom.cpp/blob/main/docs/BUILDING.md#running-on-a-gpu).
 
+## An OpenAI-compatible server
+
+`loom-serve` (also `python -m loom.server`) serves loaded models behind
+[OpenAI's HTTP API](https://platform.openai.com/docs/api-reference). Name each model as a file or a
+Hugging Face repo, optionally prefixed with the name requests will use:
+
+```sh
+loom-serve chat=smollm2-360m-instruct.gguf asr=moonshine-tiny-q8_0.gguf \
+           tts=loom-ai-org/kokoro-82m-loom --port 8000
+```
+
+Each endpoint is a door the model declares, so a model answers only the endpoints its task allows:
+
+| endpoint | door | notes |
+|---|---|---|
+| `POST /v1/chat/completions` | text2text | The file's own chat template; `stream`, `stop`, `max_tokens`, `temperature`, `top_p`, `seed` (and `top_k`). A file exported before token streaming answers a streamed request in one piece. |
+| `POST /v1/completions` | text2text | The prompt as given, a string or token ids. |
+| `POST /v1/audio/speech` | text2speech | `voice` is one of `model.voices` (ignored by a model without voices). `speed` and `instructions` only where the file takes them; otherwise the request is refused rather than ignored. `pcm` streams a piece at a time at the model's rate (`X-Sample-Rate`). |
+| `POST /v1/audio/transcriptions` | speech2text | `json`, `text`, `verbose_json`, `srt`, `vtt`. `language` is passed through. |
+| `POST /v1/audio/translations` | speech2text | Into English: Whisper's `translate` task, or a target language (Canary). |
+| `GET /v1/models` | | What is loaded, with each model's task and door. |
+
+**Which model answers.** A request's `model` names a served model. When it names one that is not
+loaded (an OpenAI client's `"whisper-1"`) and exactly one served model has that endpoint's door, that
+model answers and the response carries its real name; with several, the request fails and lists them.
+
+**Audio formats.** Without extra packages the server returns WAV and raw PCM and reads WAV at the
+model's sample rate. With ffmpeg on `PATH` it also returns mp3 (OpenAI's default), opus, aac and flac,
+and reads anything ffmpeg can, at any rate. Without ffmpeg, a speech request that names no format gets
+WAV.
+
+**Requests to one model run one at a time**; separate models run concurrently. The server binds to
+127.0.0.1; `--api-key` (or `$LOOM_API_KEY`) makes it require `Authorization: Bearer <key>`.
+
+In Python, `loom.server.make_server({"name": model, ...}, port=8000).serve_forever()` does the same with
+models you have already loaded.
+
 ## Why there is so little API
 
 A loom GGUF carries its own graph topologies and its own driver script alongside its weights, so this
