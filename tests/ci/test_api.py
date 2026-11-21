@@ -1912,8 +1912,8 @@ _TTS_TRANSCRIPT_CONTRACT = dict(_TTS_TEXT_CONTRACT, sample_rate=24000, languages
 
 
 def _transcript(**kw):
-    return _CharHandle([[0.1]], vocab="omnivoice", contract=_TTS_TRANSCRIPT_CONTRACT,
-                       hparams={"tts.reference": "transcript", "tts.instruct": "text"}, **kw)
+    kw.setdefault("hparams", {"tts.reference": "transcript", "tts.instruct": "text"})
+    return _CharHandle([[0.1]], vocab="omnivoice", contract=_TTS_TRANSCRIPT_CONTRACT, **kw)
 
 
 class TestText2SpeechTranscriptInstructLanguage:
@@ -1957,6 +1957,55 @@ class TestText2SpeechTranscriptInstructLanguage:
     def test_an_undeclared_language_is_refused_with_the_list(self):
         with pytest.raises(ValueError, match="model.contract"):
             _model(_transcript()).text2speech.infer("hi", language="xx")
+
+    def test_a_call_naming_no_language_speaks_the_files_default(self):
+        """Upstream's own default is no language, and in it a short prompt came out as music (2026-11-21);
+        the file names the one a call without `language=` speaks (`loom.tts.default_language`)."""
+        handle = _transcript(hparams={"tts.reference": "transcript", "tts.instruct": "text",
+                                      "tts.default_language": "en"})
+        _model(handle).text2speech.infer("hi")
+        assert handle.calls[0]["language"] == 2.0
+
+    def test_a_named_language_still_wins_over_the_default(self):
+        handle = _transcript(hparams={"tts.reference": "transcript", "tts.instruct": "text",
+                                      "tts.default_language": "en"})
+        _model(handle).text2speech.infer("hi", language="zh")
+        assert handle.calls[0]["language"] == 3.0
+
+    def test_a_file_without_a_default_keeps_the_no_language_mode(self):
+        handle = _transcript()
+        _model(handle).text2speech.infer("hi")
+        assert "language" not in handle.calls[0]
+
+    _DEFAULT_VOICE = {"tts.reference": "transcript", "tts.instruct": "text", "tts.default_instruct": "female"}
+
+    def test_a_call_naming_no_voice_describes_the_files_default(self):
+        """OmniVoice's undescribed voice turned "hello world" into music on nearly every seed; "female"
+        said it on every one (2026-11-21). The file names that description; a call that names no voice
+        at all gets it."""
+        handle = _transcript(hparams=self._DEFAULT_VOICE)
+        _model(handle).text2speech.infer("hi")
+        assert handle.calls[0]["instruct"] == [float(ord(c)) for c in "female"]
+
+    def test_a_named_description_still_wins_over_the_default(self):
+        handle = _transcript(hparams=self._DEFAULT_VOICE)
+        _model(handle).text2speech.infer("hi", instruct="male, low pitch")
+        assert handle.calls[0]["instruct"] == [float(ord(c)) for c in "male, low pitch"]
+
+    def test_a_reference_clip_is_a_voice_so_no_default_description_is_added(self):
+        handle = _transcript(hparams=self._DEFAULT_VOICE)
+        _model(handle).text2speech.infer("hi", reference=[0.5, -0.5], reference_text="Ok.")
+        assert "instruct" not in handle.calls[0]
+
+    def test_a_file_without_a_default_description_keeps_its_own_voice(self):
+        handle = _transcript()
+        _model(handle).text2speech.infer("hi")
+        assert "instruct" not in handle.calls[0]
+
+    def test_a_default_the_file_does_not_declare_is_refused_naming_the_file(self):
+        handle = _transcript(hparams={"tts.reference": "transcript", "tts.default_language": "xx"})
+        with pytest.raises(ValueError, match="default language"):
+            _model(handle).text2speech.infer("hi")
 
 
 class _TranslateHandle(_FakeHandle):
