@@ -124,6 +124,11 @@ public:
             // tortoise-tts's English normaliser, the sentence split, each sentence wrapped in the
             // prompt `[STOP][TEXT]...[START]` -- the driver generates the sentences in turn.
             tokenizer->soprano_ = loom::SopranoVocab::load(model);
+        } else if (tokenizer->kind_ == "kale_tts") {
+            // kale-tts-1-tiny: upstream's JavaScript front end (dizione's rules, its lexicons, homographs and GRU
+            // guesser, British files for en-GB) and Ettin's sub-tokens, packed per sentence for the driver
+            // (loom.cpp ADR-142). The language picks the accent; the text door passes the voice's.
+            tokenizer->kale_tts_ = loom::KaleTtsVocab::load(model);
         } else if (tokenizer->kind_ == "plamo") {
             // PFN's PLaMo: a scored unigram decoded by Viterbi with byte fallback (loom.cpp ADR-132).
             tokenizer->plamo_ = loom::PlamoVocab::load(model);
@@ -136,7 +141,7 @@ public:
 
     bool valid() const {
         return spm_ || bpe_ || wordpiece_ || byte_ || supertonic_ || phoneme_ || ctc_ || f5_ ||
-               chatterbox_ || pocket_tts_ || voxcpm_ || cosyvoice3_ || soprano_ || plamo_;
+               chatterbox_ || pocket_tts_ || voxcpm_ || cosyvoice3_ || soprano_ || plamo_ || kale_tts_;
     }
     const std::string& kind() const { return kind_; }
 
@@ -154,6 +159,7 @@ public:
         if (cosyvoice3_) return cosyvoice3_->size();
         if (soprano_) return soprano_->size();
         if (plamo_) return plamo_->size();
+        if (kale_tts_) return kale_tts_->size();
         // n_tokens(), not vocab_size() -- the latter is the 65536-entry BMP lookup table, which is not
         // what any caller reading `tokenizer.size()` means.
         return supertonic_->n_tokens();
@@ -164,9 +170,10 @@ public:
     // argument silently dropped is the failure mode this rejection exists to prevent -- a caller asking
     // for Korean and quietly getting English.
     std::vector<int32_t> encode(const std::string& text, const std::string& lang) const {
+        if (kale_tts_) return kale_tts_->encode(text, lang);
         if (!lang.empty() && !supertonic_) {
             throw loom::SchemaError("tokenizer kind '" + kind_ + "' takes no language argument; only a "
-                                    "vocabulary that tags its input by language (supertonic) does");
+                                    "vocabulary that tags its input by language (supertonic, kale_tts) does");
         }
         if (ctc_) {
             throw loom::SchemaError("tokenizer kind 'ctc' decodes only: a CTC model takes audio, so its "
@@ -205,6 +212,7 @@ public:
         if (cosyvoice3_) return cosyvoice3_->decode(ids);
         if (soprano_) return soprano_->decode(ids);
         if (plamo_) return plamo_->decode(ids);
+        if (kale_tts_) return kale_tts_->decode(ids);
         return supertonic_->detokenize(ids);
     }
 
@@ -228,6 +236,7 @@ private:
     std::unique_ptr<loom::VoxCpmVocab> voxcpm_;
     std::unique_ptr<loom::CosyVoice3Vocab> cosyvoice3_;
     std::unique_ptr<loom::SopranoVocab> soprano_;
+    std::unique_ptr<loom::KaleTtsVocab> kale_tts_;
 };
 
 // One driver input, marshalled. A driver's world is numbers and arrays of numbers -- the bridge's own

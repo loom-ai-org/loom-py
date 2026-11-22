@@ -759,10 +759,15 @@ class Text2Speech(Interface):
         See `_reference_inputs` for the join.
 
         `instruct` describes a voice in words, for a model that designs one (OmniVoice: "female, low
-        pitch, british accent"). The model validates it and says which items it knows.
+        pitch, british accent"). The model validates it and says which items it knows. Omitted, with no
+        `reference` and no `voice` either, such a model describes the voice its file names
+        (`loom.tts.default_instruct`): OmniVoice's own undescribed voice made a short prompt into music
+        rather than speech on nearly every seed, and "female" said it on every one.
 
         `language`, for a model whose vocabulary is its front end and which declares languages, is a
         code from `model.contract["languages"]`; for a phoneme model it picks the G2P's language.
+        Omitted, such a vocabulary model speaks the language its file names as the default
+        (`loom.tts.default_language`; OmniVoice's is English).
 
         **`sample_rate` is the FALLBACK, not an override.** A model that declares its own rate is
         believed, because the export read it off the checkpoint and the caller is guessing; a model that
@@ -796,6 +801,9 @@ class Text2Speech(Interface):
         """The driver inputs `_infer` documents, built and not yet run -- shared with `stream`."""
         contract = self._model.contract
         inputs: dict[str, Any] = {}
+        if (instruct is None and reference is None and reference_text is None and voice is None
+                and self._declares("tts.instruct")):
+            instruct = self._hparam_str("tts.default_instruct") or None
         if instruct is not None:
             if not self._declares("tts.instruct"):
                 raise UnsupportedTask(
@@ -804,6 +812,12 @@ class Text2Speech(Interface):
             if not str(instruct).strip():
                 raise ValueError("instruct is empty; leave it out for the model's own voice.")
             inputs["instruct"] = [float(i) for i in self._model.tokenize(str(instruct))]
+        if language is None and contract.get("text_frontend") == "vocab" and contract.get("languages"):
+            language = self._hparam_str("tts.default_language") or None
+            if language is not None and language not in contract["languages"]:
+                raise ValueError(f"{self._model.path.name} names {language!r} as its default language "
+                                 f"(`loom.tts.default_language`) but does not declare it; re-export it, or "
+                                 f"pass language= with a code from model.contract['languages'].")
         if language is not None and contract.get("text_frontend") == "vocab" and contract.get("languages"):
             declared = list(contract["languages"])
             if language not in declared:
@@ -1010,6 +1024,15 @@ class Text2Speech(Interface):
             return bool(self._model.hparam(key, "str"))
         except Exception:
             return False
+
+    def _hparam_str(self, key: str) -> str:
+        """A string hparam, or "" when the file does not carry it -- the defaults a file names for a call
+        that leaves an argument out (`tts.default_language`, `tts.default_instruct`); without one the
+        model's own behaviour for the missing argument applies, as it always did."""
+        try:
+            return str(self._model.hparam(key, "str"))
+        except Exception:
+            return ""
 
     def _reference_mode(self) -> str:
         try:
