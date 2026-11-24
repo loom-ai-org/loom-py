@@ -14,7 +14,7 @@
 <p align="center">
   <a href="https://pypi.org/project/loom-py-rt/"><img alt="PyPI" src="https://img.shields.io/pypi/v/loom-py-rt?include_prereleases&color=0969da"></a>
   <img alt="Python 3.10 to 3.13" src="https://img.shields.io/badge/python-3.10%20%E2%80%93%203.13-3776ab">
-  <a href="https://huggingface.co/loom-ai-org"><img alt="Models on Hugging Face" src="https://img.shields.io/badge/%F0%9F%A4%97%20models-64-ffcc4d"></a>
+  <a href="https://huggingface.co/loom-ai-org"><img alt="Models on Hugging Face" src="https://img.shields.io/badge/%F0%9F%A4%97%20models-77-ffcc4d"></a>
   <a href="https://github.com/loom-ai-org/loom-py/blob/main/LICENSE"><img alt="MIT licence" src="https://img.shields.io/badge/licence-MIT-1a7f37"></a>
 </p>
 
@@ -27,7 +27,7 @@ tts = loom.Model.from_pretrained("loom-ai-org/pocket-tts-loom", "pocket-tts-q8_0
 tts.text2speech.infer("Hello from a Raspberry Pi!").save("hello.wav")
 ```
 
-* **64 ready-to-run models** on [Hugging Face](https://huggingface.co/loom-ai-org): speech recognition,
+* **77 ready-to-run models** on [Hugging Face](https://huggingface.co/loom-ai-org): speech recognition,
   text to speech, voice activity, speaker and language id, music, codecs and small language models.
 * **One call per task**, the same for every model that does it, with long audio, timestamps, voices
   and chat templates handled for you.
@@ -47,12 +47,13 @@ pip install "loom-py-rt[hub]"          # + from_pretrained() from the Hugging Fa
 | Extra | Adds |
 |---|---|
 | `[hub]` | `loom.Model.from_pretrained(...)` |
-| `[phonemes]` | text input for the models that take phonemes (Kokoro, Piper VITS, sanoTTS, Vocetta2, Matcha, StyleTTS2) |
+| `[phonemes]` | text input for the models that take phonemes (Kokoro, Paradee, Piper VITS, Vaniq-Edge, sanoTTS, Vocetta2, tiny-voca, AuroraTTS, Matcha, StyleTTS2) |
 | `[vulkan]` · `[cuda]` · `[metal]` | a GPU backend, as a small add-on package |
 
-Wheels cover Linux x86-64 and ARM64 (Raspberry Pi 3/4/5 on 64-bit Raspberry Pi OS, Jetson, Graviton),
-and macOS on Apple Silicon and Intel, for CPython 3.10 to 3.13. The **Raspberry Pi Zero / Zero W / Pi 1**
-wheel is a release asset, because PyPI does not accept ARMv6 wheels:
+Wheels on PyPI cover Linux x86-64 and ARM64 (Raspberry Pi 3/4/5 on 64-bit Raspberry Pi OS, Jetson,
+Graviton), and macOS on Apple Silicon and Intel, for CPython 3.10 to 3.13. Two more are assets on the
+[release page](https://github.com/loom-ai-org/loom-py/releases/latest). The **Raspberry Pi Zero / Zero W /
+Pi 1** wheel is one, because PyPI does not accept ARMv6 wheels:
 
 <!-- The version in the wheel filename below is derived from the repo-root `VERSION` file by
      `python packaging/version.py --set <version>`; tests/ci/test_version_consistency.py fails
@@ -61,8 +62,14 @@ wheel is a release asset, because PyPI does not accept ARMv6 wheels:
 pip install https://github.com/loom-ai-org/loom-py/releases/latest/download/loom_py_rt-1.0.0-cp311-cp311-linux_armv6l.whl
 ```
 
-Windows x64 builds from a checkout but has no published wheels yet. Which CPU kernels a machine gets,
-and every platform detail, is in
+**Windows x64** is the other, for CPython 3.12, with a Vulkan backend wheel beside it:
+
+```sh
+pip install "loom-py-rt[hub] @ https://github.com/loom-ai-org/loom-py/releases/latest/download/loom_py_rt-1.0.0-cp312-cp312-win_amd64.whl"
+pip install https://github.com/loom-ai-org/loom-py/releases/latest/download/loom_py_rt_vulkan-1.0.0-py3-none-win_amd64.whl  # optional GPU
+```
+
+Which CPU kernels a machine gets, and every platform detail, is in
 [docs/PLATFORMS.md](https://github.com/loom-ai-org/loom-py/blob/main/docs/PLATFORMS.md).
 
 ## What you can do with it
