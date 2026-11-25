@@ -1,7 +1,7 @@
 """VERSION is the version, and this is what makes that true rather than aspirational.
 
 The four published packages pin each other by EXACT version, in a circle (packaging/README.md), so
-one release number is written in eleven places in two spellings across five files. `VERSION` plus
+one release number is written in thirteen places in two spellings across five files. `VERSION` plus
 `packaging/version.py --set` is how it gets written; this test is why nothing else can. It is the
 half that catches a hand edit -- a bumped `pyproject.toml` with the README's ARMv6 wheel URL left
 behind publishes a 404, and only for the users with the smallest boards.

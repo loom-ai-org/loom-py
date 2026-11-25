@@ -71,14 +71,14 @@ python packaging/version.py                    # the check: is every copy in ste
 The reason it needs a tool at all is that this is a **circular exact-pin set**. The base package and
 the three backends pin each other by exact version, in two spellings — `version = "1.0.0-rc11"` and
 the normalised `== 1.0.0rc11` — so bumping any subset publishes a package that resolves against a
-version nobody released. That is **eleven copies of one number across five files**:
+version nobody released. That is **thirteen copies of one number across five files**:
 
 ```
 pyproject.toml                     version, + the vulkan/cuda/metal extras' pins (4)
 packaging/rt-cuda/pyproject.toml   version, + its loom-py-rt pin                 (2)
 packaging/rt-vulkan/pyproject.toml version, + its loom-py-rt pin                 (2)
 packaging/rt-metal/pyproject.toml  version, + its loom-py-rt pin                 (2)
-README.md                          the ARMv6 wheel's install URL                 (1)
+README.md                          the ARMv6 and the two Windows wheel URLs      (3)
 ```
 
 They stay literal text on purpose. scikit-build-core can read a version out of a file at build time,

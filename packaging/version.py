@@ -5,9 +5,10 @@ WHY THIS EXISTS. The four published packages -- `loom-py-rt` and the `-cuda`/`-v
 backends -- pin each other by EXACT version, in a circle, because a backend `.so` links
 `libggml-base.so` and ggml makes no ABI promise across revisions (packaging/README.md, "Two things
 that are not negotiable"). A circular exact-pin set means a release is not four independent numbers
-but one number written in eleven places, in TWO spellings, across FIVE files -- and bumping any subset
+but one number written in thirteen places, in TWO spellings, across FIVE files -- and bumping any subset
 publishes a package that resolves against a version nobody released. That arithmetic grew from seven
-strings to ten to eleven as packages were added (rt-metal, then the ARMv6 wheel URL in README.md),
+strings to ten to eleven to thirteen as packages were added (rt-metal, the ARMv6 wheel URL in README.md,
+then the two Windows wheel URLs),
 which is the shape of a thing that should not be counted by hand at all.
 
 So `VERSION` at the repo root is the version, and everything else is derived:
@@ -92,6 +93,11 @@ SITES = (
     # the moment the release ships, and only for the users with the smallest boards.
     Site("README.md", r"loom_py_rt-(?P<v>[^-]+)-cp311-cp311-linux_armv6l\.whl", "pep440",
          "the ARMv6 wheel's install URL"),
+    # The same trap for Windows: its wheels are release assets too (built off CI, not on PyPI).
+    Site("README.md", r"loom_py_rt-(?P<v>[^-]+)-cp312-cp312-win_amd64\.whl", "pep440",
+         "the Windows wheel's install URL"),
+    Site("README.md", r"loom_py_rt_vulkan-(?P<v>[^-]+)-py3-none-win_amd64\.whl", "pep440",
+         "the Windows Vulkan wheel's install URL"),
 )
 
 

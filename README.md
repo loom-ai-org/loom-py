@@ -14,7 +14,7 @@
 <p align="center">
   <a href="https://pypi.org/project/loom-py-rt/"><img alt="PyPI" src="https://img.shields.io/pypi/v/loom-py-rt?include_prereleases&color=0969da"></a>
   <img alt="Python 3.10 to 3.13" src="https://img.shields.io/badge/python-3.10%20%E2%80%93%203.13-3776ab">
-  <a href="https://huggingface.co/loom-ai-org"><img alt="Models on Hugging Face" src="https://img.shields.io/badge/%F0%9F%A4%97%20models-64-ffcc4d"></a>
+  <a href="https://huggingface.co/loom-ai-org"><img alt="Models on Hugging Face" src="https://img.shields.io/badge/%F0%9F%A4%97%20models-77-ffcc4d"></a>
   <a href="https://github.com/loom-ai-org/loom-py/blob/main/LICENSE"><img alt="MIT licence" src="https://img.shields.io/badge/licence-MIT-1a7f37"></a>
 </p>
 
@@ -27,7 +27,7 @@ tts = loom.Model.from_pretrained("loom-ai-org/pocket-tts-loom", "pocket-tts-q8_0
 tts.text2speech.infer("Hello from a Raspberry Pi!").save("hello.wav")
 ```
 
-* **64 ready-to-run models** on [Hugging Face](https://huggingface.co/loom-ai-org): speech recognition,
+* **77 ready-to-run models** on [Hugging Face](https://huggingface.co/loom-ai-org): speech recognition,
   text to speech, voice activity, speaker and language id, music, codecs and small language models.
 * **One call per task**, the same for every model that does it, with long audio, timestamps, voices
   and chat templates handled for you.
@@ -47,12 +47,13 @@ pip install "loom-py-rt[hub]"          # + from_pretrained() from the Hugging Fa
 | Extra | Adds |
 |---|---|
 | `[hub]` | `loom.Model.from_pretrained(...)` |
-| `[phonemes]` | text input for the models that take phonemes (Kokoro, Piper VITS, sanoTTS, Vocetta2, Matcha, StyleTTS2) |
+| `[phonemes]` | text input for the models that take phonemes (Kokoro, Paradee, Piper VITS, Vaniq-Edge, sanoTTS, Vocetta2, tiny-voca, AuroraTTS, Matcha, StyleTTS2) |
 | `[vulkan]` · `[cuda]` · `[metal]` | a GPU backend, as a small add-on package |
 
-Wheels cover Linux x86-64 and ARM64 (Raspberry Pi 3/4/5 on 64-bit Raspberry Pi OS, Jetson, Graviton),
-and macOS on Apple Silicon and Intel, for CPython 3.10 to 3.13. The **Raspberry Pi Zero / Zero W / Pi 1**
-wheel is a release asset, because PyPI does not accept ARMv6 wheels:
+Wheels on PyPI cover Linux x86-64 and ARM64 (Raspberry Pi 3/4/5 on 64-bit Raspberry Pi OS, Jetson,
+Graviton), and macOS on Apple Silicon and Intel, for CPython 3.10 to 3.13. Two more are assets on the
+[release page](https://github.com/loom-ai-org/loom-py/releases/latest). The **Raspberry Pi Zero / Zero W /
+Pi 1** wheel is one, because PyPI does not accept ARMv6 wheels:
 
 <!-- The version in the wheel filename below is derived from the repo-root `VERSION` file by
      `python packaging/version.py --set <version>`; tests/ci/test_version_consistency.py fails
@@ -61,8 +62,14 @@ wheel is a release asset, because PyPI does not accept ARMv6 wheels:
 pip install https://github.com/loom-ai-org/loom-py/releases/latest/download/loom_py_rt-1.0.0-cp311-cp311-linux_armv6l.whl
 ```
 
-Windows x64 builds from a checkout but has no published wheels yet. Which CPU kernels a machine gets,
-and every platform detail, is in
+**Windows x64** is the other, for CPython 3.12, with a Vulkan backend wheel beside it:
+
+```sh
+pip install "loom-py-rt[hub] @ https://github.com/loom-ai-org/loom-py/releases/latest/download/loom_py_rt-1.0.0-cp312-cp312-win_amd64.whl"
+pip install https://github.com/loom-ai-org/loom-py/releases/latest/download/loom_py_rt_vulkan-1.0.0-py3-none-win_amd64.whl  # optional GPU
+```
+
+Which CPU kernels a machine gets, and every platform detail, is in
 [docs/PLATFORMS.md](https://github.com/loom-ai-org/loom-py/blob/main/docs/PLATFORMS.md).
 
 ## What you can do with it
@@ -212,8 +219,8 @@ Both engines were run on the same board, at the same precision, with the same th
 output length. **A bar past the dashed line means loom is faster**:
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/loom-ai-org/loom.cpp/7fcaf3d4438675689fb429882b9cc581187f0b77/assets/charts/pi4-vs-onnxruntime-dark.svg">
-  <img alt="Raspberry Pi 4: loom against onnxruntime. F32: VITS 1.36x, Pocket TTS 2.06x, Qwen3 1.06x, Moonshine 1.13x, whisper 1.00x, Citrinet 0.65x, tiny-voca 1.30x, Paradee 1.05x. Int8: VITS 5.04x, Pocket TTS 3.27x, Qwen3 3.45x, Moonshine 1.75x, whisper 1.17x, Citrinet 9.31x, tiny-voca 1.81x, Paradee 1.22x." src="https://raw.githubusercontent.com/loom-ai-org/loom.cpp/7fcaf3d4438675689fb429882b9cc581187f0b77/assets/charts/pi4-vs-onnxruntime-light.svg" width="760">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/loom-ai-org/loom.cpp/35cdf3baa0d980026ec3abcc9819e865baa55cf8/assets/charts/pi4-vs-onnxruntime-dark.svg">
+  <img alt="Raspberry Pi 4: loom against onnxruntime. F32: VITS 1.36x, Pocket TTS 2.06x, Qwen3 1.06x, Moonshine 1.13x, whisper 1.00x, Citrinet 0.65x, tiny-voca 1.30x, Paradee 1.05x. Int8: VITS 5.04x, Pocket TTS 3.27x, Qwen3 3.45x, Moonshine 1.75x, whisper 1.17x, Citrinet 9.31x, tiny-voca 1.81x, Paradee 1.22x." src="https://raw.githubusercontent.com/loom-ai-org/loom.cpp/35cdf3baa0d980026ec3abcc9819e865baa55cf8/assets/charts/pi4-vs-onnxruntime-light.svg" width="760">
 </picture>
 
 Distilled Pocket TTS on a Pi 4 synthesises 4.8 s of speech in **0.59 s (2M)**, **1.07 s (7M)** and
@@ -223,8 +230,8 @@ matrix products on its 12 QPUs
 ([ggml-vc4](https://github.com/loom-ai-org/loom.cpp/tree/main/backends/ggml-vc4)) and the rest on the CPU.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/loom-ai-org/loom.cpp/7fcaf3d4438675689fb429882b9cc581187f0b77/assets/charts/pi-zero-rtf-dark.svg">
-  <img alt="Raspberry Pi Zero W real-time factors, CPU then CPU plus VC4: WakeHuBERT 0.17, 0.12; Silero VAD 0.18, 0.16; sanoTTS heartnano 0.18, 0.17; sanoTTS heart 0.52, 0.27; Citrinet-256 0.65, 0.31; sanoTTS thorsten 0.72, 0.35; sanoTTS amy 2.30, 0.69; Moonshine tiny 1.80, 1.17; Conformer-CTC small 1.90, 1.39; Pocket TTS 2m 1.84, 1.39; VITS piper 5.70, 1.69; tiny-voca 2.44, 1.95; Paradee 2.54, 1.96; Pocket TTS 7m 3.94, 2.92; Pocket TTS 18m 4.85, 3.82." src="https://raw.githubusercontent.com/loom-ai-org/loom.cpp/7fcaf3d4438675689fb429882b9cc581187f0b77/assets/charts/pi-zero-rtf-light.svg" width="760">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/loom-ai-org/loom.cpp/35cdf3baa0d980026ec3abcc9819e865baa55cf8/assets/charts/pi-zero-rtf-dark.svg">
+  <img alt="Raspberry Pi Zero W real-time factors, CPU then CPU plus VC4: WakeHuBERT 0.17, 0.12; Silero VAD 0.18, 0.16; sanoTTS heartnano 0.18, 0.17; sanoTTS heart 0.52, 0.27; Citrinet-256 0.65, 0.31; sanoTTS thorsten 0.72, 0.35; sanoTTS amy 2.30, 0.69; Moonshine tiny 1.80, 1.17; Conformer-CTC small 1.90, 1.39; Pocket TTS 2m 1.84, 1.39; VITS piper 5.70, 1.69; tiny-voca 2.44, 1.95; Paradee 2.54, 1.96; Pocket TTS 7m 3.94, 2.92; Pocket TTS 18m 4.85, 3.82." src="https://raw.githubusercontent.com/loom-ai-org/loom.cpp/35cdf3baa0d980026ec3abcc9819e865baa55cf8/assets/charts/pi-zero-rtf-light.svg" width="760">
 </picture>
 
 <sub>Pi Zero: each device's faster precision (F32 or Q8_0_PC), the median of three launches with the order
@@ -268,6 +275,11 @@ Design notes, decisions and open work for all three repos live in
 | [**loom.cpp**](https://github.com/loom-ai-org/loom.cpp) | the engine, vendored here as a submodule |
 | [**loom-py**](https://github.com/loom-ai-org/loom-py) | this one |
 | [**loom-exporter**](https://github.com/loom-ai-org/loom-exporter) | turns a PyTorch checkpoint into a GGUF this runs |
+
+## Acknowledgements
+
+The coding, debugging and documentation of loom-py were assisted by
+[Claude Code](https://claude.com/claude-code) agents.
 
 ## Licence
 

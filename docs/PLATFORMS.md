@@ -15,6 +15,7 @@ CPython 3.10–3.13, on:
 | macOS on Apple Silicon, ≥ 14.0 | `macosx_14_0_arm64` | M1 through M4, verified on an M1 Pro |
 | macOS on Apple Intel, ≥ 14.0 | `macosx_14_0_x86_64` | built and imported in CI — see below |
 | Linux ARMv6, glibc ≥ 2.36 | `linux_armv6l` | **Raspberry Pi Zero / Zero W / Pi 1** — a release asset, not a PyPI install; see below |
+| Windows x64, CPython 3.12 only | `win_amd64` | x86-64 PCs, verified on a Celeron N4100 — a release asset, not a PyPI install; see below |
 
 There is no per-CPU choice to make. The wheel ships every `libggml-cpu-*.so` variant ggml builds for
 the architecture and picks one at import by scoring each against the CPU's own feature flags, so the
@@ -83,7 +84,10 @@ Nothing extra is installed on a Pi: the CPU is the backend. `[vulkan]` does reso
 Pi 5's V3D exposes Vulkan through Mesa, but no measurement here says that is worth doing — the CPU
 path is the supported one.
 
-**Windows has no published wheels yet, but x64 builds from a checkout** with the Visual Studio 2022
+**Windows x64 wheels are release assets, not on PyPI**, for CPython 3.12 only: a base wheel and a
+Vulkan backend wheel (`loom_py_rt_vulkan-…-py3-none-win_amd64.whl`), installed by URL as the
+[README](../README.md#install) shows. They are built on the N4100 below rather than in CI, which is why
+there is one Python version. Other versions build from a checkout with the Visual Studio 2022
 Build Tools ("Desktop development with C++") and Git on the PATH. `python -m build --wheel` works from a
 plain prompt (no developer prompt needed), and the wheel it writes installs with `pip`. The wheel ships
 `ggml-cpu-*.dll` for nine x86 variants and picks one at import, as on Linux. `packaging/rt-vulkan`
