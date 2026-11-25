@@ -276,6 +276,11 @@ Design notes, decisions and open work for all three repos live in
 | [**loom-py**](https://github.com/loom-ai-org/loom-py) | this one |
 | [**loom-exporter**](https://github.com/loom-ai-org/loom-exporter) | turns a PyTorch checkpoint into a GGUF this runs |
 
+## Acknowledgements
+
+The coding, debugging and documentation of loom-py were assisted by
+[Claude Code](https://claude.com/claude-code) agents.
+
 ## Licence
 
 MIT, see [LICENSE](https://github.com/loom-ai-org/loom-py/blob/main/LICENSE). Each model on the Hub keeps the
